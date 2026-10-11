@@ -66,6 +66,23 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     steps:
+      # Hosted Ubuntu runners ship ~14GB free; the golden qcow2 (~2GB raw, grown
+      # to give the appliance room) plus the downloaded Debian base image exhaust
+      # it. Reclaim >30GB by dropping pre-installed toolchains this build never
+      # uses. Runs FIRST, before any checkout or build.
+      - name: Free disk space (reclaim >30GB on the runner)
+        run: |
+          echo "[disk] before:"; df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
       - name: Install libguestfs + qemu toolchain (+ runner workarounds)
         uses: ./.github/actions/libguestfs-runner
@@ -80,6 +97,15 @@ jobs:
           make golden
       - name: No-secret scan (golden)
         run: ci/no-secret-scan.sh out/vacti-engine-${VACTI_RELEASE}-golden.qcow2
+      - name: Reclaim intermediate build files before upload
+        # Only out/vacti-engine-<ver>-golden.qcow2 is needed downstream. The
+        # downloaded Debian base image + virt-customize work tree under
+        # distro/.build are no longer required and would otherwise be snapshotted
+        # by later steps; drop them to leave headroom for the upload.
+        run: |
+          echo "[disk] before cleanup:"; df -h /
+          rm -rf distro/.build || true
+          echo "[disk] after cleanup:"; df -h /
       - name: Upload golden as a build artifact (passed to fan-out jobs)
         uses: actions/upload-artifact@v4
         with:
@@ -105,6 +131,22 @@ jobs:
         # (OVA conversions skipped). env is unavailable here, so read the input.
         form: ${{ fromJSON((github.event.inputs.forms || 'all') == 'all' && '["cloud","vmware-ova","vbox-ova"]' || '["cloud"]') }}
     steps:
+      # Same squeeze as golden: the fetched golden qcow2 (~2GB) plus the
+      # converted form (raw.gz / streamOptimized VMDK / .ova) blow past the
+      # runner's ~14GB free. Reclaim >30GB first, before checkout or download.
+      - name: Free disk space (reclaim >30GB on the runner)
+        run: |
+          echo "[disk] before:"; df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
       - name: Install toolchain (+ runner workarounds)
         uses: ./.github/actions/libguestfs-runner
@@ -117,7 +159,19 @@ jobs:
           path: out
       - name: Convert -> ${{ matrix.form }}
         run: make ${{ matrix.form }}
+      - name: Reclaim golden disk after conversion
+        # The golden qcow2 (~2GB) is only the conversion SOURCE - it is neither
+        # scanned (the scan skips *golden*) nor uploaded by this job. Drop it now
+        # so the mandatory scan (which gzip-decompresses raw.gz / qemu-img
+        # converts the OVA's VMDK to a temp raw) and the upload have headroom.
+        run: |
+          echo "[disk] before cleanup:"; df -h /
+          rm -f out/*golden*.qcow2 || true
+          echo "[disk] after cleanup:"; df -h /
       - name: No-secret scan (${{ matrix.form }})  # MANDATORY, non-negotiable
+        # no-secret-scan.sh guestmounts each artifact read-only and unmounts +
+        # removes its temp mountpoints via a trap on EXIT, so nothing stays
+        # mounted or staged before the upload step.
         run: |
           shopt -s nullglob
           for a in out/*.qcow2 out/*.raw.gz out/*.ova; do
