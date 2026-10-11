@@ -86,7 +86,11 @@ chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/opt/vacti-build/a
 # --- 4. the provisioning script that runs INSIDE the guest --------------------
 # Build-time apt wiring (source + auth.conf) is written here and REMOVED before
 # finalize. Mirrors the engine bootstrap-apt.sh configure_apt exactly.
-APT_AUTHORITY="$(printf '%s' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://([^/]+).*#\1#')"
+# auth.conf `machine` must match the sources.list path by host+path-PREFIX, so
+# derive it from the FULL repo URL (scheme stripped, /apt appended) - NOT host
+# only. VACTI_APT_URL=https://its-ai.site/api/pentest -> its-ai.site/api/pentest/apt
+# which is a prefix of the sources path its-ai.site/api/pentest/apt (match).
+APT_MACHINE="$(printf '%s/apt' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://##')"
 APT_SCHEME_HOST="${VACTI_APT_URL%/}"
 cat > "${WORK}/provision.sh" <<PROV
 #!/usr/bin/env bash
@@ -113,7 +117,7 @@ umask 077
 # lives under .build/, is gitignored, and is shredded by build-golden.sh when
 # virt-customize returns). It is written to auth.conf INSIDE the guest only for
 # the apt pull and removed by FINALIZE below; the no-secret scan re-verifies.
-printf 'machine %s/apt login vacti password %s\n' "${APT_AUTHORITY}" "${VACTI_APT_PRODUCER_TOKEN}" > /etc/apt/auth.conf.d/vacti-engine.conf
+printf 'machine %s login vacti password %s\n' "${APT_MACHINE}" "${VACTI_APT_PRODUCER_TOKEN}" > /etc/apt/auth.conf.d/vacti-engine.conf
 chmod 0600 /etc/apt/auth.conf.d/vacti-engine.conf
 umask 022
 printf 'deb [trusted=yes] %s/apt ./\n' "${APT_SCHEME_HOST}" > /etc/apt/sources.list.d/vacti-engine.list
