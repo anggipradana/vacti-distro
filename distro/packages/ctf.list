@@ -1,0 +1,56 @@
+# vacti arsenal - CTF (VACTI_CTF_ARSENAL=1)
+#
+# The apt-installable half of the CTF tool set for kind=ctf engagements. These
+# are LIGHTWEIGHT tools from Debian 13 (trixie) main, plus a couple that resolve
+# from the pinned Kali apt source (Option A, prio 100) when present. The non-apt
+# half (ruby gems, pipx tools, GEF, exploitdb git fallback) is installed by
+# golden-image/install-ctf-arsenal.sh, which reads THIS file for its apt step.
+#
+# Default OFF. Multi-GB / GUI tools (sagemath, ghidra, stegsolve) are NEVER baked
+# here; a CTF agent self-heals or the operator installs them deliberately.
+#
+# One package per line; blank lines and # comments are ignored (same contract as
+# web-lean.list / full.list).
+
+# --- Forensics / carving ---
+foremost
+scalpel
+sleuthkit
+binwalk
+
+# --- Steganography ---
+steghide
+libimage-exiftool-perl
+
+# --- Crypto ---
+python3-pycryptodome
+
+# --- Pwn / exploitation ---
+python3-pwntools
+python3-ropgadget
+gdb
+nasm
+
+# --- Reverse engineering ---
+# radare2 is absent from Debian trixie main; it resolves from the pinned Kali
+# apt source (Option A). With VACTI_NO_KALI_REPO=1 it is skipped best-effort.
+radare2
+ltrace
+strace
+
+# --- Password cracking ---
+john
+hashcat
+
+# --- Networking helper ---
+netcat-openbsd
+
+# --- Exploit DB / searchsploit ---
+# Absent from Debian main; resolves from the pinned Kali source. The installer
+# falls back to a git clone of exploit-database when apt cannot supply it.
+exploitdb
+
+# --- Toolchain the installer's gem/pipx steps need (idempotent if present) ---
+ruby
+ruby-dev
+python3-pip

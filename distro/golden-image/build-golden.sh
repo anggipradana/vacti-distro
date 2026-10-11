@@ -99,7 +99,15 @@ if [[ ! "${VACTI_NO_KALI_REPO}" =~ ^(1|true|yes|on)$ ]]; then
   mkdir -p "${STAGE}/opt/vacti-build/kali-repo"
   cp -a "${PKG_DIR}/kali-repo/kali.list" "${PKG_DIR}/kali-repo/kali-pin.pref" "${STAGE}/opt/vacti-build/kali-repo/"
 fi
-chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/opt/vacti-build/apply-branding.sh"
+# CTF arsenal (opt-in): stage the installer + its apt list; provision.sh runs it
+# only when VACTI_CTF_ARSENAL=1. Both live under /opt/vacti-build, which FINALIZE
+# rm -rf's, so no CTF tool manifest/installer is left on the shipped image.
+if [[ "${VACTI_CTF_ARSENAL}" =~ ^(1|true|yes|on)$ ]]; then
+  cp -a "${HERE}/install-ctf-arsenal.sh" "${STAGE}/opt/vacti-build/install-ctf-arsenal.sh"
+  cp -a "${PKG_DIR}/ctf.list"            "${STAGE}/opt/vacti-build/ctf.list"
+  chmod 0755 "${STAGE}/opt/vacti-build/install-ctf-arsenal.sh"
+fi
+chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/vacti-swap-firstboot" "${STAGE}/opt/vacti-build/apply-branding.sh"
 
 # --- 4. the provisioning script that runs INSIDE the guest --------------------
 # Build-time apt wiring (source + auth.conf) is written here and REMOVED before
@@ -201,6 +209,16 @@ apt-get install -y --no-install-recommends ${VACTI_ENGINE_PKG} "\${PKGS[@]}" || 
   apt-get install -y --no-install-recommends ${VACTI_ENGINE_PKG}
   for p in "\${PKGS[@]}"; do apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] \$p not installable here (runtime self-heal will cover it)"; done
 }
+
+# CTF arsenal (opt-in): run the staged installer only when VACTI_CTF_ARSENAL=1.
+# The flag value is baked by the HOST into this build-only script. The installer
+# + ctf.list live under /opt/vacti-build, which FINALIZE rm -rf's, so no CTF
+# tooling manifest leaks onto the shipped image. All CTF installs are best-effort.
+VACTI_CTF_ARSENAL="${VACTI_CTF_ARSENAL}"
+if [[ "\${VACTI_CTF_ARSENAL}" =~ ^(1|true|yes|on)\$ ]] && [[ -x /opt/vacti-build/install-ctf-arsenal.sh ]]; then
+  echo "[prov] installing CTF arsenal (VACTI_CTF_ARSENAL=1)"
+  /opt/vacti-build/install-ctf-arsenal.sh /opt/vacti-build/ctf.list || echo "[prov][warn] CTF arsenal install partial (best-effort)"
+fi
 
 # guest integration (both hypervisors coexist in one rootfs) + tailscale client
 echo "[prov] guest tools + tailscale client (no auth key baked)"
