@@ -57,9 +57,12 @@ fi
 #    chroot via an archives hook; 0900-remove-build-auth strips it pre-squashfs.
 [[ -n "${VACTI_APT_PRODUCER_TOKEN:-}" ]] || { echo "VACTI_APT_PRODUCER_TOKEN unset (needed at build to pull vacti-engine; never baked)" >&2; exit 1; }
 install -d "${HERE}/config/includes.chroot/etc/apt/auth.conf.d"
-APT_AUTHORITY="$(printf '%s' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://([^/]+).*#\1#')"
+# auth.conf `machine` must match the sources.list path by host+path-PREFIX, so
+# derive it from the FULL repo URL (scheme stripped, /apt appended) - NOT host
+# only - or apt never sends the credential (401 on the engine .deb pull).
+APT_MACHINE="$(printf '%s/apt' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://##')"
 umask 077
-printf 'machine %s/apt login vacti password %s\n' "$APT_AUTHORITY" "$VACTI_APT_PRODUCER_TOKEN" \
+printf 'machine %s login vacti password %s\n' "$APT_MACHINE" "$VACTI_APT_PRODUCER_TOKEN" \
   > "${HERE}/config/includes.chroot/etc/apt/auth.conf.d/vacti-engine.conf"
 umask 022
 echo "[iso] NOTE: auth.conf staged into the BUILD chroot only; 0900-remove-build-auth deletes it before squashfs."

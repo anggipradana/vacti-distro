@@ -21,6 +21,14 @@ on:
         description: "Bake the full arsenal (1) or lean web+infra (0)"
         required: false
         default: "0"
+      forms:
+        description: "Which image forms to build"
+        required: false
+        type: choice
+        default: "golden+cloud"
+        options:
+          - "golden+cloud"   # cheap first run: lint -> golden -> cloud -> smoke -> publish
+          - "all"            # full matrix: golden + cloud/vmware-ova/vbox-ova + iso(headless,gui)
   repository_dispatch:
     types: [engine-deb-published]
 
@@ -30,6 +38,12 @@ permissions:
 env:
   VACTI_RELEASE: ${{ github.event.inputs.release || github.event.client_payload.release || '0.1.0' }}
   VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '0' }}
+  # Form scoping. workflow_dispatch defaults to the cheap golden+cloud path; a
+  # repository_dispatch (engine-deb-published) has no input, so it falls back to
+  # 'all' - the full matrix, exactly as before. NOTE: the `env` context is not
+  # available in a job's `strategy.matrix`, so the fan-out matrix and the iso
+  # job gate evaluate `github.event.inputs.forms` directly (same default).
+  VACTI_FORMS: ${{ github.event.inputs.forms || 'all' }}
   VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
   # Build-time private-repo credential. A build-time secret, NEVER baked into an
   # image (the build strips it before finalize; the no-secret scan re-verifies).
@@ -81,7 +95,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        form: [cloud, vmware-ova, vbox-ova]
+        # forms=all -> cloud + both OVA forms; forms=golden+cloud -> cloud only
+        # (OVA conversions skipped). env is unavailable here, so read the input.
+        form: ${{ fromJSON((github.event.inputs.forms || 'all') == 'all' && '["cloud","vmware-ova","vbox-ova"]' || '["cloud"]') }}
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
@@ -114,6 +130,9 @@ jobs:
   # --- the installable ISO: live-build in a privileged debian:trixie container -
   iso:
     needs: lint
+    # ISO (live-build, both SKUs) only on the full-matrix path; skipped for the
+    # cheap golden+cloud first run.
+    if: ${{ (github.event.inputs.forms || 'all') == 'all' }}
     runs-on: ubuntu-latest
     container:
       image: debian:trixie
@@ -152,6 +171,9 @@ jobs:
   # --- smoke boot: prove each image enrolls + claims a job vs staging ----------
   smoke:
     needs: [fanout, iso]
+    # Run once the forms actually built are green. On the golden+cloud path the
+    # iso job is skipped, so accept skipped-iso; fanout must have succeeded.
+    if: ${{ always() && needs.fanout.result == 'success' && (needs.iso.result == 'success' || needs.iso.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
