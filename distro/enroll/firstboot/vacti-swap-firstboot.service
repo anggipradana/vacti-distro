@@ -1,0 +1,28 @@
+# vacti-swap-firstboot.service - oneshot, sizes + enables a disk swapfile on the
+# FIRST boot (RAM/disk are deploy-time facts; genericcloud grows the rootfs on
+# first boot). zram is the primary cushion and comes up independently via
+# systemd-zram-generator; this unit adds the lower-priority disk overflow and
+# applies the shipped sysctl/THP tuning. Runs once: the script writes a stamp on
+# success and the unit is gated on its absence, so it retries only if it had to
+# skip (e.g. not enough disk yet).
+[Unit]
+Description=vacti first-boot swapfile sizing (disk overflow cushion + sysctl/THP)
+Documentation=https://vacti.example/docs/appliance
+# Only the disk swapfile step needs the rootfs mounted and (ideally) grown.
+After=local-fs.target
+# Have the cushion in place before the engine starts doing heavy work.
+Before=vacti-engine.service
+# Meaningless inside a container (no own kernel/swap); skip there.
+ConditionVirtualization=!container
+# Run until it succeeds; the script stamps on success and this gates re-runs.
+ConditionPathExists=!/var/lib/vacti/.swap-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vacti-swap-firstboot
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

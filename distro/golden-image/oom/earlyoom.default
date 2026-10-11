@@ -1,0 +1,18 @@
+# /etc/default/earlyoom - userspace OOM backstop for the vacti appliance.
+#
+# On memory+swap pressure earlyoom kills a heavy, RESPAWNABLE child (Chromium /
+# node agent / claude / Caido / JVM) BEFORE the kernel OOM killer fires and
+# picks a victim at random, and it NEVER targets the engine/ssh/tailscale/init
+# supervisors. This mirrors vacti-engine.service's OOMScoreAdjust=-500 at the
+# whole-box level and complements the slice-local OOM-kill contract.
+#
+# IMPORTANT (systemd gotcha): earlyoom.service runs `earlyoom $EARLYOOM_ARGS`
+# and systemd splits $EARLYOOM_ARGS on whitespace with NO shell quote handling,
+# so surrounding quotes would be passed to earlyoom literally and corrupt the
+# regex. The --prefer/--avoid regexes below contain no spaces, so they stay as
+# single argv tokens WITHOUT quotes. Keep them space-free.
+#
+#   -m 5   act when available memory drops below 5%
+#   -s 5   ...and when free swap drops below 5%
+#   -r 60  log a memory report every 60s
+EARLYOOM_ARGS=-m 5 -s 5 -r 60 --prefer ^(chrome|chromium|chromium-browser|chrome_crashpad|node|claude|caido-cli|java)$ --avoid ^(vacti-engine|sshd|tailscaled|systemd|systemd-journald|systemd-logind|dbus-daemon|init)$

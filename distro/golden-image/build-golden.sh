@@ -24,6 +24,7 @@ source "${DISTRO_DIR}/vacti-appliance.env"
 PKG_DIR="${DISTRO_DIR}/packages"
 BRAND_DIR="${DISTRO_DIR}/branding"
 ENROLL_DIR="${DISTRO_DIR}/enroll"
+OOM_DIR="${HERE}/oom"
 WORK="${WORK:-${DISTRO_DIR}/.build/golden}"
 CACHE="${CACHE:-${DISTRO_DIR}/.build/cache}"
 OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
@@ -69,6 +70,9 @@ rm -rf "$STAGE"; mkdir -p \
   "${STAGE}/usr/share/vacti/branding" \
   "${STAGE}/usr/local/sbin" \
   "${STAGE}/etc/systemd/system" \
+  "${STAGE}/etc/sysctl.d" \
+  "${STAGE}/etc/tmpfiles.d" \
+  "${STAGE}/etc/default" \
   "${STAGE}/opt/vacti-build"
 # branding assets -> /usr/share/vacti/branding (apply-branding.sh reads these)
 cp -a "${BRAND_DIR}/os-release" "${BRAND_DIR}/issue" "${BRAND_DIR}/motd" \
@@ -80,6 +84,14 @@ cp -a "${BRAND_DIR}/apply-branding.sh" "${STAGE}/opt/vacti-build/apply-branding.
 # firstboot unit + script
 cp -a "${ENROLL_DIR}/firstboot/vacti-firstboot"          "${STAGE}/usr/local/sbin/vacti-firstboot"
 cp -a "${ENROLL_DIR}/firstboot/vacti-firstboot.service"  "${STAGE}/etc/systemd/system/vacti-firstboot.service"
+# first-boot swapfile sizing (RAM known only at deploy) + its oneshot unit
+cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot"         "${STAGE}/usr/local/sbin/vacti-swap-firstboot"
+cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot.service" "${STAGE}/etc/systemd/system/vacti-swap-firstboot.service"
+# anti-OOM drop-ins (sysctl / zram / THP / earlyoom) baked into the golden image
+cp -a "${OOM_DIR}/sysctl-90-vacti.conf"    "${STAGE}/etc/sysctl.d/90-vacti.conf"
+cp -a "${OOM_DIR}/zram-generator.conf"     "${STAGE}/etc/systemd/zram-generator.conf"
+cp -a "${OOM_DIR}/tmpfiles-vacti-thp.conf" "${STAGE}/etc/tmpfiles.d/vacti-thp.conf"
+cp -a "${OOM_DIR}/earlyoom.default"        "${STAGE}/etc/default/earlyoom"
 # resolve the arsenal list for this build flavour
 "${PKG_DIR}/gen-live-build-list.sh" "${STAGE}/opt/vacti-build/arsenal.list"
 # kali repo files (Option A)
@@ -203,6 +215,17 @@ echo "[prov] branding"
 # enable the first-boot enroll unit (no token baked; it fails loudly without one)
 systemctl enable vacti-firstboot.service 2>/dev/null || true
 
+# ---- anti-OOM: enable the backstops shipped via copy-in --------------------
+echo "[prov] enabling anti-OOM backstops (zram / earlyoom / swapfile firstboot)"
+# earlyoom: userspace OOM killer backstop (config in /etc/default/earlyoom)
+systemctl enable earlyoom.service 2>/dev/null || systemctl enable earlyoom 2>/dev/null || true
+# disk-swapfile sizing on first boot (RAM known only at deploy)
+systemctl enable vacti-swap-firstboot.service 2>/dev/null || true
+# zram: /etc/systemd/zram-generator.conf is a copy-in; systemd-zram-generator
+# instantiates swap zram0 at boot automatically (no explicit enable needed).
+# THP madvise is applied each boot by /etc/tmpfiles.d/vacti-thp.conf.
+systemctl daemon-reload 2>/dev/null || true
+
 # ---- FINALIZE: strip every build-time secret + identity --------------------
 echo "[prov] FINALIZE: removing build-time apt credential + identity"
 rm -f /etc/apt/auth.conf.d/vacti-engine.conf
@@ -214,11 +237,22 @@ rm -rf /root/.claude /home/*/.claude /etc/vacti-engine/.claude 2>/dev/null || tr
 rm -f /var/lib/dbus/machine-id 2>/dev/null || true
 ln -sf /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
 rm -f /etc/ssh/ssh_host_* 2>/dev/null || true
-# clean apt lists + logs
+# clean apt lists + logs + the downloaded .deb archive cache
 apt-get clean
-rm -rf /var/lib/apt/lists/* /var/log/apt/* /tmp/* /var/tmp/* 2>/dev/null || true
+rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /var/log/apt/* /tmp/* /var/tmp/* 2>/dev/null || true
+# LIGHTWEIGHT: drop man/info pages and non-English locales the appliance never
+# needs (copyright/doc trees are kept for licensing compliance).
+rm -rf /usr/share/man/* /usr/share/info/* 2>/dev/null || true
+find /usr/share/locale -mindepth 1 -maxdepth 1 -type d ! -name 'en*' -exec rm -rf {} + 2>/dev/null || true
+# LIGHTWEIGHT: mask periodic/maintenance units that only churn CPU+disk on a
+# single-purpose appliance (the engine self-heals its arsenal via its own path).
+systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer \
+  e2scrub_all.timer e2scrub_reap.service 2>/dev/null || true
 # assert no engine.env / token file leaked in
 rm -f /etc/vacti-engine/engine.env /etc/vacti-engine/enroll.token 2>/dev/null || true
+# LIGHTWEIGHT: discard freed blocks so the later qemu-img -c / virt-sparsify
+# actually reclaims deleted-file extents from the sparse image.
+fstrim -av 2>/dev/null || true
 echo "[prov] done"
 PROV
 chmod 0755 "${WORK}/provision.sh"
@@ -246,7 +280,19 @@ virt-customize --network -a "$GOLDEN" \
 rm -f "${WORK}/provision.sh"
 rm -rf "${STAGE}"
 
-# --- 6. convert back to a compact qcow2 + checksum ----------------------------
+# --- 6. reclaim freed extents, then convert to a compact qcow2 + checksum -----
+# LIGHTWEIGHT: zero/discard free blocks so `qemu-img convert -c` actually sheds
+# the space freed by apt install+clean (otherwise freed extents stay allocated).
+# virt-sparsify --in-place does this in place without ballooning the file to its
+# full virtual size (important on the disk-constrained CI runner). Non-fatal:
+# the in-guest `fstrim -av` in FINALIZE already discards most of it.
+if command -v virt-sparsify >/dev/null 2>&1; then
+  log "virt-sparsify --in-place (reclaim freed extents before compaction)"
+  virt-sparsify --in-place "$GOLDEN" || log "virt-sparsify --in-place failed (non-fatal); continuing to compaction"
+else
+  log "virt-sparsify not available; relying on in-guest fstrim + qemu-img -c"
+fi
+
 log "compacting golden qcow2"
 qemu-img convert -O qcow2 -c "$GOLDEN" "${GOLDEN}.tmp" && mv -f "${GOLDEN}.tmp" "$GOLDEN"
 ( cd "$OUT" && sha256sum "$(basename "$GOLDEN")" > "$(basename "$GOLDEN").sha256" )
