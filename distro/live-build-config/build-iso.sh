@@ -112,6 +112,25 @@ fi
 cd "$HERE"
 echo "[iso] lb config"
 VACTI_ISO_SKU="$SKU" lb config
+
+# Ensure ca-certificates (+ its openssl dep) is in the FIRST-stage debootstrap,
+# so the chroot can TLS-verify the vacti private apt source (its-ai.site behind
+# Cloudflare) on the very first apt update - a minimal debootstrap has no CA
+# store, and without it the HTTPS InRelease fetch fails and vacti-engine can
+# never be indexed ("held broken packages"). The `--bootstrap-include` CLI flag
+# was dropped in this live-build, but the underlying LB_BOOTSTRAP_INCLUDE config
+# variable (consumed by `lb bootstrap` -> debootstrap --include) is stable.
+if [[ -f config/bootstrap ]]; then
+  if grep -q '^LB_BOOTSTRAP_INCLUDE=' config/bootstrap; then
+    sed -i 's/^LB_BOOTSTRAP_INCLUDE=.*/LB_BOOTSTRAP_INCLUDE="ca-certificates"/' config/bootstrap
+  else
+    echo 'LB_BOOTSTRAP_INCLUDE="ca-certificates"' >> config/bootstrap
+  fi
+  echo "[iso] set LB_BOOTSTRAP_INCLUDE=ca-certificates in config/bootstrap"
+else
+  echo "[iso][WARN] config/bootstrap not found after lb config; cannot pin ca-certificates into debootstrap" >&2
+fi
+
 echo "[iso] lb build (this is the heavy step; CI only)"
 lb build 2>&1 | tee build.log
 

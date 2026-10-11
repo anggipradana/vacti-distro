@@ -145,7 +145,10 @@ validate_one() {
   fi
 
   # --- 7. VMDK is a readable VMDK -------------------------------------------
-  local qfmt; qfmt="$(qemu-img info --output=json "$vmdk" 2>/dev/null | sed -n 's/.*"format": *"\([a-z]*\)".*/\1/p' | head -1)"
+  # Use the human-readable "file format: vmdk" line, not --output=json: modern
+  # qemu-img JSON lists a "children" file-protocol node whose "format":"file"
+  # sorts first, so a naive first-match parse misreads the real disk format.
+  local qfmt; qfmt="$(qemu-img info "$vmdk" 2>/dev/null | sed -n 's/^file format: *//p' | head -1)"
   [[ "$qfmt" == "vmdk" ]] && ok "${base}: VMDK readable by qemu-img (format=vmdk)" \
                           || bad "${base}: qemu-img could not read the VMDK as vmdk (got '${qfmt:-none}')"
 
