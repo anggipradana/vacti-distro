@@ -94,6 +94,13 @@ jobs:
           done
           sudo aa-complain /usr/bin/passt 2>/dev/null || true
           sudo aa-complain /usr/sbin/passt 2>/dev/null || true
+          # SECOND half of the passt fix: Ubuntu 24.04 ships
+          # kernel.apparmor_restrict_unprivileged_userns=1, which blocks passt's
+          # sandbox from creating an unprivileged USER NAMESPACE, so passt still
+          # exits status 1 (after the socket binds) even once its own AppArmor
+          # profile is unloaded. Relax it so passt's userns sandbox can start.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
       - name: Prepare a writable libguestfs tmpdir (passt PID-file fix)
         run: |
           # GitHub-runner libguestfs fix for the virt-customize crash at
@@ -112,19 +119,21 @@ jobs:
           echo "LIBGUESTFS_TMPDIR=${RUNNER_TEMP}/lgfs" >> "$GITHUB_ENV"
           mkdir -p "${RUNNER_TEMP}/lgfs"
           chmod 1777 "${RUNNER_TEMP}/lgfs"
-      - name: DIAGNOSE passt AppArmor + libguestfs net backend (temporary)
+      - name: DIAGNOSE passt userns + libguestfs net backend (temporary)
         run: |
           set -x
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
           sudo aa-status 2>/dev/null | grep -i passt || echo "no passt apparmor profile loaded"
-          # Probe: confirm passt now gets PAST "PID file open" and the guest
-          # network comes up. Non-fatal (|| true); the real build follows.
+          # Probe: confirm passt now LAUNCHES (userns sandbox starts, guest gets
+          # DHCP). Capture the FULL output so any residual passt error is visible.
+          # Non-fatal (|| true); the real build follows.
           qemu-img create -f qcow2 /tmp/probe.qcow2 1G >/dev/null
           LIBGUESTFS_BACKEND=direct LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 \
-            virt-customize -a /tmp/probe.qcow2 --run-command 'true' 2>&1 \
-            | grep -iE 'passt|sockdir|pid file|socket|network|netdev|permission|denied|exited|DHCP|address|error' \
-            | tail -50 || true
-          sudo dmesg 2>/dev/null | grep -iE 'apparmor.*passt|DENIED.*passt' | tail -10 || true
-          rm -f /tmp/probe.qcow2
+            virt-customize -a /tmp/probe.qcow2 --run-command 'echo probe-net-ok' > /tmp/probe.log 2>&1 \
+            && echo "PROBE: virt-customize SUCCEEDED (passt OK)" \
+            || { echo "PROBE: virt-customize FAILED; tail of output:"; tail -40 /tmp/probe.log; }
+          sudo dmesg 2>/dev/null | grep -iE 'apparmor|passt|userns|namespace|DENIED' | tail -15 || true
+          rm -f /tmp/probe.qcow2 /tmp/probe.log
       - name: Build golden disk (virt-customize, off-prod)
         run: |
           export LIBGUESTFS_BACKEND=direct
