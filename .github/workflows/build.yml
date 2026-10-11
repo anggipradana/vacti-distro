@@ -1,0 +1,50 @@
+# vacti-distro image build matrix (PLACEHOLDER - Phase-1 not yet wired)
+#
+# Triggered AFTER a vacti-engine .deb is published, this builds every distribution
+# form from the one golden disk, runs the no-secret scan, smoke-boots each, and
+# publishes to a non-app download domain.
+name: build-images
+
+on:
+  workflow_dispatch:
+  # TODO Phase-1: trigger on a repository_dispatch from the engine release-deb pipeline
+  #   repository_dispatch:
+  #     types: [engine-deb-published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        form: [cloud, vmware-ova, vbox-ova, iso]
+    steps:
+      - uses: actions/checkout@v4
+
+      # TODO Phase-1: install open-source toolchain
+      #   libguestfs-tools (virt-customize), qemu-utils (qemu-img),
+      #   genisoimage, live-build (for the iso form), xorriso
+      - name: Install build toolchain
+        run: echo "TODO Phase-1: apt-get install libguestfs-tools qemu-utils genisoimage live-build xorriso"
+
+      # TODO Phase-1: build the golden disk once, then the per-form repackaging
+      - name: Build ${{ matrix.form }}
+        run: echo "TODO Phase-1: make ${{ matrix.form }}"
+
+      # no-secret scan: fail the build if ANY credential pattern is present in the
+      # emitted artifact (enroll/engine token, tailscale key, EVIDENCE_KEY, apt
+      # Basic-auth creds). This gate is non-negotiable - it is what keeps every
+      # shared image secretless and inert-without-vacti.
+      - name: No-secret scan
+        run: echo "TODO Phase-1: scan rootfs/squashfs/image for token|key|auth.conf patterns; fail on any hit"
+
+      # TODO Phase-1: smoke-boot the artifact with a throwaway enroll token against a
+      # staging control plane; assert enroll + claim-a-job; assert a content-discovery
+      # wordlist resolves on the built image.
+      - name: Smoke boot
+        run: echo "TODO Phase-1: boot in qemu/VBox/ESXi; assert enroll + claim-a-job"
+
+      # TODO Phase-1: record sha256 of every artifact + component versions (manifest),
+      # then publish to R2 / a non-app download domain.
+      - name: Publish
+        run: echo "TODO Phase-1: write reproducibility manifest; publish to non-app domain"
