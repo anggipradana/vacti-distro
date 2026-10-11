@@ -127,7 +127,8 @@ to_qcow2() {
     *.raw.gz) gzip -dc "$art" > "${out}.raw"; qemu-img convert -O qcow2 "${out}.raw" "$out"; rm -f "${out}.raw" ;;
     *.ova)
       local od; od="$(mktemp -d "${TMPROOT}/ova.XXXX")"
-      ( cd "$od" && tar xf "$art" )
+      # tar -C: $art may be a RELATIVE path, which a `cd "$od"` would break.
+      tar -C "$od" -xf "$art"
       local vmdk; vmdk="$(find "$od" -maxdepth 1 -name '*.vmdk' | head -1)"
       [[ -n "$vmdk" ]] || { echo "[smoke] no vmdk in $art" >&2; return 1; }
       qemu-img convert -O qcow2 "$vmdk" "$out"; rm -rf "$od" ;;

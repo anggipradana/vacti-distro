@@ -78,7 +78,9 @@ validate_one() {
 
   # --- extract for the content checks ---------------------------------------
   local d; d="$(mktemp -d "${TMPROOT}/ova.XXXX")"
-  ( cd "$d" && tar xf "$ova" )
+  # tar -C (not `cd "$d" && tar xf "$ova"`): $ova is often a RELATIVE path
+  # (out/*.ova from the workflow glob), which would resolve against $d after a cd.
+  tar -C "$d" -xf "$ova"
   local ovf="${d}/${m_ovf}" vmdk="${d}/${m_vmdk}"
 
   # --- 2. well-formed (+ optional schema) -----------------------------------

@@ -19,6 +19,7 @@ lb config noauto \
   --distribution trixie \
   --archive-areas "main contrib non-free non-free-firmware" \
   --architectures amd64 \
+  --bootstrap-include "ca-certificates" \
   --binary-images iso-hybrid \
   --bootappend-live "boot=live components quiet splash" \
   --debian-installer "${DI_FLAVOUR}" \
