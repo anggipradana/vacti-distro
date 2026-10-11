@@ -26,11 +26,11 @@ core:
      pipx, golang-go, ripgrep, fd-find, openssh-server, adb, xz-utils, socat,
      default-jre-headless, unzip, binutils, python3-venv]
   vpn_clients:
-    [openconnect, globalprotect-openconnect, openfortivpn, openvpn,
+    [openconnect, openfortivpn, openvpn,
      wireguard-tools, strongswan, strongswan-swanctl]
   evidence_screenshot:
     [imagemagick, xdotool, x11-xserver-utils, qterminal, sshpass, tmux]
-  chromium_pinned: [vacti-engine-chromium] # build 1228, from the vacti repo
+  # chromium: bundled in vacti-engine .deb via playwright-core build 1228; no separate apt pkg
 
 # Added only with VACTI_FULL_ARSENAL=1 (full.list). Otherwise fetched post-boot
 # by the runtime arsenal-check when ENGINE_CAPABILITIES advertises the vertical.
