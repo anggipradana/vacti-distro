@@ -82,7 +82,7 @@ scan_artifact() {
     *.qcow2|*.raw|*.img)
       mount_disk "$art" "$base" ;;
     *.raw.gz)
-      local raw="${TMPROOT}/$(basename "${art%.gz}")"
+      local raw; raw="${TMPROOT}/$(basename "${art%.gz}")"
       gzip -dc "$art" > "$raw"; mount_disk "$raw" "$base"; rm -f "$raw" ;;
     *.ova)
       local d; d="$(mktemp -d "${TMPROOT}/ova.XXXX")"
