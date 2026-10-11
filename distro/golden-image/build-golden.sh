@@ -108,19 +108,28 @@ export DEBIAN_FRONTEND=noninteractive
 # apt traffic out. Also fix resolv.conf: the chrooted guest image's is the
 # offline systemd-resolved stub. Build-time only; the shipped image regenerates
 # its network + resolv.conf at boot.
-echo "[prov] build-time networking (SLIRP static lease)"
+echo "[prov] build-time networking (passt lease)"
+# libguestfs' passt serves the guest over a -netdev stream socket but nothing in
+# the appliance brings eth0 up / runs DHCP, so configure it here. libguestfs
+# passes passt --address 169.254.2.15 (guest), gateway 169.254.2.2, DNS
+# 169.254.2.3 (the passt analogue of SLIRP's 10.0.2.x). Try a DHCP client first
+# (in case passt's DHCP is authoritative), then fall back to the static lease.
 ip link set eth0 up 2>/dev/null || true
+command -v dhclient >/dev/null 2>&1 && timeout 20 dhclient -1 eth0 2>/dev/null || true
+command -v udhcpc   >/dev/null 2>&1 && timeout 20 udhcpc -i eth0 -n -q 2>/dev/null || true
 if ! ip -4 addr show eth0 2>/dev/null | grep -q 'inet '; then
-  ip addr add 10.0.2.15/24 dev eth0 2>/dev/null || true
-  ip route replace default via 10.0.2.2 dev eth0 2>/dev/null || true
+  ip addr add 169.254.2.15/24 dev eth0 2>/dev/null || true
+  ip route replace default via 169.254.2.2 dev eth0 2>/dev/null || true
 fi
 rm -f /etc/resolv.conf
-printf 'nameserver 10.0.2.3\nnameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+printf 'nameserver 169.254.2.3\nnameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
 # TEMP connectivity diagnostics (guarded; reverted once the build is green)
 ip -brief addr 2>/dev/null || true
 ip route 2>/dev/null || true
 getent hosts deb.debian.org 2>/dev/null || echo "[prov][diag] DNS resolve FAILED for deb.debian.org"
 curl -fsS -m 20 -o /dev/null -w '[prov][diag] curl deb.debian.org -> HTTP %{http_code}\n' https://deb.debian.org/ 2>&1 || echo "[prov][diag] curl to deb.debian.org FAILED (no route/NAT?)"
+# TEMP: raw IP-level reachability test (bypasses DNS) to confirm passt NAT works
+curl -fsS -m 20 -o /dev/null -w '[prov][diag] curl 1.1.1.1 -> HTTP %{http_code}\n' https://1.1.1.1/ 2>&1 || echo "[prov][diag] curl to 1.1.1.1 (by IP) FAILED -> no NAT path at all"
 
 echo "[prov] base deps"
 apt-get update -y

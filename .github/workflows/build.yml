@@ -76,30 +76,32 @@ jobs:
           # Restore KVM acceleration if the runner exposes /dev/kvm (harmless if
           # absent; libguestfs otherwise falls back to slower TCG).
           sudo chmod 0666 /dev/kvm 2>/dev/null || true
-          # Force the long-standing SLIRP (libslirp) user-mode network backend by
-          # removing passt. The virt-customize crash on GitHub runners was a
-          # CASCADE of failures in Ubuntu 24.04's OLD passt (0.0~git20240220):
-          #   1) its AppArmor profile denied passt's PID-file write
+          # libguestfs on this runner wires its guest network through passt (a
+          # `-netdev stream` UNIX socket) - there is NO SLIRP fallback, so passt
+          # must stay installed and must run. Two GitHub-runner blockers on the
+          # OLD Ubuntu passt (0.0~git20240220) have to be cleared first:
+          #   1) its AppArmor profile denies passt's PID-file write
           #      ("passt exited with status 1" / "PID file open: Permission
           #      denied") at "Examining the guest ...";
-          #   2) with that unloaded, kernel.apparmor_restrict_unprivileged_userns
-          #      blocked passt's sandbox userns (still "exited with status 1");
-          #   3) with that relaxed, passt ran but left the libguestfs appliance's
-          #      eth0 DOWN with no DHCP lease -> guest had no outbound route
-          #      (curl -> HTTP 000), so every in-guest apt pull died with
-          #      "Temporary failure resolving 'deb.debian.org'".
-          # Rather than chase all three in a fragile old passt, drop it: libguestfs
-          # then falls back to qemu's SLIRP user-net (libslirp0 is installed), the
-          # stable pre-passt path, which brings the appliance eth0 up with a NAT
-          # route. The guest-side resolv.conf fix in provision.sh supplies DNS.
-          sudo apt-get purge -y passt 2>/dev/null || true
-      - name: DIAGNOSE libguestfs net backend (temporary)
-        run: |
-          set -x
-          dpkg -l 2>/dev/null | grep -iE 'passt|libslirp' || echo "passt removed"
+          #   2) kernel.apparmor_restrict_unprivileged_userns=1 then blocks
+          #      passt's sandbox user namespace (still "exited with status 1").
+          # Unload the passt AppArmor profile and relax the userns restriction.
+          sudo apt-get install -y apparmor-utils || true
+          for p in /etc/apparmor.d/*passt* /etc/apparmor.d/*.passt; do
+            [ -e "$p" ] || continue
+            sudo apparmor_parser -R "$p" 2>/dev/null || true
+            sudo mkdir -p /etc/apparmor.d/disable
+            sudo ln -sf "$p" /etc/apparmor.d/disable/ 2>/dev/null || true
+          done
+          sudo aa-complain /usr/bin/passt /usr/sbin/passt 2>/dev/null || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
       - name: Build golden disk (virt-customize, off-prod)
         run: |
           export LIBGUESTFS_BACKEND=direct
+          # TEMP: full libguestfs trace so the exact passt invocation (guest
+          # address/gateway/DNS scheme) is logged; reverted once green.
+          export LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1
           make golden
       - name: No-secret scan (golden)
         run: ci/no-secret-scan.sh out/vacti-engine-${VACTI_RELEASE}-golden.qcow2
