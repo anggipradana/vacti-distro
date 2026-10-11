@@ -3,6 +3,8 @@
 # the squashfs is made. This is what keeps the shipped ISO secretless.
 set -e
 rm -f /etc/apt/auth.conf.d/vacti-engine.conf
+# build-only TLS-verify-off for the vacti apt host (never ship a weakened-TLS cfg)
+rm -f /etc/apt/apt.conf.d/99vacti-build-notls.conf
 rm -rf /root/.claude /home/*/.claude /etc/vacti-engine/.claude 2>/dev/null || true
 rm -f /etc/vacti-engine/engine.env /etc/vacti-engine/enroll.token 2>/dev/null || true
 # drop the methodology staging dir if any crept in
