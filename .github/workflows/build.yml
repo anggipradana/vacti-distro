@@ -76,6 +76,24 @@ jobs:
           # Restore KVM acceleration if the runner exposes /dev/kvm (harmless if
           # absent; libguestfs otherwise falls back to slower TCG).
           sudo chmod 0666 /dev/kvm 2>/dev/null || true
+          # THE fix for `passt exited with status 1` / "PID file open: Permission
+          # denied" at "Examining the guest ...": Ubuntu 24.04 ships an OLD passt
+          # (0.0~git20240220) whose AppArmor profile DENIES passt writing its PID
+          # file into the libguestfs sockdir (/run/user/<uid>/libguestfs*/*.pid).
+          # The socket bind is permitted by the profile but the pidfile open is
+          # not, so passt aborts and virt-customize gets no guest network.
+          # Diagnosed upstream by passt's author (Stefano Brivio) as exactly this
+          # AppArmor policy. Unload/disable the passt profile so passt can write
+          # its pidfile; the guest then gets working DHCP+DNS for the apt pulls.
+          sudo apt-get install -y apparmor-utils || true
+          for p in /etc/apparmor.d/*passt* /etc/apparmor.d/*.passt; do
+            [ -e "$p" ] || continue
+            sudo apparmor_parser -R "$p" 2>/dev/null || true
+            sudo mkdir -p /etc/apparmor.d/disable
+            sudo ln -sf "$p" /etc/apparmor.d/disable/ 2>/dev/null || true
+          done
+          sudo aa-complain /usr/bin/passt 2>/dev/null || true
+          sudo aa-complain /usr/sbin/passt 2>/dev/null || true
       - name: Prepare a writable libguestfs tmpdir (passt PID-file fix)
         run: |
           # GitHub-runner libguestfs fix for the virt-customize crash at
@@ -94,23 +112,18 @@ jobs:
           echo "LIBGUESTFS_TMPDIR=${RUNNER_TEMP}/lgfs" >> "$GITHUB_ENV"
           mkdir -p "${RUNNER_TEMP}/lgfs"
           chmod 1777 "${RUNNER_TEMP}/lgfs"
-      - name: DIAGNOSE passt/libguestfs network backend (temporary)
+      - name: DIAGNOSE passt AppArmor + libguestfs net backend (temporary)
         run: |
           set -x
-          id; echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
-          echo "LIBGUESTFS_TMPDIR=${LIBGUESTFS_TMPDIR:-<unset>}"
-          [ -n "${XDG_RUNTIME_DIR:-}" ] && ls -lad "$XDG_RUNTIME_DIR" || true
-          ls -lad "${LIBGUESTFS_TMPDIR:-/tmp}" || true
-          which passt && passt --version 2>&1 | head -3 || echo "no passt"
-          dpkg -l | grep -iE 'libguestfs|^..  passt|qemu-system|libslirp' || true
-          # Probe: capture the EXACT passt command libguestfs runs + its error,
-          # on a throwaway disk, with full trace. Non-fatal (|| true) - purely
-          # diagnostic; the real build follows in the next step.
+          sudo aa-status 2>/dev/null | grep -i passt || echo "no passt apparmor profile loaded"
+          # Probe: confirm passt now gets PAST "PID file open" and the guest
+          # network comes up. Non-fatal (|| true); the real build follows.
           qemu-img create -f qcow2 /tmp/probe.qcow2 1G >/dev/null
           LIBGUESTFS_BACKEND=direct LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 \
             virt-customize -a /tmp/probe.qcow2 --run-command 'true' 2>&1 \
-            | grep -iE 'passt|sockdir|pid|socket|network|net ?dev|runas|permission|denied|exited|error|supermin|XDG' \
-            | tail -60 || true
+            | grep -iE 'passt|sockdir|pid file|socket|network|netdev|permission|denied|exited|DHCP|address|error' \
+            | tail -50 || true
+          sudo dmesg 2>/dev/null | grep -iE 'apparmor.*passt|DENIED.*passt' | tail -10 || true
           rm -f /tmp/probe.qcow2
       - name: Build golden disk (virt-customize, off-prod)
         run: |
