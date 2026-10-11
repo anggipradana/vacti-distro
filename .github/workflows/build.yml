@@ -94,6 +94,24 @@ jobs:
           echo "LIBGUESTFS_TMPDIR=${RUNNER_TEMP}/lgfs" >> "$GITHUB_ENV"
           mkdir -p "${RUNNER_TEMP}/lgfs"
           chmod 1777 "${RUNNER_TEMP}/lgfs"
+      - name: DIAGNOSE passt/libguestfs network backend (temporary)
+        run: |
+          set -x
+          id; echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+          echo "LIBGUESTFS_TMPDIR=${LIBGUESTFS_TMPDIR:-<unset>}"
+          [ -n "${XDG_RUNTIME_DIR:-}" ] && ls -lad "$XDG_RUNTIME_DIR" || true
+          ls -lad "${LIBGUESTFS_TMPDIR:-/tmp}" || true
+          which passt && passt --version 2>&1 | head -3 || echo "no passt"
+          dpkg -l | grep -iE 'libguestfs|^..  passt|qemu-system|libslirp' || true
+          # Probe: capture the EXACT passt command libguestfs runs + its error,
+          # on a throwaway disk, with full trace. Non-fatal (|| true) - purely
+          # diagnostic; the real build follows in the next step.
+          qemu-img create -f qcow2 /tmp/probe.qcow2 1G >/dev/null
+          LIBGUESTFS_BACKEND=direct LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 \
+            virt-customize -a /tmp/probe.qcow2 --run-command 'true' 2>&1 \
+            | grep -iE 'passt|sockdir|pid|socket|network|net ?dev|runas|permission|denied|exited|error|supermin|XDG' \
+            | tail -60 || true
+          rm -f /tmp/probe.qcow2
       - name: Build golden disk (virt-customize, off-prod)
         run: |
           export LIBGUESTFS_BACKEND=direct
