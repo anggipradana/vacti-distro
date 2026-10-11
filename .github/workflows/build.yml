@@ -73,6 +73,25 @@ jobs:
           sudo apt-get install -y libguestfs-tools qemu-utils genisoimage xorriso
           # libguestfs needs a readable kernel on GitHub runners
           sudo chmod 0644 /boot/vmlinuz-* || true
+          # GitHub-runner libguestfs fix: the passt (user-mode net backend) drops
+          # to `nobody` and cannot write its PID file into the 0755 appliance tmp
+          # dir, so virt-customize dies at "Examining the guest ..." with
+          # `passt exited with status 1`. Removing passt makes libguestfs fall
+          # back to qemu's built-in SLIRP/libslirp user-net, which has no
+          # privilege-drop PID-file step -> the failure disappears.
+          sudo apt-get purge -y passt || true
+          # Restore KVM acceleration if the runner exposes /dev/kvm (harmless if
+          # absent; libguestfs otherwise falls back to slower TCG).
+          sudo chmod 0666 /dev/kvm 2>/dev/null || true
+      - name: Prepare libguestfs tmpdir (belt-and-suspenders if passt remains)
+        run: |
+          # A sticky-writable (1777) tmp dir in the runner workspace keeps any
+          # residual passt/qemu PID-file write out of the 0755 default tmp dir.
+          # runner.temp is unavailable in a job-level env: block, so export the
+          # path here for every subsequent step (incl. the virt-customize build).
+          echo "LIBGUESTFS_TMPDIR=${RUNNER_TEMP}/lgfs" >> "$GITHUB_ENV"
+          mkdir -p "${RUNNER_TEMP}/lgfs"
+          chmod 1777 "${RUNNER_TEMP}/lgfs"
       - name: Build golden disk (virt-customize, off-prod)
         run: |
           export LIBGUESTFS_BACKEND=direct
