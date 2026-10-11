@@ -122,7 +122,20 @@ if ! ip -4 addr show eth0 2>/dev/null | grep -q 'inet '; then
   ip route replace default via 169.254.2.2 dev eth0 2>/dev/null || true
 fi
 rm -f /etc/resolv.conf
-printf 'nameserver 169.254.2.3\nnameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+# Public resolvers first (reachable once virt-customize --network enables NAT),
+# then the passt/SLIRP stub resolver as a fallback. Hardcoded public DNS is safe
+# here: this resolv.conf exists only for the build-time apt pulls and the shipped
+# image regenerates it at boot (see FINALIZE / first-boot).
+printf 'nameserver 8.8.8.8\nnameserver 8.8.4.4\nnameserver 1.1.1.1\nnameserver 169.254.2.3\n' > /etc/resolv.conf
+# Verify DNS actually resolves before any apt/curl; fail loudly if still broken.
+if getent hosts deb.debian.org >/dev/null 2>&1 \
+   || nslookup deb.debian.org >/dev/null 2>&1 \
+   || host deb.debian.org >/dev/null 2>&1 \
+   || dig +short deb.debian.org 2>/dev/null | grep -q .; then
+  echo "[prov] DNS OK: deb.debian.org resolves"
+else
+  echo "[prov][diag] DNS still broken after resolv.conf fix"
+fi
 # TEMP connectivity diagnostics (guarded; reverted once the build is green)
 ip -brief addr 2>/dev/null || true
 ip route 2>/dev/null || true
@@ -201,8 +214,15 @@ PROV
 chmod 0755 "${WORK}/provision.sh"
 
 # --- 5. apply the appliance layer with virt-customize -------------------------
+# --network is REQUIRED: libguestfs runs the appliance with networking DISABLED
+# by default (qemu user-net started with restrict=on / no NAT forwarding), so the
+# guest comes up with an eth0 address and a route but no outbound path - every
+# in-guest apt/curl then dies with "Temporary failure resolving 'deb.debian.org'"
+# even though `ip addr`/`ip route` look healthy. Passing --network tells
+# libguestfs to enable the user-mode NAT (passt/SLIRP) so the guest can actually
+# reach the Debian + vacti mirrors while provision.sh runs.
 log "virt-customize: applying the shared appliance layer"
-virt-customize -a "$GOLDEN" \
+virt-customize --network -a "$GOLDEN" \
   --copy-in "${STAGE}/usr:/" \
   --copy-in "${STAGE}/etc:/" \
   --copy-in "${STAGE}/opt:/" \
