@@ -11,6 +11,11 @@ DISTRO_DIR="$(cd "${HERE}/.." && pwd)"
 # shellcheck source=/dev/null
 source "${DISTRO_DIR}/vacti-appliance.env"
 OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
+# Resolve OUT to an ABSOLUTE path: OUT_DIR is often a relative "out" (set in the
+# CI env), and the final `tar -cf "${OUT}/..."` runs inside a `cd "$WORK"`
+# subshell where a relative path would point at the (empty) temp dir and fail
+# with "Cannot open: No such file or directory".
+mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}-golden.qcow2}"
 TMPL="${HERE}/ovf-templates/virtualbox-2.2.ovf.tmpl"
 [[ -f "$GOLDEN" ]] || { echo "golden disk not found: $GOLDEN" >&2; exit 1; }
