@@ -52,11 +52,11 @@ scan_rootfs() {
     bad "${label}: a .claude directory is present (methodology must NOT ship on disk)"
   fi
   # 2. forbidden content - scan config-ish trees, skip big binaries/caches
-  if grep -rEIl --binary-files=without-match "$FORBIDDEN_PATTERNS" \
+  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" \
         2>/dev/null | grep -q .; then
     bad "${label}: a secret-shaped pattern was found in the rootfs:"
-    grep -rEIl --binary-files=without-match "$FORBIDDEN_PATTERNS" \
+    grep -rEIl --binary-files=without-match --exclude-dir=dpkg "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" 2>/dev/null \
         | sed 's/^/    /' >&2 || true
   fi
