@@ -1,0 +1,28 @@
+# Build artifacts - never commit image output
+*.iso
+*.qcow2
+*.raw
+*.raw.gz
+*.ova
+*.vmdk
+*.vdi
+
+# live-build / build working trees
+chroot/
+.build/
+out/
+cache/
+
+# live-build scratch
+config/binary
+config/chroot
+*.hybrid.iso
+build.log
+
+# seed artifacts (generated from templates; never commit a filled seed)
+cidata.iso
+user-data
+meta-data
+
+# os
+.DS_Store
