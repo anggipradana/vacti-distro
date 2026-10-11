@@ -59,7 +59,6 @@ python3-venv
 
 # --- Client-VPN clients (an engagement runs behind the client's VPN) ---
 openconnect
-globalprotect-openconnect
 openfortivpn
 openvpn
 wireguard-tools
@@ -74,5 +73,6 @@ qterminal
 sshpass
 tmux
 
-# --- Pinned Chromium (from the vacti repo, not Debian; matches playwright-core build 1228) ---
-vacti-engine-chromium
+# --- Chromium ---
+# vacti-engine-chromium removed: the engine .deb bundles Chromium via
+# playwright-core's pinned build 1228; no separate apt package exists.

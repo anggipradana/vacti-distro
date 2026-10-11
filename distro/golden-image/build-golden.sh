@@ -169,9 +169,13 @@ chmod 0600 /etc/apt/auth.conf.d/vacti-engine.conf
 umask 022
 printf 'deb [trusted=yes] %s/apt ./\n' "${APT_SCHEME_HOST}" > /etc/apt/sources.list.d/vacti-engine.list
 
+# Node.js 22 from NodeSource (Debian trixie ships 20, engine requires >= 22)
+echo "[prov] adding NodeSource Node.js 22.x repo"
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+
 apt-get update -y
 
-# the engine + the arsenal + the pinned Chromium
+# the engine + the arsenal
 echo "[prov] installing ${VACTI_ENGINE_PKG} + arsenal"
 mapfile -t PKGS < <(grep -vE '^[[:space:]]*(#|\$)' /opt/vacti-build/arsenal.list)
 apt-get install -y --no-install-recommends ${VACTI_ENGINE_PKG} "\${PKGS[@]}" || {
