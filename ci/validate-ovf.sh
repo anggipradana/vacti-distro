@@ -45,6 +45,9 @@ command -v qemu-img >/dev/null 2>&1 || { echo "[validate-ovf] qemu-img required 
 # namespace-agnostic xpath helper (local-name() so we need not register the OVF
 # / RASD / VSSD namespaces on the xmllint CLI).
 xp() { xmllint --xpath "$1" "$2" 2>/dev/null || true; }
+# count()/number xpath -> a plain integer (strip any decimal/whitespace so a
+# "2.0"-style result from some libxml2 builds can't break an arithmetic test).
+xpnum() { local v; v="$(xp "$1" "$2")"; v="${v%%.*}"; v="${v//[^0-9]/}"; echo "${v:-0}"; }
 
 validate_one() {
   local ova="$1" base; base="$(basename "$ova")"
@@ -88,16 +91,16 @@ validate_one() {
 
   # --- 3. required structure ------------------------------------------------
   local n_file n_disk n_vs n_cpu n_mem
-  n_file="$(xp "count(//*[local-name()='References']/*[local-name()='File'])" "$ovf")"
-  n_disk="$(xp "count(//*[local-name()='DiskSection']/*[local-name()='Disk'])" "$ovf")"
-  n_vs="$(xp   "count(//*[local-name()='VirtualSystem'])" "$ovf")"
-  n_cpu="$(xp  "count(//*[local-name()='Item'][*[local-name()='ResourceType']='3'])" "$ovf")"
-  n_mem="$(xp  "count(//*[local-name()='Item'][*[local-name()='ResourceType']='4'])" "$ovf")"
-  [[ "${n_file:-0}" -ge 1 ]] && ok "${base}: References/File present" || bad "${base}: no References/File"
-  [[ "${n_disk:-0}" -ge 1 ]] && ok "${base}: DiskSection/Disk present" || bad "${base}: no DiskSection/Disk"
-  [[ "${n_vs:-0}"   -ge 1 ]] && ok "${base}: VirtualSystem present"    || bad "${base}: no VirtualSystem"
-  [[ "${n_cpu:-0}"  -ge 1 ]] && ok "${base}: CPU item present"         || bad "${base}: no CPU (ResourceType=3) item"
-  [[ "${n_mem:-0}"  -ge 1 ]] && ok "${base}: memory item present"      || bad "${base}: no memory (ResourceType=4) item"
+  n_file="$(xpnum "count(//*[local-name()='References']/*[local-name()='File'])" "$ovf")"
+  n_disk="$(xpnum "count(//*[local-name()='DiskSection']/*[local-name()='Disk'])" "$ovf")"
+  n_vs="$(xpnum   "count(//*[local-name()='VirtualSystem'])" "$ovf")"
+  n_cpu="$(xpnum  "count(//*[local-name()='Item'][*[local-name()='ResourceType']='3'])" "$ovf")"
+  n_mem="$(xpnum  "count(//*[local-name()='Item'][*[local-name()='ResourceType']='4'])" "$ovf")"
+  [[ "$n_file" -ge 1 ]] && ok "${base}: References/File present" || bad "${base}: no References/File"
+  [[ "$n_disk" -ge 1 ]] && ok "${base}: DiskSection/Disk present" || bad "${base}: no DiskSection/Disk"
+  [[ "$n_vs"   -ge 1 ]] && ok "${base}: VirtualSystem present"    || bad "${base}: no VirtualSystem"
+  [[ "$n_cpu"  -ge 1 ]] && ok "${base}: CPU item present"         || bad "${base}: no CPU (ResourceType=3) item"
+  [[ "$n_mem"  -ge 1 ]] && ok "${base}: memory item present"      || bad "${base}: no memory (ResourceType=4) item"
 
   # --- 4. streamOptimized ----------------------------------------------------
   local fmt; fmt="$(xp "string(//*[local-name()='Disk']/@*[local-name()='format'])" "$ovf")"
