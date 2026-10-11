@@ -32,6 +32,12 @@ GOLDEN="${OUT}/vacti-engine-${VACTI_RELEASE}-golden.qcow2"
 log() { echo "[golden] $*"; }
 die() { echo "[golden][FATAL] $*" >&2; exit 1; }
 
+# If the golden disk already exists (e.g. downloaded from a prior CI job), skip.
+if [[ -s "$GOLDEN" ]]; then
+  log "golden disk already present at $GOLDEN — skipping rebuild"
+  exit 0
+fi
+
 command -v virt-customize >/dev/null 2>&1 || die "virt-customize not found (apt-get install libguestfs-tools)"
 command -v qemu-img       >/dev/null 2>&1 || die "qemu-img not found (apt-get install qemu-utils)"
 [[ -n "${VACTI_APT_PRODUCER_TOKEN:-}" ]] || die "VACTI_APT_PRODUCER_TOKEN unset - the build-time private-repo credential is required (it is NOT baked into the image)"
