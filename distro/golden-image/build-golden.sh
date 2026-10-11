@@ -226,12 +226,14 @@ virt-customize --network -a "$GOLDEN" \
   --copy-in "${STAGE}/usr:/" \
   --copy-in "${STAGE}/etc:/" \
   --copy-in "${STAGE}/opt:/" \
-  --run "${WORK}/provision.sh" \
+  --upload "${WORK}/provision.sh:/tmp/provision.sh" \
+  --run-command "bash /tmp/provision.sh && rm -f /tmp/provision.sh" \
   --root-password disabled
 
-# The provisioning script held the build-time token (host-expanded); shred it
-# now that virt-customize has run. The staged copy-in tree carried no secret.
-shred -u "${WORK}/provision.sh" 2>/dev/null || rm -f "${WORK}/provision.sh"
+# The provisioning script held the build-time token (host-expanded); remove it
+# now that virt-customize has run. The in-guest copy was already cleaned up by
+# the --run-command. The staged copy-in tree carried no secret.
+rm -f "${WORK}/provision.sh"
 rm -rf "${STAGE}"
 
 # --- 6. convert back to a compact qcow2 + checksum ----------------------------
