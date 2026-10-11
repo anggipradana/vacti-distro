@@ -1,0 +1,32 @@
+#!/bin/sh
+# live-build auto/config - committed so `lb config` is reproducible. Produces a
+# hybrid BIOS+UEFI ISO (dd-able to USB) with a live session + install-to-disk.
+# Headless SKU is the default; the GUI SKU is selected with VACTI_ISO_SKU=gui
+# (adds the XFCE + Calamares package list). The package set, branding, and
+# enroll overlay are materialized from the shared distro/ tree by build-iso.sh
+# BEFORE this runs.
+set -e
+
+VACTI_RELEASE="${VACTI_RELEASE:-0.1.0}"
+VACTI_ISO_SKU="${VACTI_ISO_SKU:-headless}"   # headless | gui
+
+# GUI SKU ships debian-installer live (so Calamares can run from the session);
+# headless keeps d-i for the preseeded unattended install.
+DI_FLAVOUR="live"
+[ "$VACTI_ISO_SKU" = "headless" ] && DI_FLAVOUR="true"
+
+lb config noauto \
+  --distribution trixie \
+  --archive-areas "main contrib non-free non-free-firmware" \
+  --architectures amd64 \
+  --binary-images iso-hybrid \
+  --bootappend-live "boot=live components quiet splash" \
+  --debian-installer "${DI_FLAVOUR}" \
+  --iso-application "vacti" \
+  --iso-publisher "vacti; https://vacti.example; info@vacti.example" \
+  --iso-volume "vacti-${VACTI_RELEASE}" \
+  --apt-indices false \
+  --apt-recommends false \
+  --cache true \
+  --memtest none \
+  "${@}"

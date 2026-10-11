@@ -1,0 +1,8 @@
+#!/bin/sh
+# Zero machine identity so every install/boot is fresh (no shared SSH host key,
+# no shared machine-id). Mirrors the golden image's finalize step.
+set -e
+: > /etc/machine-id
+rm -f /var/lib/dbus/machine-id 2>/dev/null || true
+ln -sf /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+rm -f /etc/ssh/ssh_host_* 2>/dev/null || true

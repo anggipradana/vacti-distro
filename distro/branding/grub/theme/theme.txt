@@ -1,0 +1,13 @@
+# Minimal vacti GRUB theme stub. Replace with the final branded theme.
+# See https://www.gnu.org/software/grub/manual/grub/html_node/Theme-file-format.html
+title-text: "vacti pentest appliance"
+desktop-color: "#0b0b0d"
+terminal-font: "Unifont Regular 16"
++ boot_menu {
+  left = 15%
+  width = 70%
+  top = 30%
+  height = 40%
+  item_color = "#c8c8c8"
+  selected_item_color = "#ffffff"
+}

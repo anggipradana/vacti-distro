@@ -1,0 +1,11 @@
+#!/bin/sh
+# LATE hook: remove every build-time secret + methodology from the chroot BEFORE
+# the squashfs is made. This is what keeps the shipped ISO secretless.
+set -e
+rm -f /etc/apt/auth.conf.d/vacti-engine.conf
+rm -rf /root/.claude /home/*/.claude /etc/vacti-engine/.claude 2>/dev/null || true
+rm -f /etc/vacti-engine/engine.env /etc/vacti-engine/enroll.token 2>/dev/null || true
+# drop the methodology staging dir if any crept in
+rm -rf /opt/vacti-build 2>/dev/null || true
+apt-get clean || true
+rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* 2>/dev/null || true

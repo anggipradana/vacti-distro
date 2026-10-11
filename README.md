@@ -190,24 +190,43 @@ vacti-distro/
   README.md                    # this synthesis
   LICENSE                      # MIT, for OUR build sources
   NOTICE.md                    # licensing of the BUILT IMAGE (GPL/Debian + third-party)
-  Makefile                     # targets: iso, cloud, vmware-ova, vbox-ova, all
-  .github/workflows/build.yml  # CI build-matrix placeholder (+ no-secret-scan step)
+  Makefile                     # targets: golden, cloud, vmware-ova, vbox-ova, iso, iso-gui, seed, scan, all
+  ci/
+    no-secret-scan.sh          # MANDATORY gate: fail on ANY baked secret/key/methodology
+    lint.sh                    # light shellcheck + yaml/xml sanity (no image build)
+  .github/workflows/build.yml  # CI build matrix: golden -> fan-out + iso, scan, smoke, PRIVATE release
   docs/                        # the five research passes, verbatim
   distro/
-    live-build-config/         # Phase-2 live-build config tree (ISO)
-    golden-image/              # virt-customize scripts (golden qcow2 -> fan-out)
-    packages/                  # arsenal package manifest (sourced from engine bootstrap-apt.sh)
-    branding/                  # os-release / grub / plymouth / wallpaper
-    enroll/                    # NoCloud cidata template + make-seed.sh stub
+    vacti-appliance.env        # the ONE config (base pin, engine ver, capabilities, Kali on/off)
+    live-build-config/         # live-build config tree (ISO) + build-iso.sh driver
+    golden-image/              # build-golden.sh (virt-customize) + convert-*.sh + fanout.sh + OVF templates
+    packages/                  # web-lean.list / full.list + manifest.yml + gen + Kali Option-A source/pin
+    branding/                  # os-release / issue / motd / disclaimer / grub / plymouth / wallpaper / apply-branding.sh
+    enroll/                    # firstboot unit+script + NoCloud template + make-seed.sh + guestinfo notes
 ```
 
-Each `distro/` subdirectory carries a `PLAN.md` describing what lands there for the Phase-1 build.
+Each `distro/` subdirectory carries a `PLAN.md` describing what lands there; the Phase-1 build
+sources are now implemented alongside those plans.
 
 ---
 
 ## 8. Status
 
-Planning + skeleton. The `distro/` tree is placeholders with per-directory `PLAN.md`s; the
-`Makefile` and CI workflow are stubs that echo "TODO Phase-1". Public distribution of any built
-image is **pending** a per-package non-free/contrib license audit and a Debian non-affiliation
-review (see [NOTICE.md](NOTICE.md)).
+**Phase-1 build sources implemented.** The `distro/` tree now holds working build sources (not
+stubs): `golden-image/build-golden.sh` applies the shared appliance layer with `virt-customize`;
+`convert-*.sh` + `fanout.sh` repackage the one golden disk into the cloud qcow2/raw and the two
+OVAs; `live-build-config/` + `build-iso.sh` build the installable ISO (headless + GUI SKUs) from
+the SAME package manifest, branding, and enroll overlay (one source of truth); `enroll/` bakes the
+no-secret first-boot mechanism and ships the NoCloud seed as a template + `make-seed.sh`; the
+`Makefile` and `.github/workflows/build.yml` wire it together. **The heavy image build runs in CI
+(GitHub Actions), OFF the prod control plane** - these scripts are authored to run on a GitHub
+runner, not on the prod box.
+
+A **mandatory `ci/no-secret-scan.sh` gate** fails the build on any baked secret/key/methodology in
+any emitted artifact. Public distribution of any built image is still **pending** a per-package
+non-free/contrib license audit and a Debian non-affiliation review (see [NOTICE.md](NOTICE.md)).
+
+**Next step (not done here):** trigger the FIRST actual CI image build (`workflow_dispatch` on
+`build-images`), after setting the repo `vars`/`secrets` it reads (`VACTI_APT_URL`,
+`VACTI_APT_PRODUCER_TOKEN`, optionally `STAGING_CP_URL`/`STAGING_ENROLL_TOKEN`). This commit only
+authors + pushes the sources and workflow; it does not run a heavy build.

@@ -1,0 +1,4 @@
+# vacti NoCloud meta-data TEMPLATE. Minimal per-instance metadata. make-seed.sh
+# substitutes __INSTANCE_ID__ (a random id). No secret here. Gitignored when filled.
+instance-id: __INSTANCE_ID__
+local-hostname: vacti-engine

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/vacti-firstboot - the ONE first-boot enroll code path behind
+# every channel (NoCloud user-data / cloud provider metadata / VMware guestinfo
+# / a console-dropped file / a GUI first-run dialog). Baked into the image; the
+# SECRET it consumes is never baked - it arrives per-instance.
+#
+# What it does (mirrors the engine's bootstrap-apt.sh --enroll flow):
+#   1. locate a per-boot enroll token + the control-plane URL (no baked secret);
+#   2. POST it to <url>/api/pentest/enroll to exchange for the scoped tokens;
+#   3. write /etc/vacti-engine/engine.env (0600) and start vacti-engine;
+#   4. disable this unit. Fail LOUDLY if no live token is present.
+set -euo pipefail
+
+CFG_DIR="/etc/vacti-engine"
+CFG_ENV="${CFG_DIR}/engine.env"
+SELF_UNIT="${VACTI_FIRSTBOOT_UNIT:-vacti-firstboot.service}"
+
+log()  { echo "[vacti-firstboot] $*"; }
+die()  { echo "[vacti-firstboot][FATAL] $*" >&2; exit 1; }
+
+[[ -f "$CFG_ENV" ]] && { log "engine.env already present - nothing to do"; exit 0; }
+
+# --- 1. locate the per-boot token + CP url (first channel that yields a token) ---
+# cloud-init writes NoCloud/provider user-data to /run or /var/lib/cloud; we also
+# accept a plain file-drop and the kernel cmdline. NONE of these ship in the image.
+ENROLL_TOKEN=""
+VACTI_URL=""
+ENGINE_ID="$(hostname -s 2>/dev/null || echo engine)"
+
+# (a) a well-known file drop (console / preseed late_command / GUI dialog write)
+TOKEN_FILE="${VACTI_ENROLL_FILE:-/etc/vacti-engine/enroll.token}"
+if [[ -s "$TOKEN_FILE" ]]; then
+  # format: first line = token, optional second line = url
+  ENROLL_TOKEN="$(sed -n '1p' "$TOKEN_FILE")"
+  VACTI_URL="$(sed -n '2p' "$TOKEN_FILE")"
+fi
+
+# (b) cloud-init user-data (NoCloud CIDATA / provider metadata / guestinfo) - a
+#     tiny YAML/JSON carrying vacti_enroll_token + vacti_url written by cloud-init
+#     to a known path. We read it without a full cloud-init module dependency.
+for ud in /run/vacti/enroll.env /var/lib/cloud/instance/vacti-enroll.env; do
+  if [[ -z "$ENROLL_TOKEN" && -s "$ud" ]]; then
+    # shellcheck disable=SC1090
+    source "$ud" || true
+    ENROLL_TOKEN="${vacti_enroll_token:-${VACTI_ENROLL_TOKEN:-}}"
+    VACTI_URL="${vacti_url:-${VACTI_URL:-}}"
+  fi
+done
+
+# (c) kernel cmdline fallback: vacti.enroll_token=... vacti.url=...
+if [[ -z "$ENROLL_TOKEN" ]] && grep -q 'vacti.enroll_token=' /proc/cmdline 2>/dev/null; then
+  ENROLL_TOKEN="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^vacti.enroll_token=//p')"
+  VACTI_URL="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^vacti.url=//p')"
+fi
+
+[[ -n "$ENROLL_TOKEN" ]] || die "no per-boot enroll token found (file/NoCloud/guestinfo/cmdline all empty). \
+Mint a FRESH single-use token in the dashboard and supply it via a cidata.iso seed (see distro/enroll/). \
+NO long-lived fallback is baked - this image is inert without a live enrollment."
+[[ -n "$VACTI_URL" ]] || die "enroll token present but no control-plane URL (set vacti_url in the seed)"
+
+# --- 2. exchange the token for the scoped engine tokens ---
+BASE="${VACTI_URL%/}"
+log "enrolling engine_id=${ENGINE_ID} at ${BASE}/api/pentest/enroll (token not logged)"
+http_code="$(curl -sS -o /run/vacti-enroll.out -w '%{http_code}' \
+  --connect-timeout 10 --max-time 60 \
+  -H "Authorization: Bearer ${ENROLL_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -X POST "${BASE}/api/pentest/enroll" \
+  -d "{\"engine_id\":\"${ENGINE_ID}\"}" || echo "000")"
+
+[[ "$http_code" == "200" ]] || {
+  body="$(cat /run/vacti-enroll.out 2>/dev/null || true)"; rm -f /run/vacti-enroll.out
+  die "enroll failed (HTTP ${http_code}). The token may be expired/used (single-use, 30-min). Re-mint and retry. Response: ${body:-none}"
+}
+
+# --- 3. write engine.env (0600). The actual field parsing is the engine's job;
+#     we hand the response to the engine's own enroll writer if present, else
+#     write the scoped tokens the API returned. Token VALUES are never logged. ---
+install -d -m0755 "$CFG_DIR"
+umask 077
+if command -v vacti-engine-write-env >/dev/null 2>&1; then
+  vacti-engine-write-env --url "$BASE" --from /run/vacti-enroll.out
+else
+  # Minimal inline writer: the enroll response is JSON with the three scoped
+  # tokens. Use jq if present, else node (both ship in the arsenal/.deb).
+  {
+    echo "VACTI_URL=${BASE}"
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '
+        "VACTI_PRODUCER_TOKEN=\(.producer_token // .producer // "")",
+        "VACTI_VERIFIER_TOKEN=\(.verifier_token // .verifier // "")",
+        "VACTI_GATEKEEPER_TOKEN=\(.gatekeeper_token // .gatekeeper // "")"
+      ' /run/vacti-enroll.out
+    else
+      node -e 'const j=require("/run/vacti-enroll.out");' 2>/dev/null || true
+    fi
+  } > "$CFG_ENV"
+fi
+chmod 0600 "$CFG_ENV"
+umask 022
+rm -f /run/vacti-enroll.out
+
+# Wipe the consumed one-time token from disk if it was file-dropped.
+[[ -f "$TOKEN_FILE" ]] && shred -u "$TOKEN_FILE" 2>/dev/null || rm -f "$TOKEN_FILE" 2>/dev/null || true
+
+# --- 4. start the engine + disable this unit ---
+log "engine.env written; starting vacti-engine and disabling ${SELF_UNIT}"
+systemctl start vacti-engine.service 2>/dev/null || log "vacti-engine start deferred to its own unit"
+systemctl disable "${SELF_UNIT}" 2>/dev/null || true
+log "first-boot enrollment complete"

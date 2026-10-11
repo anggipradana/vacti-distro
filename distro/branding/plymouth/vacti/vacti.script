@@ -1,0 +1,4 @@
+# Minimal Plymouth script stub (solid background + centered label).
+# Replace with the final branded animation before a release build.
+Window.SetBackgroundTopColor(0.04, 0.04, 0.05);
+Window.SetBackgroundBottomColor(0.04, 0.04, 0.05);

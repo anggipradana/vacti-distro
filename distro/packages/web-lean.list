@@ -1,0 +1,78 @@
+# vacti arsenal - WEB-LEAN (baked default, ENGINE_CAPABILITIES=web,infra)
+#
+# Derived from the engine's packaging/bootstrap-apt.sh APT_PACKAGES, minus the
+# per-vertical gated sets (source/mobile/ios/re) which the runtime self-heal
+# fetches post-boot only when a wider capability is advertised. One package per
+# line; blank lines and # comments are ignored by gen-live-build-list.sh and by
+# golden-image/build-golden.sh.
+#
+# The ~6 tools NOT in Debian main (nuclei httpx-toolkit naabu feroxbuster
+# seclists commix) resolve from the pinned Kali apt source (Option A) or the
+# engine's go/git/release fallbacks (Option B, VACTI_NO_KALI_REPO=1).
+
+# --- Scanners / recon CORE ---
+nmap
+nuclei
+httpx-toolkit
+naabu
+subfinder
+ffuf
+gobuster
+dirsearch
+sqlmap
+weevely
+whatweb
+commix
+dnsx
+katana
+trufflehog
+feroxbuster
+
+# --- Content-discovery wordlists (seclists is load-bearing; dirb is fallback) ---
+seclists
+dirb
+
+# --- Base / runtime ---
+default-mysql-client
+nftables
+jq
+curl
+git
+build-essential
+ca-certificates
+xvfb
+fonts-noto
+fonts-noto-cjk
+fonts-noto-color-emoji
+pipx
+golang-go
+ripgrep
+fd-find
+openssh-server
+adb
+xz-utils
+socat
+default-jre-headless
+unzip
+binutils
+python3-venv
+
+# --- Client-VPN clients (an engagement runs behind the client's VPN) ---
+openconnect
+globalprotect-openconnect
+openfortivpn
+openvpn
+wireguard-tools
+strongswan
+strongswan-swanctl
+
+# --- Evidence / screenshot pipeline ---
+imagemagick
+xdotool
+x11-xserver-utils
+qterminal
+sshpass
+tmux
+
+# --- Pinned Chromium (from the vacti repo, not Debian; matches playwright-core build 1228) ---
+vacti-engine-chromium

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Apply vacti branding inside the live-build chroot (shared body).
+set -e
+/usr/share/vacti/branding/apply-branding.sh || true
+# enable the first-run enroll unit so it runs once on the installed/live system
+systemctl enable vacti-firstrun.service 2>/dev/null || true
