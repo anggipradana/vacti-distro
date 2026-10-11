@@ -21,16 +21,26 @@ core:
      sqlmap, weevely, whatweb, commix, dnsx, katana, trufflehog, feroxbuster]
   wordlists: [seclists, dirb]
   base_runtime:
-    [default-mysql-client, nftables, jq, curl, git, build-essential,
+    [default-mysql-client, nftables, jq, curl, wget, git, build-essential,
      ca-certificates, xvfb, fonts-noto, fonts-noto-cjk, fonts-noto-color-emoji,
      pipx, golang-go, ripgrep, fd-find, openssh-server, adb, xz-utils, socat,
-     default-jre-headless, unzip, binutils, python3-venv]
+     netcat-openbsd, default-jre-headless, unzip, binutils, python3-venv,
+     python3-full]
+  tls_network: [sslscan, testssl.sh]
   vpn_clients:
     [openconnect, openfortivpn, openvpn,
      wireguard-tools, strongswan, strongswan-swanctl]
   evidence_screenshot:
     [imagemagick, xdotool, x11-xserver-utils, qterminal, sshpass, tmux]
-  # chromium: bundled in vacti-engine .deb via playwright-core build 1228; no separate apt pkg
+  # Anti-OOM backstops; config drop-ins staged by golden-image/oom/.
+  anti_oom: [systemd-zram-generator, earlyoom]
+  # chromium: bundled in vacti-engine .deb via playwright-core build 1228; no separate apt pkg.
+  # Its shared-library deps are made explicit (trixie t64 names where renamed)
+  # so headless launch does not fail on the thin genericcloud base.
+  chromium_deps:
+    [libnss3, libgbm1, libasound2t64, libatk1.0-0t64, libatk-bridge2.0-0t64,
+     libcups2t64, libdrm2, libxkbcommon0, libxcomposite1, libxdamage1,
+     libxrandr2, libxfixes3, libpango-1.0-0, libcairo2]
 
 # Added only with VACTI_FULL_ARSENAL=1 (full.list). Otherwise fetched post-boot
 # by the runtime arsenal-check when ENGINE_CAPABILITIES advertises the vertical.

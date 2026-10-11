@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/vacti-swap-firstboot - size + enable a DISK swapfile once, on
+# first boot, when the box's real RAM and disk are known (genericcloud grows the
+# rootfs on first boot, so build-time sizing would be wrong).
+#
+# Layering (see distro/golden-image/oom/):
+#   * zram (RAM-backed, priority 100) is the PRIMARY cushion - always on.
+#   * this disk swapfile (priority 10) is lower-priority OVERFLOW for the
+#     out-of-slice daemons (Caido/Xorg/kernel/page cache) and banked-then-resumed
+#     recovery. vacti.slice keeps MemorySwapMax=0, so agent scopes never swap.
+#
+# Sizing: RAM x 1.5, clamped to [4G, 24G] (the engine's proven step_swapfile
+# logic). Idempotent: re-running is a no-op once a swapfile is active, and it
+# leaves a stamp so the oneshot unit does not re-run after success. If the disk
+# cannot spare the space it skips WITHOUT a stamp (retried next boot); zram
+# still provides a cushion in the meantime.
+set -euo pipefail
+
+SWAPFILE="/swapfile"
+STAMP="/var/lib/vacti/.swap-done"
+
+log() { echo "[vacti-swap] $*"; }
+
+mark_done() { install -d -m0755 /var/lib/vacti 2>/dev/null || true; : > "$STAMP" 2>/dev/null || true; }
+
+# Apply the shipped sysctl + THP drop-ins now (persistent files already on disk).
+sysctl --system >/dev/null 2>&1 || true
+systemd-tmpfiles --create /etc/tmpfiles.d/vacti-thp.conf >/dev/null 2>&1 || true
+
+# Already have THIS swapfile active? Nothing to do.
+if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$SWAPFILE"; then
+  log "disk swapfile already active"; mark_done; exit 0
+fi
+
+# File exists from a prior run but is not swapped on - just enable it.
+if [[ -e "$SWAPFILE" ]]; then
+  log "swapfile exists; enabling (priority 10)"
+  swapon --priority 10 "$SWAPFILE" 2>/dev/null || true
+  mark_done; exit 0
+fi
+
+ram_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+ram_gb=$(( (ram_kb + 1048575) / 1048576 ))
+[[ "$ram_gb" -lt 1 ]] && ram_gb=1
+size_gb=$(( ram_gb * 3 / 2 ))
+[[ "$size_gb" -lt 4 ]]  && size_gb=4
+[[ "$size_gb" -gt 24 ]] && size_gb=24
+
+# Need the space: require swapfile size + a 2G margin free on / before creating.
+free_mb="$(df -Pm / 2>/dev/null | awk 'NR==2{print $4}')"
+need_mb=$(( size_gb * 1024 ))
+if [[ "${free_mb:-0}" -lt $(( need_mb + 2048 )) ]]; then
+  log "insufficient free disk (${free_mb:-?}MB) for a ${size_gb}G swapfile; skipping (zram still cushions). Will retry next boot."
+  exit 0
+fi
+
+log "creating ${size_gb}G swapfile (RAM=${ram_gb}G)"
+if command -v fallocate >/dev/null 2>&1 && fallocate -l "${size_gb}G" "$SWAPFILE" 2>/dev/null; then
+  :
+else
+  dd if=/dev/zero of="$SWAPFILE" bs=1M count="$need_mb" status=none
+fi
+chmod 0600 "$SWAPFILE"
+mkswap "$SWAPFILE" >/dev/null
+swapon --priority 10 "$SWAPFILE"
+if ! grep -q "^${SWAPFILE} " /etc/fstab 2>/dev/null; then
+  echo "${SWAPFILE} none swap sw,pri=10 0 0" >> /etc/fstab
+fi
+log "swapfile active (priority 10, ${size_gb}G) + persisted to /etc/fstab"
+mark_done

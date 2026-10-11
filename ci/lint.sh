@@ -10,7 +10,7 @@ rc=0
 echo "== shellcheck =="
 if command -v shellcheck >/dev/null 2>&1; then
   # all our shell scripts (scripts, hooks, auto/config, make-seed, etc.)
-  mapfile -t SH < <(find distro ci -type f \( -name '*.sh' -o -name 'vacti-firstboot' \) ; \
+  mapfile -t SH < <(find distro ci -type f \( -name '*.sh' -o -name 'vacti-firstboot' -o -name 'vacti-swap-firstboot' \) ; \
                     echo distro/live-build-config/auto/config)
   # hooks are /bin/sh; include them too
   mapfile -t HOOKS < <(find distro/live-build-config/config/hooks -type f -name '*.chroot' 2>/dev/null || true)

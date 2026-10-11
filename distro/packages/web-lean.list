@@ -37,6 +37,7 @@ default-mysql-client
 nftables
 jq
 curl
+wget
 git
 build-essential
 ca-certificates
@@ -52,10 +53,22 @@ openssh-server
 adb
 xz-utils
 socat
+netcat-openbsd
 default-jre-headless
 unzip
 binutils
 python3-venv
+python3-full
+
+# --- TLS / network inspection (small, broadly used by tls-review & probers) ---
+sslscan
+testssl.sh
+
+# --- Anti-OOM backstops (see distro/golden-image/oom/) ---
+# zram compressed RAM swap (primary cushion) + earlyoom userspace OOM killer
+# backstop. Their config is shipped as copy-in drop-ins by build-golden.sh.
+systemd-zram-generator
+earlyoom
 
 # --- Client-VPN clients (an engagement runs behind the client's VPN) ---
 openconnect
@@ -76,3 +89,26 @@ tmux
 # --- Chromium ---
 # vacti-engine-chromium removed: the engine .deb bundles Chromium via
 # playwright-core's pinned build 1228; no separate apt package exists.
+#
+# The bundled Chromium still needs its shared-library deps present on the rootfs
+# to launch headless. Debian 13 genericcloud is very thin, so make them EXPLICIT
+# instead of relying on them arriving as recommends (a missing libnss3/libgbm1
+# is the classic headless-launch failure). Debian 13 (trixie) completed the
+# 64-bit time_t transition, so several of these ship under t64 names
+# (libasound2t64, libatk1.0-0t64, libatk-bridge2.0-0t64, libcups2t64); the
+# per-package best-effort install in provision.sh tolerates a name that is not
+# present on a given point release.
+libnss3
+libgbm1
+libasound2t64
+libatk1.0-0t64
+libatk-bridge2.0-0t64
+libcups2t64
+libdrm2
+libxkbcommon0
+libxcomposite1
+libxdamage1
+libxrandr2
+libxfixes3
+libpango-1.0-0
+libcairo2
