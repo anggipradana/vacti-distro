@@ -64,15 +64,34 @@ scan_rootfs() {
 
 mount_disk() {
   # guestmount a disk image read-only and scan each inspected OS root.
-  local img="$1" label="$2" m
-  m="$(mktemp -d "${TMPROOT}/mnt.XXXX")"
+  #
+  # guestmount on GitHub-hosted runners is intermittently flaky (supermin
+  # appliance build / libguestfs backend hiccups), so RETRY a bounded number of
+  # times before giving up. This only suppresses TRANSIENT infrastructure
+  # failures - the gate stays FAIL-CLOSED: if every attempt still cannot mount
+  # the artifact, we call bad() and the build FAILS (an unscanned artifact is
+  # never allowed to pass as "secretless"). A genuine mount failure is reported
+  # with a distinct [infra] diagnostic so it is distinguishable in the logs from
+  # an actual secret/credential being found - but both still block publish.
+  local img="$1" label="$2" m attempt rc
   command -v guestmount >/dev/null 2>&1 || { bad "guestmount not available to scan ${label}"; return; }
-  if guestmount --ro -a "$img" -i "$m" 2>/dev/null; then
-    scan_rootfs "$m" "$label"
-    guestunmount "$m" 2>/dev/null || fusermount -u "$m" 2>/dev/null || true
-  else
-    bad "could not guestmount ${label} (${img})"
-  fi
+  local tries="${GUESTMOUNT_RETRIES:-3}"
+  for (( attempt=1; attempt<=tries; attempt++ )); do
+    m="$(mktemp -d "${TMPROOT}/mnt.XXXX")"
+    if LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestmount --ro -a "$img" -i "$m" 2>/dev/null; then
+      scan_rootfs "$m" "$label"
+      guestunmount "$m" 2>/dev/null || fusermount -u "$m" 2>/dev/null || true
+      return
+    fi
+    rc=$?
+    rmdir "$m" 2>/dev/null || true
+    if [[ "$attempt" -lt "$tries" ]]; then
+      echo "[no-secret-scan][infra] guestmount attempt ${attempt}/${tries} failed (rc=${rc}) for ${label}; retrying..." >&2
+      sleep $(( attempt * 5 ))
+    fi
+  done
+  # Fail-closed: exhausted retries -> treat as a blocking failure (never a pass).
+  bad "[infra] could not guestmount ${label} (${img}) after ${tries} attempts - artifact is UNSCANNED, refusing to pass (fail-closed)"
 }
 
 scan_artifact() {

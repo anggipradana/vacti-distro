@@ -151,7 +151,8 @@ jobs:
       - name: Install toolchain (+ runner workarounds)
         uses: ./.github/actions/libguestfs-runner
         with:
-          extra-packages: fuse3
+          # fuse3 for guestmount; libxml2-utils (xmllint) for the OVF gate.
+          extra-packages: fuse3 libxml2-utils
       - name: Fetch the golden disk
         uses: actions/download-artifact@v4
         with:
@@ -159,6 +160,18 @@ jobs:
           path: out
       - name: Convert -> ${{ matrix.form }}
         run: make ${{ matrix.form }}
+      - name: Validate OVF/OVA structure (member order, schema, sizes, hashes, RAM floor)
+        # FOSS, offline structural gate for the hand-authored OVFs. No-op for the
+        # cloud form (it emits no .ova). Catches the mechanical spec errors that a
+        # bare tar + .mf cannot; the real-import check is the dev-box ovftool lane.
+        run: |
+          shopt -s nullglob
+          ovas=(out/*.ova)
+          if [[ ${#ovas[@]} -gt 0 ]]; then
+            ci/validate-ovf.sh "${ovas[@]}"
+          else
+            echo "[validate-ovf] no .ova in this form (${{ matrix.form }}); skipping"
+          fi
       - name: Reclaim golden disk after conversion
         # The golden qcow2 (~2GB) is only the conversion SOURCE - it is neither
         # scanned (the scan skips *golden*) nor uploaded by this job. Drop it now
@@ -245,15 +258,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: out
-      - name: Smoke-boot with a throwaway enroll token vs staging CP
+      - name: Smoke-boot every built image (qemu TCG, real boot + health probe)
+        # Boots each disk image (cloud qcow2 + both OVAs) in qemu with a throwaway
+        # NoCloud health-probe seed and asserts a healthy multi-user boot with the
+        # baked vacti units present + network up. ISOs (full-matrix only) are
+        # boot-asserted (BIOS + UEFI). TCG (-cpu qemu64) so no /dev/kvm needed.
+        # If STAGING_CP_URL + STAGING_ENROLL_TOKEN are set, the seed additionally
+        # drives a real enroll roundtrip; otherwise the enroll assertion is skipped
+        # (we never require a staging CP to exist for the gate to run).
         env:
           STAGING_CP_URL: ${{ vars.STAGING_CP_URL }}
           STAGING_ENROLL_TOKEN: ${{ secrets.STAGING_ENROLL_TOKEN }}
-        run: |
-          echo "TODO(smoke): mint a throwaway token, make-seed a cidata.iso, boot each"
-          echo "image in qemu (BIOS + OVMF/UEFI), assert firstboot enroll + claim-a-job,"
-          echo "and assert a content-discovery wordlist resolves on the built image."
-          echo "Non-blocking placeholder until a staging CP endpoint is wired via repo vars."
+          BOOT_TIMEOUT: "900"
+        run: ci/smoke-boot.sh out
 
   # --- publish as PRIVATE GitHub Release assets on this private repo -----------
   publish:
