@@ -24,5 +24,22 @@ cidata.iso
 user-data
 meta-data
 
+# build-time apt credential - NEVER commit (staged into the build chroot only)
+**/auth.conf.d/vacti-engine.conf
+**/etc/apt/auth.conf.d/vacti-engine.conf
+
+# live-build generated package lists (regenerated from the shared manifest)
+distro/live-build-config/config/package-lists/vacti-core.list.chroot
+distro/live-build-config/config/package-lists/vacti-gui.list.chroot
+
+# live-build staged overlay (materialized from distro/ by build-iso.sh)
+distro/live-build-config/config/includes.chroot/usr/share/vacti/
+distro/live-build-config/config/includes.chroot/usr/local/sbin/vacti-firstboot
+distro/live-build-config/config/includes.binary/boot/grub/splash.png
+
+# live-build working trees + lb-generated config
+distro/live-build-config/config/binary
+distro/live-build-config/config/chroot
+
 # os
 .DS_Store

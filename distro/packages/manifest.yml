@@ -1,0 +1,52 @@
+# vacti arsenal manifest (documentation of record)
+#
+# The MACHINE-CONSUMED sources are the plain package lists in this directory:
+#   web-lean.list  - baked default (ENGINE_CAPABILITIES=web,infra)
+#   full.list      - the per-vertical apt sets added on top (VACTI_FULL_ARSENAL=1)
+# This YAML documents where each set comes from and keeps the mapping explicit.
+# It is NOT hand-maintained independently: regenerate the .list files from the
+# engine's packaging/bootstrap-apt.sh (APT_PACKAGES + APT_PKGS_* per-vertical
+# arrays), cross-checked against src/runner/arsenal-check.ts (TOOL_APT_PACKAGES),
+# so the image arsenal always matches what the runtime asserts and self-heals.
+
+source_of_truth:
+  engine_repo: vacti-pentest-engine
+  apt_set: packaging/bootstrap-apt.sh # APT_PACKAGES (+ APT_PKGS_SOURCE/MOBILE/IOS/RE)
+  arsenal_check: src/runner/arsenal-check.ts # TOOL_APT_PACKAGES binary->package map
+
+# Baked on every image (web-lean.list).
+core:
+  scanners_recon:
+    [nmap, nuclei, httpx-toolkit, naabu, subfinder, ffuf, gobuster, dirsearch,
+     sqlmap, weevely, whatweb, commix, dnsx, katana, trufflehog, feroxbuster]
+  wordlists: [seclists, dirb]
+  base_runtime:
+    [default-mysql-client, nftables, jq, curl, git, build-essential,
+     ca-certificates, xvfb, fonts-noto, fonts-noto-cjk, fonts-noto-color-emoji,
+     pipx, golang-go, ripgrep, fd-find, openssh-server, adb, xz-utils, socat,
+     default-jre-headless, unzip, binutils, python3-venv]
+  vpn_clients:
+    [openconnect, globalprotect-openconnect, openfortivpn, openvpn,
+     wireguard-tools, strongswan, strongswan-swanctl]
+  evidence_screenshot:
+    [imagemagick, xdotool, x11-xserver-utils, qterminal, sshpass, tmux]
+  chromium_pinned: [vacti-engine-chromium] # build 1228, from the vacti repo
+
+# Added only with VACTI_FULL_ARSENAL=1 (full.list). Otherwise fetched post-boot
+# by the runtime arsenal-check when ENGINE_CAPABILITIES advertises the vertical.
+verticals:
+  source: [trivy]
+  mobile: [scrcpy, apktool, aapt]
+  ios: [usbmuxd, libimobiledevice-utils, libplist-utils, llvm]
+  re: [gdb-multiarch, binwalk, strace, ltrace, tshark, checksec]
+
+# NON-apt heavy tools: never baked; runtime self-heal fetches per capability.
+non_apt_post_boot:
+  [jadx, ghidra, frida-tools, objection, pymobiledevice3, semgrep,
+   re-python-venv, impacket, netexec, bloodhound-python, awscli, kubectl, caido]
+
+# The ~6 CORE tools absent from Debian main; how they resolve.
+debian_main_gaps:
+  tools: [nuclei, httpx-toolkit, naabu, feroxbuster, seclists, commix]
+  option_a: Kali apt source, pinned prio 100 (see kali-repo/) # default
+  option_b: go-install / git / GitHub release (VACTI_NO_KALI_REPO=1)

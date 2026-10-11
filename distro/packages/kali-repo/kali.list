@@ -1,0 +1,7 @@
+# Option A: the Kali rolling repo as an ORDINARY, PINNED package source.
+# Goes to /etc/apt/sources.list.d/kali.list. Paired with kali-pin.pref
+# (priority 100) so it NEVER overrides the Debian base/libc - it only supplies
+# the ~6 tools absent from Debian main. No Kali branding reaches the image.
+# The signing key is fetched to /usr/share/keyrings/kali-archive-keyring.gpg at
+# build time (see README.md); it is public info, not a credential.
+deb [signed-by=/usr/share/keyrings/kali-archive-keyring.gpg] http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware

@@ -1,0 +1,8 @@
+# Goes to /etc/apt/preferences.d/kali-pin. Priority 100 = "install from here
+# only if the package is not available (or not at a higher-priority version)
+# from the Debian base". This keeps every Debian-base package (libc, kernel,
+# systemd, ...) sourced from Debian and lets the handful of Kali-only tools
+# resolve. Mirrors the engine bootstrap-apt.sh ensure_kali_repo_on_ubuntu pin.
+Package: *
+Pin: release o=Kali
+Pin-Priority: 100

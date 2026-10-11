@@ -1,0 +1,22 @@
+# vacti-firstrun.service - the ISO's first-boot enroll unit. Runs the SAME
+# /usr/local/sbin/vacti-firstboot script as the cloud/VM form, just under this
+# unit name. On the installed system it prompts for / reads a per-boot enroll
+# token (GUI dialog, console file-drop, or preseed late_command), enrolls, writes
+# engine.env, then disables itself. No token is ever baked. Fails loudly without
+# a live token.
+[Unit]
+Description=vacti first-run enrollment (one-time, no baked secret)
+After=network-online.target
+Wants=network-online.target
+Before=vacti-engine.service
+ConditionPathExists=!/etc/vacti-engine/engine.env
+
+[Service]
+Type=oneshot
+Environment=VACTI_FIRSTBOOT_UNIT=vacti-firstrun.service
+ExecStart=/usr/local/sbin/vacti-firstboot
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

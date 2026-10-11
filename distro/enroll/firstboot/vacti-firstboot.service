@@ -1,0 +1,29 @@
+# vacti-firstboot.service - oneshot, first boot only. Reads a PER-BOOT,
+# short-lived, single-use enroll token (never baked), runs the engine's enroll
+# path to obtain the scoped tokens, writes /etc/vacti-engine/engine.env, then
+# disables itself. Fails LOUDLY on a missing/expired token - there is no
+# longer-lived baked fallback. On the installed-ISO system the unit is named
+# vacti-firstrun.service but runs the SAME script.
+[Unit]
+Description=vacti first-boot enrollment (one-time, no baked secret)
+Documentation=https://vacti.example/docs/enroll
+# Run after the network and (if present) cloud-init have populated the seed.
+After=network-online.target
+Wants=network-online.target
+After=cloud-init.service
+# Do not start the engine until enrollment has written engine.env.
+Before=vacti-engine.service
+# Only run while enrollment has not completed.
+ConditionPathExists=!/etc/vacti-engine/engine.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/vacti-firstboot
+# On success the script runs `systemctl disable vacti-firstboot.service`.
+# On failure, surface it: the operator re-mints a token and reboots/retries.
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

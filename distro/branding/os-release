@@ -1,0 +1,15 @@
+# Overlay for /etc/os-release. Applied by apply-branding.sh (golden image via
+# virt-customize --copy-in; ISO via includes.chroot). Debian-derivative posture:
+# our own NAME/ID, HOME_URL, zero Debian logos, explicit non-affiliation (see
+# VARIANT and the disclaimer in /etc/issue + disclaimer.txt). SPI owns the
+# Debian mark; we acknowledge it and do not imply endorsement.
+NAME="vacti"
+PRETTY_NAME="vacti pentest appliance"
+ID=vacti
+ID_LIKE=debian
+VERSION_ID="0.1.0"
+VERSION="0.1.0 (trixie-based)"
+HOME_URL="https://vacti.example/"
+SUPPORT_URL="https://vacti.example/support"
+VARIANT="Derivative based on Debian GNU/Linux 13 (trixie); not affiliated with the Debian Project."
+VARIANT_ID=appliance

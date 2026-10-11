@@ -1,0 +1,12 @@
+
+  vacti pentest appliance
+
+  This system runs the vacti engine. It is INERT without a valid vacti
+  enrollment: it cannot run an engagement without a live, operator-minted
+  enrollment token, the per-engagement trust-gated skill bundle, and the
+  control plane. No credentials or methodology are stored on this image.
+
+  vacti is a derivative based on Debian GNU/Linux; it is not produced by,
+  endorsed by, or affiliated with the Debian Project. Debian is a trademark of
+  Software in the Public Interest, Inc.
+

@@ -1,0 +1,8 @@
+# GUI SKU only: XFCE desktop + display manager + the Calamares install-to-disk
+# installer. Pulled on top of vacti-core.list.chroot. Headless SKU omits all of this.
+xfce4
+xfce4-terminal
+lightdm
+network-manager-gnome
+calamares
+calamares-settings-debian

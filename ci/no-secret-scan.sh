@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# no-secret-scan.sh - the MANDATORY, NON-NEGOTIABLE gate. Given any emitted
+# artifact (qcow2 / raw[.gz] / ova / iso), mount or extract its rootfs and FAIL
+# (exit 1) if ANY baked credential, token, key, or methodology is present. This
+# is what keeps every shared image secretless and inert-without-vacti.
+#
+# Runs in CI on every artifact; build-golden.sh also calls it on the golden disk.
+# Needs libguestfs (guestmount) for disk images, plus unsquashfs/bsdtar for ISOs.
+# Open-source tools only. Scans READ-ONLY.
+#
+# Usage: no-secret-scan.sh <artifact> [<artifact> ...]
+set -euo pipefail
+
+FAIL=0
+TMPROOT="$(mktemp -d)"
+cleanup() {
+  # unmount anything we guestmounted, then remove temp
+  for m in "${TMPROOT}"/mnt.*; do
+    [[ -d "$m" ]] && { fusermount -u "$m" 2>/dev/null || guestunmount "$m" 2>/dev/null || umount "$m" 2>/dev/null || true; }
+  done
+  rm -rf "$TMPROOT"
+}
+trap cleanup EXIT
+
+# Forbidden PATHS (must not exist in a shipped rootfs).
+FORBIDDEN_PATHS=(
+  "etc/apt/auth.conf.d/vacti-engine.conf"   # build-time private-repo credential
+  "etc/vacti-engine/engine.env"             # scoped engine tokens
+  "etc/vacti-engine/enroll.token"           # a baked enroll token
+  "var/lib/tailscale/tailscaled.state"      # a tailscale node key
+  "root/.claude" "etc/vacti-engine/.claude" # methodology IP
+)
+# Forbidden CONTENT patterns (grepped across the rootfs, excluding huge binaries).
+# High-signal secret shapes only, to avoid false positives on docs/examples.
+FORBIDDEN_PATTERNS='(VACTI_PRODUCER_TOKEN=.|VACTI_VERIFIER_TOKEN=.|VACTI_GATEKEEPER_TOKEN=.|EVIDENCE_KEY=.|tskey-auth-[A-Za-z0-9]|password [A-Za-z0-9]{12,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)'
+
+say()  { echo "[no-secret-scan] $*"; }
+bad()  { echo "[no-secret-scan][FAIL] $*" >&2; FAIL=1; }
+
+scan_rootfs() {
+  local root="$1" label="$2"
+  say "scanning rootfs of ${label} at ${root}"
+  # 1. forbidden paths
+  local p
+  for p in "${FORBIDDEN_PATHS[@]}"; do
+    if compgen -G "${root}/${p}" >/dev/null 2>&1 || ls "${root}/${p}" >/dev/null 2>&1; then
+      bad "${label}: forbidden path present: /${p}"
+    fi
+  done
+  # any stray .claude anywhere under home/root/etc
+  if find "${root}/root" "${root}/home" "${root}/etc" -maxdepth 4 -name '.claude' -print 2>/dev/null | grep -q .; then
+    bad "${label}: a .claude directory is present (methodology must NOT ship on disk)"
+  fi
+  # 2. forbidden content - scan config-ish trees, skip big binaries/caches
+  if grep -rEIl --binary-files=without-match "$FORBIDDEN_PATTERNS" \
+        "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" \
+        2>/dev/null | grep -q .; then
+    bad "${label}: a secret-shaped pattern was found in the rootfs:"
+    grep -rEIl --binary-files=without-match "$FORBIDDEN_PATTERNS" \
+        "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" 2>/dev/null \
+        | sed 's/^/    /' >&2 || true
+  fi
+}
+
+mount_disk() {
+  # guestmount a disk image read-only and scan each inspected OS root.
+  local img="$1" label="$2" m
+  m="$(mktemp -d "${TMPROOT}/mnt.XXXX")"
+  command -v guestmount >/dev/null 2>&1 || { bad "guestmount not available to scan ${label}"; return; }
+  if guestmount --ro -a "$img" -i "$m" 2>/dev/null; then
+    scan_rootfs "$m" "$label"
+    guestunmount "$m" 2>/dev/null || fusermount -u "$m" 2>/dev/null || true
+  else
+    bad "could not guestmount ${label} (${img})"
+  fi
+}
+
+scan_artifact() {
+  local art="$1" base; base="$(basename "$art")"
+  [[ -e "$art" ]] || { bad "artifact not found: $art"; return; }
+  case "$art" in
+    *.qcow2|*.raw|*.img)
+      mount_disk "$art" "$base" ;;
+    *.raw.gz)
+      local raw="${TMPROOT}/$(basename "${art%.gz}")"
+      gzip -dc "$art" > "$raw"; mount_disk "$raw" "$base"; rm -f "$raw" ;;
+    *.ova)
+      local d; d="$(mktemp -d "${TMPROOT}/ova.XXXX")"
+      ( cd "$d" && tar xf "$art" )
+      local vmdk; vmdk="$(find "$d" -maxdepth 1 -name '*.vmdk' | head -1)"
+      [[ -n "$vmdk" ]] || { bad "${base}: no VMDK inside OVA"; return; }
+      local raw="${d}/disk.raw"
+      qemu-img convert -O raw "$vmdk" "$raw"
+      mount_disk "$raw" "${base} (vmdk)"
+      rm -f "$raw" ;;
+    *.iso)
+      local d; d="$(mktemp -d "${TMPROOT}/iso.XXXX")"
+      if command -v bsdtar >/dev/null 2>&1; then bsdtar -C "$d" -xf "$art";
+      elif command -v xorriso >/dev/null 2>&1; then xorriso -osirrox on -indev "$art" -extract / "$d" 2>/dev/null;
+      else bad "${base}: need bsdtar or xorriso to extract the ISO"; return; fi
+      # scan the ISO tree itself (branding/boot), then the live squashfs rootfs
+      scan_rootfs "$d" "${base} (iso tree)"
+      local sq; sq="$(find "$d" -name 'filesystem.squashfs' | head -1)"
+      if [[ -n "$sq" ]] && command -v unsquashfs >/dev/null 2>&1; then
+        local sr="${d}/squashfs-root"; unsquashfs -d "$sr" "$sq" >/dev/null 2>&1 || true
+        [[ -d "$sr" ]] && scan_rootfs "$sr" "${base} (squashfs rootfs)"
+      elif [[ -n "$sq" ]]; then
+        bad "${base}: unsquashfs not available to scan the live rootfs"
+      fi ;;
+    *)
+      say "skipping unknown artifact type: $base" ;;
+  esac
+}
+
+[[ $# -ge 1 ]] || { echo "usage: $0 <artifact> [...]" >&2; exit 2; }
+for a in "$@"; do scan_artifact "$a"; done
+
+if [[ "$FAIL" -ne 0 ]]; then
+  echo "[no-secret-scan] RESULT: FAIL - a secret/credential/methodology was found. Build must NOT publish." >&2
+  exit 1
+fi
+say "RESULT: PASS - no baked secret, token, key, or methodology found in any artifact."

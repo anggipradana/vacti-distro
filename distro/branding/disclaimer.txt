@@ -1,0 +1,3 @@
+vacti is a derivative based on Debian GNU/Linux; it is not produced by, endorsed
+by, or affiliated with the Debian Project. Debian is a trademark of Software in
+the Public Interest, Inc.

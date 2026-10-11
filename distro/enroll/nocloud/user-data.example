@@ -1,0 +1,18 @@
+#cloud-config
+# vacti NoCloud user-data TEMPLATE. make-seed.sh fills __ENROLL_TOKEN__ and
+# __VACTI_URL__ with a freshly-minted, single-use, 30-minute token + the
+# control-plane URL, then genisoimages a CIDATA-labelled cidata.iso. This file
+# (and any filled user-data / cidata.iso) is GITIGNORED and NEVER committed or
+# baked into an image.
+#
+# The firstboot unit reads /run/vacti/enroll.env, so we just write it here.
+write_files:
+  - path: /run/vacti/enroll.env
+    permissions: "0600"
+    content: |
+      vacti_enroll_token=__ENROLL_TOKEN__
+      vacti_url=__VACTI_URL__
+
+# Kick the firstboot enrollment as soon as the seed is in place.
+runcmd:
+  - [ systemctl, start, vacti-firstboot.service ]
