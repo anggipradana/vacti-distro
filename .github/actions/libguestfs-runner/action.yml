@@ -1,0 +1,45 @@
+name: "libguestfs runner setup"
+description: >
+  Install the libguestfs + qemu toolchain and apply the GitHub-Actions-runner
+  workarounds libguestfs needs there: a readable kernel, KVM access, and the
+  passt AppArmor/userns relaxations. Used by every job that runs
+  virt-customize / guestmount (golden build + fan-out no-secret scan), so the
+  workarounds live in one place instead of being copy-pasted per job.
+inputs:
+  extra-packages:
+    description: "Extra apt packages to install alongside the base toolchain."
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Install libguestfs + qemu toolchain and apply runner workarounds
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libguestfs-tools qemu-utils ${{ inputs.extra-packages }}
+        # libguestfs needs a readable kernel on GitHub runners
+        sudo chmod 0644 /boot/vmlinuz-* || true
+        # Restore KVM acceleration if the runner exposes /dev/kvm (harmless if
+        # absent; libguestfs otherwise falls back to slower TCG).
+        sudo chmod 0666 /dev/kvm 2>/dev/null || true
+        # libguestfs on this runner wires its guest network through passt (a
+        # `-netdev stream` UNIX socket) - there is NO SLIRP fallback, so passt
+        # must stay installed and must run. Two GitHub-runner blockers on the
+        # OLD Ubuntu passt (0.0~git20240220) have to be cleared first:
+        #   1) its AppArmor profile denies passt's PID-file write
+        #      ("passt exited with status 1" / "PID file open: Permission
+        #      denied") at "Examining the guest ...";
+        #   2) kernel.apparmor_restrict_unprivileged_userns=1 then blocks
+        #      passt's sandbox user namespace (still "exited with status 1").
+        # Unload the passt AppArmor profile and relax the userns restriction.
+        sudo apt-get install -y apparmor-utils || true
+        for p in /etc/apparmor.d/*passt* /etc/apparmor.d/*.passt; do
+          [ -e "$p" ] || continue
+          sudo apparmor_parser -R "$p" 2>/dev/null || true
+          sudo mkdir -p /etc/apparmor.d/disable
+          sudo ln -sf "$p" /etc/apparmor.d/disable/ 2>/dev/null || true
+        done
+        sudo aa-complain /usr/bin/passt /usr/sbin/passt 2>/dev/null || true
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+        sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
