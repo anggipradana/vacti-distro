@@ -73,20 +73,22 @@ jobs:
           sudo apt-get install -y libguestfs-tools qemu-utils genisoimage xorriso
           # libguestfs needs a readable kernel on GitHub runners
           sudo chmod 0644 /boot/vmlinuz-* || true
-          # GitHub-runner libguestfs fix: the passt (user-mode net backend) drops
-          # to `nobody` and cannot write its PID file into the 0755 appliance tmp
-          # dir, so virt-customize dies at "Examining the guest ..." with
-          # `passt exited with status 1`. Removing passt makes libguestfs fall
-          # back to qemu's built-in SLIRP/libslirp user-net, which has no
-          # privilege-drop PID-file step -> the failure disappears.
-          sudo apt-get purge -y passt || true
           # Restore KVM acceleration if the runner exposes /dev/kvm (harmless if
           # absent; libguestfs otherwise falls back to slower TCG).
           sudo chmod 0666 /dev/kvm 2>/dev/null || true
-      - name: Prepare libguestfs tmpdir (belt-and-suspenders if passt remains)
+      - name: Prepare a writable libguestfs tmpdir (passt PID-file fix)
         run: |
-          # A sticky-writable (1777) tmp dir in the runner workspace keeps any
-          # residual passt/qemu PID-file write out of the 0755 default tmp dir.
+          # GitHub-runner libguestfs fix for the virt-customize crash at
+          # "Examining the guest ..." with `passt exited with status 1`:
+          # libguestfs' passt (the user-mode NETWORK backend that gives the guest
+          # outbound apt/DNS) cannot write its PID/socket file into the default
+          # 0755 tmp dir (confirmed by the libguestfs maintainer: "passt is
+          # creating the file, it cannot write into the 0755 directory"). Point
+          # LIBGUESTFS_TMPDIR at a world-writable (sticky 1777) dir so passt can
+          # write there -> passt starts, the guest keeps its network, and apt can
+          # pull the base deps + the vacti engine. We deliberately DO NOT purge
+          # passt: removing it strips the guest's only user-mode net backend, so
+          # provision.sh then fails with "Temporary failure resolving ...".
           # runner.temp is unavailable in a job-level env: block, so export the
           # path here for every subsequent step (incl. the virt-customize build).
           echo "LIBGUESTFS_TMPDIR=${RUNNER_TEMP}/lgfs" >> "$GITHUB_ENV"
