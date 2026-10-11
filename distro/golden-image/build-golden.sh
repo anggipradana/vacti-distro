@@ -97,6 +97,21 @@ cat > "${WORK}/provision.sh" <<PROV
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# virt-customize runs this script CHROOTED into the guest image, so it uses the
+# GUEST image's /etc/resolv.conf - on the Debian genericcloud image that is the
+# (offline, empty) systemd-resolved stub, so every apt pull fails with
+# "Temporary failure resolving 'deb.debian.org'". Write a routable resolver here
+# so the build-time apt pulls resolve; libguestfs' passt NATs the queries out.
+# (This is build-time only; the shipped image regenerates resolv.conf at boot.)
+echo "[prov] build-time DNS"
+rm -f /etc/resolv.conf
+printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+# TEMP connectivity diagnostics (guarded; reverted once the build is green)
+ip -brief addr 2>/dev/null || true
+ip route 2>/dev/null || true
+getent hosts deb.debian.org 2>/dev/null || echo "[prov][diag] DNS resolve FAILED for deb.debian.org"
+curl -fsS -m 15 -o /dev/null -w '[prov][diag] curl deb.debian.org -> HTTP %{http_code}\n' https://deb.debian.org/ 2>&1 || echo "[prov][diag] curl to deb.debian.org FAILED (no route/NAT?)"
+
 echo "[prov] base deps"
 apt-get update -y
 apt-get install -y --no-install-recommends ca-certificates curl gnupg jq
