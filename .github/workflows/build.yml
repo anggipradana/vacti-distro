@@ -101,6 +101,16 @@ jobs:
           # profile is unloaded. Relax it so passt's userns sandbox can start.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
+          # Guest DNS for the in-guest apt pulls: passt advertises the HOST's
+          # /etc/resolv.conf nameservers to the guest via DHCP. On GitHub runners
+          # that file points at systemd-resolved's stub (127.0.0.53), which is
+          # loopback INSIDE the guest -> guest apt fails with "Temporary failure
+          # resolving 'deb.debian.org'". Point the host resolver at routable
+          # public DNS so passt forwards a usable resolver into the guest (passt
+          # NATs the guest's DNS queries out to these servers). CI-only; 8.8.8.8
+          # still resolves the base-image + artifact hosts for the host itself.
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' | sudo tee /etc/resolv.conf >/dev/null
       - name: Prepare a writable libguestfs tmpdir (passt PID-file fix)
         run: |
           # GitHub-runner libguestfs fix for the virt-customize crash at
@@ -119,21 +129,13 @@ jobs:
           echo "LIBGUESTFS_TMPDIR=${RUNNER_TEMP}/lgfs" >> "$GITHUB_ENV"
           mkdir -p "${RUNNER_TEMP}/lgfs"
           chmod 1777 "${RUNNER_TEMP}/lgfs"
-      - name: DIAGNOSE passt userns + libguestfs net backend (temporary)
+      - name: DIAGNOSE passt network preconditions (temporary)
         run: |
           set -x
           sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
           sudo aa-status 2>/dev/null | grep -i passt || echo "no passt apparmor profile loaded"
-          # Probe: confirm passt now LAUNCHES (userns sandbox starts, guest gets
-          # DHCP). Capture the FULL output so any residual passt error is visible.
-          # Non-fatal (|| true); the real build follows.
-          qemu-img create -f qcow2 /tmp/probe.qcow2 1G >/dev/null
-          LIBGUESTFS_BACKEND=direct LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 \
-            virt-customize -a /tmp/probe.qcow2 --run-command 'echo probe-net-ok' > /tmp/probe.log 2>&1 \
-            && echo "PROBE: virt-customize SUCCEEDED (passt OK)" \
-            || { echo "PROBE: virt-customize FAILED; tail of output:"; tail -40 /tmp/probe.log; }
-          sudo dmesg 2>/dev/null | grep -iE 'apparmor|passt|userns|namespace|DENIED' | tail -15 || true
-          rm -f /tmp/probe.qcow2 /tmp/probe.log
+          echo "--- host /etc/resolv.conf (passt forwards these to the guest) ---"
+          cat /etc/resolv.conf 2>/dev/null || true
       - name: Build golden disk (virt-customize, off-prod)
         run: |
           export LIBGUESTFS_BACKEND=direct
