@@ -105,7 +105,8 @@ scan_artifact() {
       gzip -dc "$art" > "$raw"; mount_disk "$raw" "$base"; rm -f "$raw" ;;
     *.ova)
       local d; d="$(mktemp -d "${TMPROOT}/ova.XXXX")"
-      ( cd "$d" && tar xf "$art" )
+      # tar -C: $art may be a RELATIVE path, which a `cd "$d"` would break.
+      tar -C "$d" -xf "$art"
       local vmdk; vmdk="$(find "$d" -maxdepth 1 -name '*.vmdk' | head -1)"
       [[ -n "$vmdk" ]] || { bad "${base}: no VMDK inside OVA"; return; }
       local raw="${d}/disk.raw"
