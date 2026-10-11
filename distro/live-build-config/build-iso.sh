@@ -67,6 +67,27 @@ printf 'machine %s login vacti password %s\n' "$APT_MACHINE" "$VACTI_APT_PRODUCE
 umask 022
 echo "[iso] NOTE: auth.conf staged into the BUILD chroot only; 0900-remove-build-auth deletes it before squashfs."
 
+# 5b. BUILD-TIME TLS: the vacti source is [trusted=yes] (full build-time trust)
+#     and HTTPS. A minimal debootstrap chroot does not reliably regenerate its
+#     CA bundle before the first package-list apt update, so the vacti InRelease
+#     fetch can fail "certificate verify failed" even though the cert is valid
+#     (golden/virt-customize pulls the same URL fine). Scope-disable TLS verify
+#     for the vacti HOST ONLY (Debian/Kali verification untouched). This file is
+#     build-chroot only and stripped by 0900-remove-build-auth before squashfs,
+#     so no weakened-TLS config ever ships.
+APT_HOST="$(printf '%s' "${VACTI_APT_URL#*://}" | cut -d/ -f1)"
+if [[ -n "$APT_HOST" ]]; then
+  install -d "${HERE}/config/includes.chroot/etc/apt/apt.conf.d"
+  cat > "${HERE}/config/includes.chroot/etc/apt/apt.conf.d/99vacti-build-notls.conf" <<EOF
+// BUILD-TIME ONLY - removed by 0900-remove-build-auth before squashfs. Scoped
+// to the vacti apt host (${APT_HOST}); the source is [trusted=yes]. Does NOT
+// relax verification for Debian/Kali or ship on the image.
+Acquire::https::${APT_HOST}::Verify-Peer "false";
+Acquire::https::${APT_HOST}::Verify-Host "false";
+EOF
+  echo "[iso] staged build-only TLS-verify-off for ${APT_HOST} (stripped pre-squashfs)"
+fi
+
 # 6. MATERIALIZE the vacti private apt SOURCE line from VACTI_APT_URL. The
 #    checked-in config/archives/vacti.list.chroot is only a static placeholder
 #    (https://repo.vacti.example/apt); regenerate it here so the ISO chroot
