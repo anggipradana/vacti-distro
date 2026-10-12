@@ -53,32 +53,51 @@ else
   rm -f "${HERE}/config/package-lists/vacti-gui.list.chroot"
 fi
 
-# 5. the build-time apt credential (NOT baked): write it only into the build
-#    chroot via an archives hook; 0900-remove-build-auth strips it pre-squashfs.
+# 5. BUILD-TIME vacti apt wiring (source + credential + TLS-off): staged so it is
+#    present BEFORE the chroot package-install apt-get update, yet absent from the
+#    EARLY archives update - and never shipped.
+#
+#    Why not config/archives + config/includes.chroot (the old layout): live-build
+#    runs the archives apt-get update very early (chroot_prep mode-archives-chroot),
+#    whereas config/includes.chroot only lands at the LATE chroot_includes stage.
+#    So a vacti source in config/archives got apt-updated with neither the
+#    credential nor the TLS-off conf present -> "certificate verify failed" then
+#    "401 Unauthorized", which is fatal (headless ISO) and also poisons the chroot
+#    apt state (which is what pushed the GUI d-i onto the broken libfuse3-3 path).
+#
+#    Fix: stage ALL vacti apt files into config/includes.chroot_before_packages,
+#    which live-build copies in right before package installation. The early
+#    archives update then sees NO vacti source (Debian + Kali only -> clean), and
+#    the package-install apt-get update sees the vacti source WITH its credential +
+#    TLS-off already in place. 0900-remove-build-auth (a late chroot hook) strips
+#    all three before the squashfs, so nothing vacti-private ships and the binary/
+#    installer stage never hits an unauthenticated vacti source.
 [[ -n "${VACTI_APT_PRODUCER_TOKEN:-}" ]] || { echo "VACTI_APT_PRODUCER_TOKEN unset (needed at build to pull vacti-engine; never baked)" >&2; exit 1; }
-install -d "${HERE}/config/includes.chroot/etc/apt/auth.conf.d"
-# auth.conf `machine` must match the sources.list path by host+path-PREFIX, so
-# derive it from the FULL repo URL (scheme stripped, /apt appended) - NOT host
-# only - or apt never sends the credential (401 on the engine .deb pull).
+BP="${HERE}/config/includes.chroot_before_packages"
+
+# 5a. the build-time apt credential (NEVER baked). auth.conf `machine` must match
+#     the sources.list path by host+path-PREFIX, so derive it from the FULL repo
+#     URL (scheme stripped, /apt appended) - NOT host only - or apt never sends the
+#     credential (401 on the engine .deb pull).
+install -d "${BP}/etc/apt/auth.conf.d"
 APT_MACHINE="$(printf '%s/apt' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://##')"
 umask 077
 printf 'machine %s login vacti password %s\n' "$APT_MACHINE" "$VACTI_APT_PRODUCER_TOKEN" \
-  > "${HERE}/config/includes.chroot/etc/apt/auth.conf.d/vacti-engine.conf"
+  > "${BP}/etc/apt/auth.conf.d/vacti-engine.conf"
 umask 022
-echo "[iso] NOTE: auth.conf staged into the BUILD chroot only; 0900-remove-build-auth deletes it before squashfs."
+echo "[iso] NOTE: auth.conf staged into the BUILD chroot only (before_packages); 0900-remove-build-auth deletes it before squashfs."
 
 # 5b. BUILD-TIME TLS: the vacti source is [trusted=yes] (full build-time trust)
-#     and HTTPS. A minimal debootstrap chroot does not reliably regenerate its
-#     CA bundle before the first package-list apt update, so the vacti InRelease
-#     fetch can fail "certificate verify failed" even though the cert is valid
-#     (golden/virt-customize pulls the same URL fine). Scope-disable TLS verify
-#     for the vacti HOST ONLY (Debian/Kali verification untouched). This file is
-#     build-chroot only and stripped by 0900-remove-build-auth before squashfs,
-#     so no weakened-TLS config ever ships.
+#     and HTTPS. A minimal debootstrap chroot does not reliably regenerate its CA
+#     bundle before the first package-list apt update, so the vacti InRelease fetch
+#     can fail "certificate verify failed" even though the cert is valid
+#     (golden/virt-customize pulls the same URL fine). Scope-disable TLS verify for
+#     the vacti HOST ONLY (Debian/Kali verification untouched). Build-chroot only,
+#     stripped by 0900-remove-build-auth before squashfs - no weakened-TLS ships.
 APT_HOST="$(printf '%s' "${VACTI_APT_URL#*://}" | cut -d/ -f1)"
 if [[ -n "$APT_HOST" ]]; then
-  install -d "${HERE}/config/includes.chroot/etc/apt/apt.conf.d"
-  cat > "${HERE}/config/includes.chroot/etc/apt/apt.conf.d/99vacti-build-notls.conf" <<EOF
+  install -d "${BP}/etc/apt/apt.conf.d"
+  cat > "${BP}/etc/apt/apt.conf.d/99vacti-build-notls.conf" <<EOF
 // BUILD-TIME ONLY - removed by 0900-remove-build-auth before squashfs. Scoped
 // to the vacti apt host (${APT_HOST}); the source is [trusted=yes]. Does NOT
 // relax verification for Debian/Kali or ship on the image.
@@ -88,19 +107,17 @@ EOF
   echo "[iso] staged build-only TLS-verify-off for ${APT_HOST} (stripped pre-squashfs)"
 fi
 
-# 6. MATERIALIZE the vacti private apt SOURCE line from VACTI_APT_URL. The
-#    checked-in config/archives/vacti.list.chroot is only a static placeholder
-#    (https://repo.vacti.example/apt); regenerate it here so the ISO chroot
-#    pulls vacti-engine from the SAME host the auth.conf `machine` above was
-#    derived from. Mirrors build-golden.sh's sources.list line exactly:
+# 6. the vacti private apt SOURCE line, materialized from VACTI_APT_URL into the
+#    SAME before_packages overlay (NOT config/archives, so the early archives
+#    update never touches it). Mirrors build-golden.sh's line exactly:
 #      deb [trusted=yes] <VACTI_APT_URL>/apt ./
-#    (no credential here - public source line; the token lives only in auth.conf
-#    and is stripped pre-squashfs by 0900-remove-build-auth).
+#    No credential here (public source line; the token lives only in auth.conf
+#    above). 0900-remove-build-auth drops this source pre-squashfs too.
 APT_SCHEME_HOST="${VACTI_APT_URL%/}"
-install -d "${HERE}/config/archives"
+install -d "${BP}/etc/apt/sources.list.d"
 printf '# Generated by build-iso.sh from VACTI_APT_URL (public source line; no creds).\n# The Basic-auth credential is in the build-chroot auth.conf and is removed by\n# 0900-remove-build-auth before squashfs. Mirrors build-golden.sh.\ndeb [trusted=yes] %s/apt ./\n' \
-  "$APT_SCHEME_HOST" > "${HERE}/config/archives/vacti.list.chroot"
-echo "[iso] materialized config/archives/vacti.list.chroot -> ${APT_SCHEME_HOST}/apt"
+  "$APT_SCHEME_HOST" > "${BP}/etc/apt/sources.list.d/vacti-engine.list"
+echo "[iso] staged vacti apt source (before_packages) -> ${APT_SCHEME_HOST}/apt"
 
 # 7. Kali package source key (Option A). The checked-in kali.list.chroot adds
 #    the pinned Kali repo; live-build needs its signing key installed into the

@@ -1,4 +1,0 @@
-# The vacti private apt SOURCE line (public info; the Basic-auth credential is
-# NOT here - it is injected into the build chroot by build-iso.sh and removed by
-# 0900-remove-build-auth before squashfs). Mirrors bootstrap-apt.sh.
-deb [trusted=yes] https://repo.vacti.example/apt ./
