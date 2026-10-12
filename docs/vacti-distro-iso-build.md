@@ -94,8 +94,11 @@ config/
     vacti-core.list.chroot        # engine + full arsenal (the APT_PACKAGES set, §3)
     vacti-gui.list.chroot         # GUI SKU only: xfce4 lightdm calamares calamares-settings-debian ...
   archives/
-    vacti.list.chroot             # our private apt source line (repo, NO creds)
-    vacti.key.chroot              # the repo signing key
+    kali.list.chroot + kali.pref  # Option A Kali source (pinned); key via build-iso.sh
+    # (the vacti private source is NOT here - see the note below; it is staged into
+    #  includes.chroot_before_packages so the early archives apt-update stays clean)
+  includes.chroot_before_packages/ # build-time vacti apt wiring (source+auth+TLS-off),
+                                   #   laid down before package install, stripped pre-squashfs
   includes.chroot/                # files overlaid into the live rootfs at their real paths
     etc/os-release                #   branding (§3)
     etc/vacti-engine/             #   engine config dir (NO secrets)
@@ -121,12 +124,16 @@ qemu-system-x86_64 -m 4G -enable-kvm -cdrom live-image-amd64.hybrid.iso -boot d 
 sudo lb clean            # between iterations; `lb clean --purge` for a full reset
 ```
 
-Note on the private apt repo: the repo *source line + signing key* go in `config/archives/`
-(public info), but the Basic-auth creds that `bootstrap-apt.sh` writes to
-`/etc/apt/auth.conf.d/` must NOT be baked - see §6. During the build, live-build needs to reach
-the repo to install `vacti-engine`; feed the build-time credential via the build environment
-(an `auth.conf` dropped only into the build chroot and removed by a late hook), never into the
-shipped rootfs.
+Note on the private apt repo: it must NOT go in `config/archives/`. live-build apt-updates the
+archives sources very early (the `chroot_prep` archives stage), before any `config/includes.*`
+overlay - so an authenticated vacti source there is hit with neither its credential nor the
+build-time TLS-off conf present, and the resulting "certificate verify failed" / "401
+Unauthorized" is fatal (and poisons the chroot apt state). Instead `build-iso.sh` stages the
+vacti *source line* + the build-time Basic-auth `auth.conf` + the host-scoped TLS-off apt.conf
+into `config/includes.chroot_before_packages/etc/apt/`, which live-build lays down right before
+package installation - so the package-install apt-update reaches the repo authenticated. The
+`0900-remove-build-auth` late hook strips all three before the squashfs, so no credential,
+weakened-TLS config, or private source ever reaches the shipped rootfs.
 
 ---
 

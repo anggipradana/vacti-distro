@@ -79,5 +79,5 @@ clean:
 	rm -rf $(LBC)/chroot $(LBC)/.build $(LBC)/cache $(LBC)/config/binary $(LBC)/config/chroot
 	rm -f  $(LBC)/build.log $(LBC)/*.hybrid.iso
 	rm -f  $(LBC)/config/package-lists/vacti-core.list.chroot $(LBC)/config/package-lists/vacti-gui.list.chroot
-	rm -f  $(LBC)/config/includes.chroot/etc/apt/auth.conf.d/vacti-engine.conf
+	rm -rf $(LBC)/config/includes.chroot_before_packages
 	@echo "[clean] done"

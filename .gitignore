@@ -37,6 +37,11 @@ distro/live-build-config/config/includes.chroot/usr/share/vacti/
 distro/live-build-config/config/includes.chroot/usr/local/sbin/vacti-firstboot
 distro/live-build-config/config/includes.binary/boot/grub/splash.png
 
+# live-build build-time vacti apt overlay (private source + credential + TLS-off)
+# materialized into the before_packages stage by build-iso.sh; holds the
+# build-time credential, so NEVER commit it.
+distro/live-build-config/config/includes.chroot_before_packages/
+
 # live-build working trees + lb-generated config
 distro/live-build-config/config/binary
 distro/live-build-config/config/chroot

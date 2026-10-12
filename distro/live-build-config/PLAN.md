@@ -13,7 +13,13 @@ truth), so the ISO's installed rootfs matches the cloud/VM forms.
 - `config/package-lists/`:
   - `vacti-core.list.chroot` - engine + full arsenal (generated from `distro/packages/`),
   - `vacti-gui.list.chroot` - GUI SKU only: `xfce4 lightdm calamares calamares-settings-debian ...`.
-- `config/archives/` - the private apt **source line + signing key** (public info; NOT the creds).
+- `config/archives/` - the **Kali** package source (pinned prio 100) + its signing key. The
+  vacti private source is NOT here (the archives apt-update runs before any credential/TLS-off
+  overlay is laid down, so it would 401/TLS-fail); it is staged into
+  `config/includes.chroot_before_packages/` instead - see below.
+- `config/includes.chroot_before_packages/` - build-time vacti apt wiring materialized by
+  `build-iso.sh` (private source line + Basic-auth `auth.conf` + host-scoped TLS-off apt.conf),
+  laid down right before package installation and stripped by the late `0900` hook pre-squashfs.
 - `config/includes.chroot/` - the config overlay (same tree as the golden image overlay):
   `/etc/os-release`, `/etc/vacti-engine/` (no secrets), the first-run enroll service, GUI skel.
 - `config/includes.binary/boot/grub/splash.png` - GRUB boot splash branding.

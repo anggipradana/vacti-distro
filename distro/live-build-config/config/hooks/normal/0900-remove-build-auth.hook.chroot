@@ -5,6 +5,10 @@ set -e
 rm -f /etc/apt/auth.conf.d/vacti-engine.conf
 # build-only TLS-verify-off for the vacti apt host (never ship a weakened-TLS cfg)
 rm -f /etc/apt/apt.conf.d/99vacti-build-notls.conf
+# build-time vacti private apt source line: drop it so the later binary/installer
+# stage's apt never hits an unauthenticated vacti source (401), and nothing
+# vacti-private lingers in the shipped /etc/apt/sources.list.d
+rm -f /etc/apt/sources.list.d/vacti-engine.list
 rm -rf /root/.claude /home/*/.claude /etc/vacti-engine/.claude 2>/dev/null || true
 rm -f /etc/vacti-engine/engine.env /etc/vacti-engine/enroll.token 2>/dev/null || true
 # drop the methodology staging dir if any crept in
