@@ -4,3 +4,8 @@ set -e
 /usr/share/vacti/branding/apply-branding.sh || true
 # enable the first-run enroll unit so it runs once on the installed/live system
 systemctl enable vacti-firstrun.service 2>/dev/null || true
+# openssh-server is baked (web-lean.list) but the package install never enables
+# it, so the ISO would boot with sshd DOWN and be unreachable over tailscale SSH.
+# Enable it here for build-time parity with the golden image (vacti-firstboot
+# also does 'enable --now' on first boot). Mirrors golden-image/build-golden.sh.
+systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true

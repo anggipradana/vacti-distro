@@ -18,6 +18,13 @@ SELF_UNIT="${VACTI_FIRSTBOOT_UNIT:-vacti-firstboot.service}"
 log()  { echo "[vacti-firstboot] $*"; }
 die()  { echo "[vacti-firstboot][FATAL] $*" >&2; exit 1; }
 
+# Ensure sshd is up for operator access (tailscale SSH) BEFORE any early-exit or
+# die below, so the box stays reachable even when enrollment is skipped (engine.env
+# already present) or fails (no live token). openssh-server is baked and the golden
+# image enables it; '--now' also starts it on this first boot without a reboot.
+# Non-fatal (|| true) so it can never block enrollment under 'set -e'.
+systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
+
 [[ -f "$CFG_ENV" ]] && { log "engine.env already present - nothing to do"; exit 0; }
 
 # --- 1. locate the per-boot token + CP url (first channel that yields a token) ---

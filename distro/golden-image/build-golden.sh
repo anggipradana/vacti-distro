@@ -240,6 +240,15 @@ apt-get install -y --no-install-recommends open-vm-tools virtualbox-guest-utils 
 curl -fsSL https://tailscale.com/install.sh | sh || echo "[prov][warn] tailscale install deferred to runtime"
 systemctl enable tailscaled 2>/dev/null || true
 
+# openssh-server is baked (packages/web-lean.list) but the apt install does NOT
+# enable it, so engines boot with sshd DOWN and are unreachable over tailscale
+# SSH (the kali-azza symptom). Enable it here so the wants/ symlink ships in the
+# golden image and sshd starts on every boot. 'systemctl start' is a no-op in the
+# virt-customize appliance (no running init), so enable-only is correct here; the
+# first-boot path (enroll/firstboot/vacti-firstboot) does 'enable --now' to also
+# start it on first boot. earlyoom's --avoid list already protects sshd.
+systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
+
 # branding
 echo "[prov] branding"
 /opt/vacti-build/apply-branding.sh || echo "[prov][warn] branding partial"
