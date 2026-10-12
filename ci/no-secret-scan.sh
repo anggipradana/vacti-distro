@@ -51,12 +51,15 @@ scan_rootfs() {
   if find "${root}/root" "${root}/home" "${root}/etc" -maxdepth 4 -name '.claude' -print 2>/dev/null | grep -q .; then
     bad "${label}: a .claude directory is present (methodology must NOT ship on disk)"
   fi
-  # 2. forbidden content - scan config-ish trees, skip big binaries/caches
-  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg "$FORBIDDEN_PATTERNS" \
+  # 2. forbidden content - scan config-ish trees, skip big binaries/caches.
+  # --exclude-dir=testssl: testssl.sh (an arsenal TLS scanner) ships its own EC
+  # test keys under /etc/testssl/tls_data.txt; those "BEGIN EC PRIVATE KEY" test
+  # vectors are tool data, not a baked vacti secret, so they must not trip the gate.
+  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" \
         2>/dev/null | grep -q .; then
     bad "${label}: a secret-shaped pattern was found in the rootfs:"
-    grep -rEIl --binary-files=without-match --exclude-dir=dpkg "$FORBIDDEN_PATTERNS" \
+    grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" 2>/dev/null \
         | sed 's/^/    /' >&2 || true
   fi
