@@ -174,6 +174,20 @@ echo "[prov] base deps"
 apt-get update -y
 apt-get install -y --no-install-recommends ca-certificates curl gnupg jq
 
+# --- grow the root filesystem to fill the resized (20G) virtual disk ----------
+# build-golden.sh ran 'qemu-img resize 20G', which enlarges the BLOCK DEVICE but
+# NOT the partition/filesystem inside it: the Debian genericcloud root (GPT p1,
+# ext4) stays ~2GB, so the arsenal install below dies with
+# "No space left on device". cloud-init grows the root on first boot, but that is
+# far too late for this build-time apt install, so grow it now - before any heavy
+# install. cloud-guest-utils provides growpart; resize2fs ships in e2fsprogs
+# (already present). growpart exits non-zero when the partition is already maximal.
+echo "[prov] growing root partition + filesystem to fill the 20G virtual disk"
+apt-get install -y --no-install-recommends cloud-guest-utils
+growpart /dev/sda 1 || echo "[prov] growpart: no change (root partition already full-size?)"
+resize2fs /dev/sda1
+df -h / || true
+
 # Option A: Kali apt source, pinned prio 100 (package source only, no branding)
 if [[ -d /opt/vacti-build/kali-repo ]]; then
   echo "[prov] adding pinned Kali apt source (prio 100)"
