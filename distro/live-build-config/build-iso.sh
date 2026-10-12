@@ -152,6 +152,29 @@ else
   echo "[iso][WARN] config/bootstrap not found after lb config; cannot pin ca-certificates into debootstrap" >&2
 fi
 
+# --- WORKAROUND (Debian trixie): live-build 1:20250505's installer_debian-installer
+#     picks the FUSE runtime lib as:
+#       if Check_package_available libfuse3-4 -> libfuse3-4 ; else -> libfuse3-3
+#     trixie's fuse3 bumped its SONAME, so the shared-lib package is libfuse3-4
+#     (3.17.x) - there is NO libfuse3-3 (and NO libfuse3-3t64) in trixie. With a
+#     healthy chroot apt state the primary libfuse3-4 branch is taken, but the
+#     stale fallback otherwise dies with "E: Unable to locate package libfuse3-3"
+#     while the GUI SKU (--debian-installer live) builds the d-i package pool.
+#     Defensively rewrite the stale name in the installed live-build scripts so
+#     BOTH branches resolve to libfuse3-4. Best-effort + non-fatal (CI runs as
+#     root, so the live-build tree is writable). Drop once upstream live-build
+#     ships the corrected trixie name.
+echo "[iso] patching live-build's stale libfuse3-3 d-i fallback -> libfuse3-4 (trixie SONAME bump)"
+for _d in /usr/lib/live/build /usr/share/live; do
+  [[ -d "$_d" ]] || continue
+  while IFS= read -r _f; do
+    [[ -w "$_f" ]] || continue
+    if sed -i -E 's/\blibfuse3-3\b/libfuse3-4/g' "$_f" 2>/dev/null; then
+      echo "[iso]   patched ${_f}"
+    fi
+  done < <(grep -rlE '\blibfuse3-3\b' "$_d" 2>/dev/null || true)
+done
+
 echo "[iso] lb build (this is the heavy step; CI only)"
 lb build 2>&1 | tee build.log
 
