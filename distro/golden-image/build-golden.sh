@@ -105,6 +105,12 @@ fi
 # rea-agents under /usr/lib/node_modules) ships - not the installer script.
 cp -a "${HERE}/install-rea.sh" "${STAGE}/opt/vacti-build/install-rea.sh"
 chmod 0755 "${STAGE}/opt/vacti-build/install-rea.sh"
+# Ghidra installer: MANDATORY (REA's native-decompile engine), staged
+# UNCONDITIONALLY. provision.sh runs it after REA. Like install-rea.sh it lives
+# under /opt/vacti-build (FINALIZE rm -rf's it), so only its effect ships
+# (/opt/ghidra + the GHIDRA_INSTALL_DIR/JAVA_HOME env), not the installer.
+cp -a "${HERE}/install-ghidra.sh" "${STAGE}/opt/vacti-build/install-ghidra.sh"
+chmod 0755 "${STAGE}/opt/vacti-build/install-ghidra.sh"
 # CTF arsenal (opt-in): stage the installer + its apt list; provision.sh runs it
 # only when VACTI_CTF_ARSENAL=1. Both live under /opt/vacti-build, which FINALIZE
 # rm -rf's, so no CTF tool manifest/installer is left on the shipped image.
@@ -239,6 +245,16 @@ apt-get install -y --no-install-recommends ${VACTI_ENGINE_PKG} "\${PKGS[@]}" || 
 if [[ -x /opt/vacti-build/install-rea.sh ]]; then
   echo "[prov] installing REA (rea-agents@${VACTI_REA_VERSION}, mandatory)"
   REA_VERSION="${VACTI_REA_VERSION}" /opt/vacti-build/install-rea.sh || echo "[prov][warn] REA install partial (runtime self-heal/minting covers it)"
+fi
+
+# Ghidra (REA's native-decompile engine): MANDATORY, baked on every image. Runs
+# after the arsenal apt step installed default-jre-headless (the JRE Ghidra 11.1.2
+# needs). Mirrors the engine's GHIDRA_* pin. Best-effort; sets GHIDRA_INSTALL_DIR +
+# JAVA_HOME in the image. ~1GB unpacked under /opt/ghidra (deliberate operator ask).
+if [[ -x /opt/vacti-build/install-ghidra.sh ]]; then
+  echo "[prov] installing Ghidra (${VACTI_GHIDRA_VERSION}, mandatory; REA native-decompile engine)"
+  GHIDRA_VERSION="${VACTI_GHIDRA_VERSION}" GHIDRA_RELEASE_TAG="${VACTI_GHIDRA_TAG}" GHIDRA_ASSET="${VACTI_GHIDRA_ASSET}" \
+    /opt/vacti-build/install-ghidra.sh || echo "[prov][warn] Ghidra install partial (runtime self-heal/minting covers it)"
 fi
 
 # CTF arsenal (opt-in): run the staged installer only when VACTI_CTF_ARSENAL=1.

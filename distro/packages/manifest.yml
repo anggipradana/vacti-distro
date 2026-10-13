@@ -51,8 +51,10 @@ verticals:
   re: [gdb-multiarch, binwalk, strace, ltrace, tshark, checksec]
 
 # NON-apt heavy tools: never baked; runtime self-heal fetches per capability.
+# NOTE: ghidra MOVED OUT of this list - it is now baked MANDATORY (see
+# native_re_engine below), because REA's native decompilation depends on it.
 non_apt_post_boot:
-  [jadx, ghidra, frida-tools, objection, pymobiledevice3, semgrep,
+  [jadx, frida-tools, objection, pymobiledevice3, semgrep,
    re-python-venv, impacket, netexec, bloodhound-python, awscli, kubectl, caido]
 
 # MANDATORY non-apt tool, BAKED on every image + every SKU (not post-boot, not
@@ -80,6 +82,28 @@ reverse_engineering_mcp:
     iso: live-build-config/config/hooks/normal/0300-rea.hook.chroot
   mcp_and_skill_owner: "engine-repo (bootstrap-apt.sh + .deb mcp config); never .claude on disk"
 
+# MANDATORY native RE engine (REA's native binary-decompile dependency), BAKED on
+# every image + every SKU. Pinned to MIRROR the engine's packaging/bootstrap-apt.sh
+# step_ghidra (which GATES it behind caps re/desktop/firmware; the distro bakes it
+# unconditionally per the operator). Pure-Java -> needs a JDK 17+; trixie
+# default-jre-headless (JDK 21, already in core.base_runtime) satisfies it. The
+# installers set GHIDRA_INSTALL_DIR + JAVA_HOME in the image so REA finds it.
+# Baked by golden-image/install-ghidra.sh + the ISO hook 0310-ghidra.hook.chroot.
+# ci/no-secret-scan.sh --exclude-dir=ghidra keeps Ghidra's sample keys/passwords
+# (tool DATA under /opt/ghidra) from tripping the secret gate (testssl precedent).
+native_re_engine:
+  tool: ghidra
+  version: "11.1.2"                                 # PINNED; mirror engine GHIDRA_VERSION
+  release_tag: "Ghidra_11.1.2_build"
+  asset: "ghidra_11.1.2_PUBLIC_20240709.zip"
+  source: "github.com/NationalSecurityAgency/ghidra (pinned release zip -> /opt/ghidra)"
+  jdk: "openjdk-21-jre-headless (JDK 17+ required; trixie default-jre-headless = 21)"
+  env_baked: [GHIDRA_INSTALL_DIR, JAVA_HOME]        # /etc/environment + /etc/profile.d/vacti-ghidra.sh
+  size_note: "~1GB unpacked under /opt/ghidra (deliberate: native RE on every appliance)"
+  baked_by:
+    golden: golden-image/install-ghidra.sh
+    iso: live-build-config/config/hooks/normal/0310-ghidra.hook.chroot
+
 # Added only with VACTI_CTF_ARSENAL=1 (ctf.list + golden-image/install-ctf-arsenal.sh).
 # Default OFF - kind=ctf engagements otherwise self-heal post-boot. Lean by design:
 # sagemath / ghidra / stegsolve are DELIBERATELY excluded (multi-GB / GUI).
@@ -99,7 +123,10 @@ ctf:
     pipx:        [volatility3, RsaCtfTool]     # RsaCtfTool from upstream git
     gdb_plugin:  [gef]                         # single-file; pwndbg deliberately skipped (heavy)
     git_fallback: [exploitdb]                  # when apt (Kali) cannot supply searchsploit
-  excluded_too_heavy: [sagemath, ghidra, stegsolve, pwndbg-full-setup]
+  # ghidra was excluded here as too-heavy for the CTF arsenal, but it is now baked
+  # GLOBALLY + MANDATORY (see native_re_engine) as REA's decompile engine, so the
+  # CTF path inherits it. sagemath/stegsolve/pwndbg stay excluded.
+  excluded_too_heavy: [sagemath, stegsolve, pwndbg-full-setup]
 
 # The ~6 CORE tools absent from Debian main; how they resolve.
 debian_main_gaps:
