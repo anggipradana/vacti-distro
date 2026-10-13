@@ -35,7 +35,7 @@ die() { echo "[golden][FATAL] $*" >&2; exit 1; }
 
 # If the golden disk already exists (e.g. downloaded from a prior CI job), skip.
 if [[ -s "$GOLDEN" ]]; then
-  log "golden disk already present at $GOLDEN — skipping rebuild"
+  log "golden disk already present at $GOLDEN - skipping rebuild"
   exit 0
 fi
 
