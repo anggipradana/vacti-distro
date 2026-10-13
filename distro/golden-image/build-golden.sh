@@ -111,6 +111,12 @@ chmod 0755 "${STAGE}/opt/vacti-build/install-rea.sh"
 # (/opt/ghidra + the GHIDRA_INSTALL_DIR/JAVA_HOME env), not the installer.
 cp -a "${HERE}/install-ghidra.sh" "${STAGE}/opt/vacti-build/install-ghidra.sh"
 chmod 0755 "${STAGE}/opt/vacti-build/install-ghidra.sh"
+# Engine MANDATORY-by-default non-apt extras (web3 + interactsh/gau + Caido +
+# jwt_tool): staged UNCONDITIONALLY (base bake, not full-gated). provision.sh runs
+# it after the engine+arsenal install. Lives under /opt/vacti-build (FINALIZE
+# rm -rf's it), so only its effects ship, not the installer.
+cp -a "${HERE}/install-engine-extras.sh" "${STAGE}/opt/vacti-build/install-engine-extras.sh"
+chmod 0755 "${STAGE}/opt/vacti-build/install-engine-extras.sh"
 # CTF arsenal (opt-in): stage the installer + its apt list; provision.sh runs it
 # only when VACTI_CTF_ARSENAL=1. Both live under /opt/vacti-build, which FINALIZE
 # rm -rf's, so no CTF tool manifest/installer is left on the shipped image.
@@ -258,6 +264,16 @@ if [[ -x /opt/vacti-build/install-ghidra.sh ]]; then
   VACTI_JDK_TARBALL="${VACTI_JDK_TARBALL}" VACTI_JDK_URL="${VACTI_JDK_URL}" \
   VACTI_JDK_SHA256="${VACTI_JDK_SHA256}" VACTI_JDK_DIR="${VACTI_JDK_DIR}" \
     /opt/vacti-build/install-ghidra.sh || echo "[prov][warn] Ghidra install partial (runtime self-heal/minting covers it)"
+fi
+
+# Engine MANDATORY-by-default non-apt extras (web3 slither+Foundry, interactsh-client,
+# gau, jwt_tool, Caido): baked on every image (BASE bake, not VACTI_FULL_ARSENAL-gated).
+# Runs after the engine+arsenal install so go/pipx/git/curl + the vacti-engine user exist.
+if [[ -x /opt/vacti-build/install-engine-extras.sh ]]; then
+  echo "[prov] installing engine mandatory extras (web3 + interactsh/gau + jwt_tool + Caido)"
+  VACTI_INTERACTSH_VERSION="${VACTI_INTERACTSH_VERSION}" VACTI_GAU_VERSION="${VACTI_GAU_VERSION}" \
+  VACTI_CAIDO_VERSION="${VACTI_CAIDO_VERSION}" VACTI_CAIDO_MCP_TAG="${VACTI_CAIDO_MCP_TAG}" \
+    /opt/vacti-build/install-engine-extras.sh || echo "[prov][warn] engine-extras install partial (runtime self-heal/minting covers it)"
 fi
 
 # CTF arsenal (opt-in): run the staged installer only when VACTI_CTF_ARSENAL=1.

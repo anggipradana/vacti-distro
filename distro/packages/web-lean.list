@@ -72,6 +72,9 @@ earlyoom
 
 # --- Client-VPN clients (an engagement runs behind the client's VPN) ---
 openconnect
+# globalprotect-openconnect: gpclient's real GlobalProtect portal pre-auth flow
+# (engine CORE VPN set; absent from some Debian suites -> best-effort per-package).
+globalprotect-openconnect
 openfortivpn
 openvpn
 wireguard-tools

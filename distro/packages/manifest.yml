@@ -28,7 +28,7 @@ core:
      python3-full]
   tls_network: [sslscan, testssl.sh]
   vpn_clients:
-    [openconnect, openfortivpn, openvpn,
+    [openconnect, globalprotect-openconnect, openfortivpn, openvpn,
      wireguard-tools, strongswan, strongswan-swanctl]
   evidence_screenshot:
     [imagemagick, xdotool, x11-xserver-utils, qterminal, sshpass, tmux]
@@ -51,11 +51,32 @@ verticals:
   re: [gdb-multiarch, binwalk, strace, ltrace, tshark, checksec]
 
 # NON-apt heavy tools: never baked; runtime self-heal fetches per capability.
-# NOTE: ghidra MOVED OUT of this list - it is now baked MANDATORY (see
-# native_re_engine below), because REA's native decompilation depends on it.
+# NOTE: ghidra + caido MOVED OUT of this list - ghidra is baked MANDATORY (see
+# native_re_engine) and caido is baked MANDATORY (see baked_mandatory_extras),
+# both part of the canonical mandatory set (CORE + web3 + REA + Ghidra).
 non_apt_post_boot:
   [jadx, frida-tools, objection, pymobiledevice3, semgrep,
-   re-python-venv, impacket, netexec, bloodhound-python, awscli, kubectl, caido]
+   re-python-venv, impacket, netexec, bloodhound-python, awscli, kubectl]
+
+# MANDATORY-by-default NON-apt tools baked on the BASE image (not VACTI_FULL_ARSENAL-
+# gated) by golden-image/install-engine-extras.sh + the ISO hook
+# config/hooks/normal/0320-engine-extras.hook.chroot. These are the engine-mandatory
+# tools (confirmed by engine 0.2.302: CORE + web3 + REA + Ghidra) that the plain apt
+# lists cannot express. Install METHODS mirror packaging/bootstrap-apt.sh; all are
+# made reachable on /usr/local/bin (or, for Caido, the engine home start-arsenal
+# expects). globalprotect-openconnect (the 6th gap) is an apt tool -> web-lean.list.
+baked_mandatory_extras:
+  web3:                                  # step_web3_arsenal (DEFAULT-ON / mandatory)
+    slither: "pipx slither-analyzer (PIPX_HOME=/opt/pipx, PIPX_BIN_DIR=/usr/local/bin)"
+    foundry: "foundryup -> /opt/foundry; forge/cast/anvil symlinked to /usr/local/bin"
+  recon_go_tools:                        # step_apt go-install fallbacks (pinned)
+    interactsh-client: "v1.2.4 (go install, GOBIN=/usr/local/bin) - OOB/SSRF confirmation"
+    gau: "v2.2.4 (go install, GOBIN=/usr/local/bin) - passive URL mining"
+  jwt_tool: "git clone -> /opt/jwt_tool (run via python3 jwt_tool.py)"   # step_jwt_tool
+  caido:                                 # step_caido (guest-mode proxy/evidence)
+    cli: "v0.57.0 caido-cli -> <engine_home>/caido (arch-aware)"
+    mcp: "caido-mcp-server v1.1.0 (go build) -> /usr/local/bin"
+  vpn_apt: "globalprotect-openconnect -> packages/web-lean.list (core.vpn_clients)"
 
 # MANDATORY non-apt tool, BAKED on every image + every SKU (not post-boot, not
 # opt-in). npm-installed, PINNED per the 2026-10-13 REA safety vetting. Baked by

@@ -1,0 +1,167 @@
+#!/bin/sh
+# 0320-engine-extras.hook.chroot - bake the engine's MANDATORY-by-default NON-apt
+# tools (CORE/web3 set confirmed by engine 0.2.302) into the ISO rootfs. ISO
+# counterpart of golden-image/install-engine-extras.sh; self-contained (hooks
+# cannot source outside the chroot). Keep this body IN SYNC with that script and
+# the pins in vacti-appliance.env (VACTI_INTERACTSH_VERSION / VACTI_GAU_VERSION /
+# VACTI_CAIDO_VERSION).
+#
+# Tools (mirror bootstrap-apt.sh methods, system-wide /usr/local/bin reachable):
+#   (1) interactsh-client + gau  -> pinned go install
+#   (2) jwt_tool                 -> git clone -> /opt/jwt_tool
+#   (3) web3: slither + Foundry  -> pipx(/opt/pipx) + foundryup(/opt/foundry), symlinked
+#   (4) Caido CLI + caido-mcp-server -> engine-home cli + go-built MCP
+# (globalprotect-openconnect is an apt tool -> packages/web-lean.list.)
+#
+# MANDATORY on every SKU. Zero .claude on disk; /root cleaned. Runs at chroot_hooks
+# (after packages, so go/pipx/git/curl + the vacti-engine user exist). Best-effort.
+set -u
+
+INTERACTSH_VERSION="v1.2.4"
+GAU_VERSION="v2.2.4"
+CAIDO_VERSION="v0.57.0"
+CAIDO_MCP_TAG="v1.1.0"
+JWT_TOOL_REPO="https://github.com/ticarpi/jwt_tool.git"
+JWT_TOOL_DIR="/opt/jwt_tool"
+FOUNDRY_DIR="/opt/foundry"
+
+log()  { echo "[extras] $*"; }
+warn() { echo "[extras][warn] $*" >&2; }
+need() { command -v "$1" >/dev/null 2>&1; }
+
+export DEBIAN_FRONTEND=noninteractive
+ARCH="$(uname -m 2>/dev/null || echo unknown)"
+
+ENGINE_USER="vacti-engine"
+getent passwd "$ENGINE_USER" >/dev/null 2>&1 || ENGINE_USER=""
+ENGINE_HOME=""
+[ -n "$ENGINE_USER" ] && ENGINE_HOME="$(getent passwd "$ENGINE_USER" 2>/dev/null | cut -d: -f6)"
+[ -n "$ENGINE_HOME" ] || ENGINE_HOME="/opt/vacti-engine"
+
+need go || { [ -x /usr/local/go/bin/go ] && PATH="/usr/local/go/bin:$PATH" && export PATH; }
+
+# --- (1) interactsh-client + gau (pinned go installs -> /usr/local/bin) --------
+if need go; then
+  if need interactsh-client; then
+    log "interactsh-client already present"
+  else
+    log "go install interactsh-client@${INTERACTSH_VERSION} -> /usr/local/bin"
+    GOBIN=/usr/local/bin go install "github.com/projectdiscovery/interactsh/cmd/interactsh-client@${INTERACTSH_VERSION}" \
+      || warn "interactsh-client go install failed (OOB/SSRF confirmation degrades)"
+  fi
+  if need gau; then
+    log "gau already present"
+  else
+    log "go install gau@${GAU_VERSION} -> /usr/local/bin"
+    GOBIN=/usr/local/bin go install "github.com/lc/gau/v2/cmd/gau@${GAU_VERSION}" \
+      || warn "gau go install failed (passive URL mining falls back to katana/wayback)"
+  fi
+else
+  warn "go unavailable; skipping interactsh-client + gau"
+fi
+
+# --- (2) jwt_tool (git clone -> /opt/jwt_tool) --------------------------------
+if [ -d "${JWT_TOOL_DIR}/.git" ]; then
+  log "jwt_tool already cloned (${JWT_TOOL_DIR})"
+elif need git; then
+  log "jwt_tool: cloning -> ${JWT_TOOL_DIR}"
+  if git clone --depth 1 "$JWT_TOOL_REPO" "$JWT_TOOL_DIR" >/dev/null 2>&1; then
+    chmod -R a+rX "$JWT_TOOL_DIR" 2>/dev/null || true
+    log "jwt_tool: cloned (run via 'python3 ${JWT_TOOL_DIR}/jwt_tool.py')"
+  else
+    warn "jwt_tool clone failed; JWT attacks degrade until installed"
+  fi
+else
+  warn "git unavailable; skipping jwt_tool"
+fi
+
+# --- (3) web3 arsenal: slither (pipx) + Foundry (forge/cast/anvil) -------------
+if need pipx; then
+  if [ -x /usr/local/bin/slither ]; then
+    log "web3: slither already installed"
+  else
+    log "pipx: installing slither-analyzer -> /usr/local/bin"
+    PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin PIP_BREAK_SYSTEM_PACKAGES=1 \
+      pipx install slither-analyzer >/dev/null 2>&1 \
+      || warn "pipx install slither-analyzer failed (web3 vertical degrades)"
+  fi
+else
+  warn "web3: pipx not found; skipping slither-analyzer"
+fi
+if need curl; then
+  if [ -x /usr/local/bin/forge ] && [ -x /usr/local/bin/cast ] && [ -x /usr/local/bin/anvil ]; then
+    log "web3: foundry (forge/cast/anvil) already installed"
+  else
+    log "web3: installing Foundry (forge/cast/anvil) -> ${FOUNDRY_DIR}"
+    mkdir -p "$FOUNDRY_DIR"
+    _ok=0
+    for _try in 1 2 3; do
+      if env HOME=/root FOUNDRY_DIR="$FOUNDRY_DIR" sh -c 'curl -L --fail -m 180 https://foundry.paradigm.xyz | bash' >/dev/null 2>&1 \
+         && env HOME=/root FOUNDRY_DIR="$FOUNDRY_DIR" "${FOUNDRY_DIR}/bin/foundryup" >/dev/null 2>&1; then
+        _ok=1; break
+      fi
+      warn "web3: Foundry install attempt ${_try}/3 failed; retrying"
+      sleep $(( _try * 3 ))
+    done
+    if [ "$_ok" = "1" ]; then
+      for _fb in forge cast anvil; do
+        [ -x "${FOUNDRY_DIR}/bin/${_fb}" ] && ln -sf "${FOUNDRY_DIR}/bin/${_fb}" "/usr/local/bin/${_fb}" \
+          && log "linked ${_fb} -> ${FOUNDRY_DIR}/bin/${_fb}"
+      done
+    else
+      warn "web3: Foundry install failed after 3 attempts; forge/cast/anvil unavailable until installed"
+    fi
+  fi
+else
+  warn "web3: curl not found; skipping Foundry"
+fi
+
+# --- (4) Caido CLI + caido-mcp-server -----------------------------------------
+caido_dir="${ENGINE_HOME}/caido"
+caido_bin="${caido_dir}/caido-cli"
+if [ -x "$caido_bin" ]; then
+  log "Caido CLI already installed (${caido_bin})"
+elif need curl; then
+  case "$ARCH" in
+    x86_64|amd64)   caido_arch="x86_64" ;;
+    aarch64|arm64)  caido_arch="aarch64" ;;
+    *)              caido_arch="x86_64"; warn "caido: unknown arch ${ARCH}; trying x86_64" ;;
+  esac
+  url="https://caido.download/releases/${CAIDO_VERSION}/caido-cli-${CAIDO_VERSION}-linux-${caido_arch}.tar.gz"
+  log "caido: downloading ${CAIDO_VERSION} (${caido_arch}) -> ${caido_dir}"
+  mkdir -p "$caido_dir"
+  if curl -sL --fail -m 180 -o "${caido_dir}/caido-cli.tar.gz" "$url" && tar xzf "${caido_dir}/caido-cli.tar.gz" -C "$caido_dir"; then
+    rm -f "${caido_dir}/caido-cli.tar.gz"
+    chmod +x "$caido_bin" 2>/dev/null || true
+    [ -n "$ENGINE_USER" ] && chown -R "${ENGINE_USER}:${ENGINE_USER}" "$caido_dir" 2>/dev/null || true
+    log "caido: installed (${caido_bin})"
+  else
+    warn "caido: download failed (${url}); Caido capture self-heals post-boot"
+    rm -f "${caido_dir}/caido-cli.tar.gz" 2>/dev/null || true
+  fi
+else
+  warn "curl not found; skipping Caido CLI"
+fi
+if [ -x /usr/local/bin/caido-mcp-server ]; then
+  log "caido-mcp-server already installed"
+elif need go && need git; then
+  log "caido-mcp-server: building ${CAIDO_MCP_TAG} -> /usr/local/bin"
+  _src="$(mktemp -d)"
+  if git clone --depth 1 --branch "$CAIDO_MCP_TAG" https://github.com/c0tton-fluff/caido-mcp-server.git "$_src" >/dev/null 2>&1 \
+     && ( cd "$_src" && GOFLAGS=-mod=mod go build -o /usr/local/bin/caido-mcp-server . >/dev/null 2>&1 ); then
+    chmod +x /usr/local/bin/caido-mcp-server 2>/dev/null || true
+    printf '%s\n' "$CAIDO_MCP_TAG" > /usr/local/bin/caido-mcp-server.version 2>/dev/null || true
+    log "caido-mcp-server: built (${CAIDO_MCP_TAG})"
+  else
+    warn "caido-mcp-server build failed; the Caido MCP self-heals/minting covers it"
+  fi
+  rm -rf "$_src" 2>/dev/null || true
+else
+  warn "go/git unavailable; skipping caido-mcp-server"
+fi
+
+# --- hygiene: keep /root clean + image lean -----------------------------------
+go clean -cache -modcache >/dev/null 2>&1 || true
+rm -rf /root/go /root/.cache /root/.foundry /root/.npm /root/.rustup /root/.cargo 2>/dev/null || true
+
+log "engine-extras bake complete (engine_home=${ENGINE_HOME})"
