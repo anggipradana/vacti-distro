@@ -99,6 +99,12 @@ if [[ ! "${VACTI_NO_KALI_REPO}" =~ ^(1|true|yes|on)$ ]]; then
   mkdir -p "${STAGE}/opt/vacti-build/kali-repo"
   cp -a "${PKG_DIR}/kali-repo/kali.list" "${PKG_DIR}/kali-repo/kali-pin.pref" "${STAGE}/opt/vacti-build/kali-repo/"
 fi
+# REA (rea-agents) installer: MANDATORY on every image, so stage it
+# UNCONDITIONALLY. provision.sh runs it after Node/engine install. It lives under
+# /opt/vacti-build, which FINALIZE rm -rf's, so only its effect (the global
+# rea-agents under /usr/lib/node_modules) ships - not the installer script.
+cp -a "${HERE}/install-rea.sh" "${STAGE}/opt/vacti-build/install-rea.sh"
+chmod 0755 "${STAGE}/opt/vacti-build/install-rea.sh"
 # CTF arsenal (opt-in): stage the installer + its apt list; provision.sh runs it
 # only when VACTI_CTF_ARSENAL=1. Both live under /opt/vacti-build, which FINALIZE
 # rm -rf's, so no CTF tool manifest/installer is left on the shipped image.
@@ -223,6 +229,17 @@ apt-get install -y --no-install-recommends ${VACTI_ENGINE_PKG} "\${PKGS[@]}" || 
   apt-get install -y --no-install-recommends ${VACTI_ENGINE_PKG}
   for p in "\${PKGS[@]}"; do apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] \$p not installable here (runtime self-heal will cover it)"; done
 }
+
+# REA (rea-agents): MANDATORY, baked on every image. Runs after Node + engine
+# install (the NodeSource 22.x repo was added above). install-rea.sh verifies the
+# Node floor itself, then installs the PINNED rea-agents globally. Best-effort: a
+# transient npm blip warns and the build continues (runtime self-heal covers it).
+# Only the RUNTIME is baked here; the MCP registration + reverse-engineer-anything
+# skill are the engine/minting side's job (no .claude ever ships on disk).
+if [[ -x /opt/vacti-build/install-rea.sh ]]; then
+  echo "[prov] installing REA (rea-agents@${VACTI_REA_VERSION}, mandatory)"
+  REA_VERSION="${VACTI_REA_VERSION}" /opt/vacti-build/install-rea.sh || echo "[prov][warn] REA install partial (runtime self-heal/minting covers it)"
+fi
 
 # CTF arsenal (opt-in): run the staged installer only when VACTI_CTF_ARSENAL=1.
 # The flag value is baked by the HOST into this build-only script. The installer

@@ -1,0 +1,78 @@
+#!/bin/sh
+# 0300-rea.hook.chroot - bake REA (Reverse Engineer Anything, npm `rea-agents`)
+# into the live-build ISO rootfs. The ISO counterpart of the golden path's
+# golden-image/install-rea.sh; this is a self-contained /bin/sh chroot hook
+# because live-build hooks cannot source a file from outside the chroot (the same
+# reason build-iso.sh re-implements the golden apt wiring rather than calling it).
+# Keep this body IN SYNC with golden-image/install-rea.sh and the pin in
+# vacti-appliance.env (VACTI_REA_VERSION).
+#
+# MANDATORY on every image + every SKU: runs unconditionally. It bakes only the
+# RUNTIME for REA (a Node >= floor + the pinned global rea-agents package) so the
+# engine's agent can launch the local `rea` MCP offline. It does NOT write a
+# Claude MCP config or copy the reverse-engineer-anything skill onto disk - that
+# is the engine/minting side's job, and the ISO must ship ZERO `.claude`
+# methodology (0900-remove-build-auth + ci/no-secret-scan.sh enforce that).
+#
+# Runs at the chroot_hooks stage (after the package lists install). Best-effort:
+# a transient npm/registry blip warns and the build continues (runtime self-heal
+# / the minting installer covers the gap). No `set -e` - never abort the ISO on a
+# tool blip.
+set -u
+
+REA_VERSION="6.4.0"   # PINNED; vetted SAFE 2026-10-13. Keep == VACTI_REA_VERSION.
+
+log()  { echo "[rea] $*"; }
+warn() { echo "[rea][warn] $*" >&2; }
+
+export DEBIAN_FRONTEND=noninteractive
+
+# REA requires Node ^22.19.0 || ^24.11.0 || >=26.0.0 (and npm on PATH).
+node_satisfies() {
+  command -v node >/dev/null 2>&1 || return 1
+  command -v npm  >/dev/null 2>&1 || return 1
+  v=$(node -v 2>/dev/null | sed 's/^v//')
+  maj=${v%%.*}
+  rest=${v#*.}
+  min=${rest%%.*}
+  case "$maj" in ''|*[!0-9]*) return 1 ;; esac
+  case "$min" in ''|*[!0-9]*) min=0 ;; esac
+  [ "$maj" -eq 22 ] && [ "$min" -ge 19 ] && return 0
+  [ "$maj" -eq 24 ] && [ "$min" -ge 11 ] && return 0
+  [ "$maj" -ge 26 ] && return 0
+  return 1
+}
+
+# --- 1. Node floor (NodeSource 22.x satisfies ^22.19) ------------------------
+if node_satisfies; then
+  log "Node $(node -v 2>/dev/null) + npm present; satisfies REA floor"
+else
+  log "Node missing or below REA floor; installing NodeSource Node.js 22.x"
+  if curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; then
+    apt-get install -y --no-install-recommends nodejs || warn "nodejs install failed"
+  else
+    warn "NodeSource setup failed (runtime self-heal / minting covers REA's Node)"
+  fi
+fi
+
+# --- 2. REA (pinned, scripts ignored) ----------------------------------------
+if ! command -v npm >/dev/null 2>&1; then
+  warn "npm unavailable after Node provisioning; skipping rea-agents (self-heal covers it)"
+else
+  log "npm install -g --ignore-scripts rea-agents@${REA_VERSION}"
+  if npm install -g --ignore-scripts "rea-agents@${REA_VERSION}"; then
+    if rea --version >/dev/null 2>&1; then
+      log "installed rea-agents: $(rea --version 2>/dev/null)"
+    else
+      log "rea-agents installed (global); 'rea' resolves via npx -y rea-agents@${REA_VERSION} mcp"
+    fi
+  else
+    warn "rea-agents@${REA_VERSION} install failed (runtime self-heal / minting covers it)"
+  fi
+fi
+
+# --- 3. hygiene: keep /root clean + image lean -------------------------------
+npm cache clean --force >/dev/null 2>&1 || true
+rm -rf /root/.npm 2>/dev/null || true
+
+log "REA bake complete"
