@@ -83,23 +83,31 @@ reverse_engineering_mcp:
   mcp_and_skill_owner: "engine-repo (bootstrap-apt.sh + .deb mcp config); never .claude on disk"
 
 # MANDATORY native RE engine (REA's native binary-decompile dependency), BAKED on
-# every image + every SKU. Pinned to MIRROR the engine's packaging/bootstrap-apt.sh
-# step_ghidra (which GATES it behind caps re/desktop/firmware; the distro bakes it
-# unconditionally per the operator). Pure-Java -> needs a JDK 17+; trixie
-# default-jre-headless (JDK 21, already in core.base_runtime) satisfies it. The
-# installers set GHIDRA_INSTALL_DIR + JAVA_HOME in the image so REA finds it.
-# Baked by golden-image/install-ghidra.sh + the ISO hook 0310-ghidra.hook.chroot.
-# ci/no-secret-scan.sh --exclude-dir=ghidra keeps Ghidra's sample keys/passwords
-# (tool DATA under /opt/ghidra) from tripping the secret gate (testssl precedent).
+# every image + every SKU. The PIN IS DICTATED BY REA 6.4.0, not by the engine's
+# bootstrap-apt.sh: REA's GhidraInstallationPolicy.ts requires Ghidra major==12 &&
+# minor==1 (SUPPORTED_GHIDRA_VERSION 12.1.4) AND a 64-bit FULL JDK major 21 - a
+# jre/jre-headless is REJECTED as runtime-only (so an 11.x Ghidra or a jre-headless
+# would be installed-but-unusable by REA). Assets + SHA256 are the exact ones the
+# fleet install agent verified empirically (analyzeHeadless import + rea doctor).
+# The installers bake GHIDRA_INSTALL_DIR + JAVA_HOME (/etc/environment + profile.d +
+# a vacti-engine.service systemd drop-in); they do NOT write engine.env (forbidden
+# on a shipped image). ci/no-secret-scan.sh --exclude-dir='ghidra*'/'jdk-*' keeps the
+# tools' sample keys/passwords (tool DATA, SHA-pinned) from tripping the secret gate.
 native_re_engine:
   tool: ghidra
-  version: "11.1.2"                                 # PINNED; mirror engine GHIDRA_VERSION
-  release_tag: "Ghidra_11.1.2_build"
-  asset: "ghidra_11.1.2_PUBLIC_20240709.zip"
-  source: "github.com/NationalSecurityAgency/ghidra (pinned release zip -> /opt/ghidra)"
-  jdk: "openjdk-21-jre-headless (JDK 17+ required; trixie default-jre-headless = 21)"
-  env_baked: [GHIDRA_INSTALL_DIR, JAVA_HOME]        # /etc/environment + /etc/profile.d/vacti-ghidra.sh
-  size_note: "~1GB unpacked under /opt/ghidra (deliberate: native RE on every appliance)"
+  version: "12.1.4"                                 # PINNED by REA (major==12 && minor==1)
+  release_tag: "Ghidra_12.1.4_build"
+  asset: "ghidra_12.1.4_PUBLIC_20260921.zip"
+  sha256: "ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db"
+  install_dir: "/opt/ghidra_12.1.4_PUBLIC"
+  source: "github.com/NationalSecurityAgency/ghidra (pinned release zip -> /opt)"
+  jdk:
+    vendor_pkg: "Temurin 21 FULL JDK (NOT a jre/jre-headless; REA rejects runtime-only)"
+    tarball: "OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz (x86_64; arm64 handled separately)"
+    sha256: "ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94"
+    home: "/opt/jdk-21.0.12.1+1"
+  env_baked: [GHIDRA_INSTALL_DIR, JAVA_HOME]        # /etc/environment + /etc/profile.d + vacti-engine.service.d drop-in
+  size_note: "~1.3GB under /opt (Ghidra ~1GB + Temurin JDK ~0.3GB; deliberate)"
   baked_by:
     golden: golden-image/install-ghidra.sh
     iso: live-build-config/config/hooks/normal/0310-ghidra.hook.chroot

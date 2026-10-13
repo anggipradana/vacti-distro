@@ -247,13 +247,16 @@ if [[ -x /opt/vacti-build/install-rea.sh ]]; then
   REA_VERSION="${VACTI_REA_VERSION}" /opt/vacti-build/install-rea.sh || echo "[prov][warn] REA install partial (runtime self-heal/minting covers it)"
 fi
 
-# Ghidra (REA's native-decompile engine): MANDATORY, baked on every image. Runs
-# after the arsenal apt step installed default-jre-headless (the JRE Ghidra 11.1.2
-# needs). Mirrors the engine's GHIDRA_* pin. Best-effort; sets GHIDRA_INSTALL_DIR +
-# JAVA_HOME in the image. ~1GB unpacked under /opt/ghidra (deliberate operator ask).
+# Ghidra + FULL Temurin 21 JDK (REA's native-decompile engine): MANDATORY, baked
+# on every image. The pin is dictated by REA 6.4.0 (Ghidra 12.1.4 + a full JDK 21;
+# a jre-headless is rejected), SHA256-gated. Best-effort; bakes GHIDRA_INSTALL_DIR +
+# JAVA_HOME. ~1.3GB under /opt (deliberate operator ask).
 if [[ -x /opt/vacti-build/install-ghidra.sh ]]; then
-  echo "[prov] installing Ghidra (${VACTI_GHIDRA_VERSION}, mandatory; REA native-decompile engine)"
-  GHIDRA_VERSION="${VACTI_GHIDRA_VERSION}" GHIDRA_RELEASE_TAG="${VACTI_GHIDRA_TAG}" GHIDRA_ASSET="${VACTI_GHIDRA_ASSET}" \
+  echo "[prov] installing Ghidra ${VACTI_GHIDRA_VERSION} + Temurin JDK 21 (mandatory; REA native-decompile engine)"
+  VACTI_GHIDRA_VERSION="${VACTI_GHIDRA_VERSION}" VACTI_GHIDRA_TAG="${VACTI_GHIDRA_TAG}" VACTI_GHIDRA_ASSET="${VACTI_GHIDRA_ASSET}" \
+  VACTI_GHIDRA_SHA256="${VACTI_GHIDRA_SHA256}" VACTI_GHIDRA_DIR="${VACTI_GHIDRA_DIR}" \
+  VACTI_JDK_TARBALL="${VACTI_JDK_TARBALL}" VACTI_JDK_URL="${VACTI_JDK_URL}" \
+  VACTI_JDK_SHA256="${VACTI_JDK_SHA256}" VACTI_JDK_DIR="${VACTI_JDK_DIR}" \
     /opt/vacti-build/install-ghidra.sh || echo "[prov][warn] Ghidra install partial (runtime self-heal/minting covers it)"
 fi
 

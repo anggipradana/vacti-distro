@@ -55,14 +55,16 @@ scan_rootfs() {
   # --exclude-dir=testssl: testssl.sh (an arsenal TLS scanner) ships its own EC
   # test keys under /etc/testssl/tls_data.txt; those "BEGIN EC PRIVATE KEY" test
   # vectors are tool data, not a baked vacti secret, so they must not trip the gate.
-  # --exclude-dir=ghidra: Ghidra (the baked RE engine under /opt/ghidra) ships
-  # large test/sample trees that include dummy keys/passwords as tool DATA, same
-  # rationale as testssl - they are not a baked vacti secret.
-  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir=ghidra "$FORBIDDEN_PATTERNS" \
+  # --exclude-dir='ghidra*' / 'jdk-*': the baked RE engine (Ghidra 12.1.4 under
+  # /opt/ghidra_12.1.4_PUBLIC) and its FULL Temurin JDK (/opt/jdk-21.0.12.1+1) ship
+  # large test/sample/man trees with dummy keys/passwords as tool DATA; both are
+  # pinned by SHA256 at install, so exclude them from the pattern grep (same
+  # rationale as testssl - not a baked vacti secret). Globs match the versioned dirs.
+  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir='ghidra*' --exclude-dir='jdk-*' "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" \
         2>/dev/null | grep -q .; then
     bad "${label}: a secret-shaped pattern was found in the rootfs:"
-    grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir=ghidra "$FORBIDDEN_PATTERNS" \
+    grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir='ghidra*' --exclude-dir='jdk-*' "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" 2>/dev/null \
         | sed 's/^/    /' >&2 || true
   fi

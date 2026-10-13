@@ -1,86 +1,130 @@
 #!/bin/sh
-# 0310-ghidra.hook.chroot - bake Ghidra (NSA SRE) into the live-build ISO rootfs.
-# The ISO counterpart of golden-image/install-ghidra.sh; self-contained because a
-# live-build hook cannot source a file from outside the chroot. Keep this body IN
-# SYNC with golden-image/install-ghidra.sh, the pin in vacti-appliance.env
-# (VACTI_GHIDRA_*), and the engine's packaging/bootstrap-apt.sh GHIDRA_VERSION.
+# 0310-ghidra.hook.chroot - bake Ghidra (NSA SRE) + a FULL Temurin JDK into the
+# live-build ISO rootfs as REA's native-decompile engine. ISO counterpart of
+# golden-image/install-ghidra.sh; self-contained (hooks cannot source outside the
+# chroot). Keep this body IN SYNC with install-ghidra.sh, vacti-appliance.env
+# (VACTI_GHIDRA_* / VACTI_JDK_*) and REA's pin.
 #
-# MANDATORY on every image + every SKU: runs unconditionally, as REA's native
-# binary-decompile engine. Ghidra 11.1.2 needs JDK 17+; trixie default-jre-headless
-# (in the baked package list) is JDK 21, which satisfies it. Sets GHIDRA_INSTALL_DIR
-# + JAVA_HOME in the image. SIZE: ~1GB unpacked under /opt/ghidra (deliberate).
+# PIN DICTATED BY REA 6.4.0 (src/ghidra/GhidraInstallationPolicy.ts):
+#   - Ghidra major==12 && minor==1 (SUPPORTED_GHIDRA_VERSION = 12.1.4), and
+#   - a 64-bit FULL JDK (major 21) - a jre/jre-headless is REJECTED as runtime-only.
+# Assets + SHA256 are the exact ones the fleet install agent verified empirically.
 #
-# Runs at chroot_hooks (after the package lists install). Best-effort, no `set -e`.
+# MANDATORY on every SKU. Bakes GHIDRA_INSTALL_DIR + JAVA_HOME via /etc/environment,
+# /etc/profile.d, and a vacti-engine.service systemd drop-in. It does NOT write
+# engine.env (a FORBIDDEN path on a shipped image). SIZE: ~1.3GB under /opt
+# (deliberate). Runs at chroot_hooks (after packages). Best-effort + SHA-gated.
 set -u
 
-GHIDRA_VERSION="11.1.2"                                   # PINNED; keep == VACTI_GHIDRA_VERSION / engine
-GHIDRA_RELEASE_TAG="Ghidra_11.1.2_build"
-GHIDRA_ASSET="ghidra_11.1.2_PUBLIC_20240709.zip"
-GHIDRA_DIR="/opt/ghidra"
+GHIDRA_VERSION="12.1.4"
+GHIDRA_RELEASE_TAG="Ghidra_12.1.4_build"
+GHIDRA_ASSET="ghidra_12.1.4_PUBLIC_20260921.zip"
+GHIDRA_SHA256="ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db"
+GHIDRA_DIR="/opt/ghidra_12.1.4_PUBLIC"
+
+JDK_TARBALL="OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz"
+JDK_URL="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/${JDK_TARBALL}"
+JDK_SHA256="ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94"
+JDK_DIR="/opt/jdk-21.0.12.1+1"
+
+PROFD="/etc/profile.d/vacti-ghidra.sh"
+UNIT_DROPIN_DIR="/etc/systemd/system/vacti-engine.service.d"
+UNIT_DROPIN="${UNIT_DROPIN_DIR}/10-ghidra-env.conf"
 
 log()  { echo "[ghidra] $*"; }
 warn() { echo "[ghidra][warn] $*" >&2; }
 
 export DEBIAN_FRONTEND=noninteractive
+ARCH="$(uname -m 2>/dev/null || echo unknown)"
 
-# --- 1. JRE (Ghidra 11.1.2 needs JDK 17+; trixie default-jre-headless = JDK 21) --
-if command -v java >/dev/null 2>&1; then
-  log "JRE present: $(java -version 2>&1 | head -1)"
+need() { command -v "$1" >/dev/null 2>&1; }
+need curl  || { apt-get install -y --no-install-recommends curl  >/dev/null 2>&1 || warn "curl install failed"; }
+need unzip || { apt-get install -y --no-install-recommends unzip >/dev/null 2>&1 || warn "unzip install failed"; }
+
+verify() { echo "$1  $2" | sha256sum -c - >/dev/null 2>&1; }
+
+# --- 1. FULL Temurin 21 JDK (REA rejects a runtime-only JRE) -------------------
+if [ -x "${JDK_DIR}/bin/javac" ]; then
+  log "full JDK present: ${JDK_DIR}"
+elif [ "$ARCH" != "x86_64" ]; then
+  warn "arch ${ARCH} != x86_64; pinned Temurin x64 JDK does not apply (arm64 handled separately). Skipping JDK."
+elif need curl; then
+  log "downloading Temurin 21 JDK -> /opt/${JDK_TARBALL}"
+  if curl -fsSL --retry 4 --retry-delay 3 -m 600 -o "/opt/${JDK_TARBALL}" "$JDK_URL"; then
+    if verify "$JDK_SHA256" "/opt/${JDK_TARBALL}"; then
+      ( cd /opt && tar -xzf "${JDK_TARBALL}" ) && log "JDK extracted -> ${JDK_DIR}" || warn "JDK extract failed"
+      [ -x "${JDK_DIR}/bin/javac" ] && ln -sfn "${JDK_DIR}" /opt/temurin-21 || warn "javac missing after extract (${JDK_DIR})"
+    else
+      warn "JDK sha256 MISMATCH; discarding download (will not ship a wrong JDK)"
+    fi
+    rm -f "/opt/${JDK_TARBALL}"
+  else
+    warn "JDK download failed; Ghidra will lack a usable JDK until self-heal/minting installs one"
+  fi
 else
-  log "no JRE on PATH; installing openjdk-21-jre-headless (Ghidra ${GHIDRA_VERSION} needs JDK 17+)"
-  apt-get install -y --no-install-recommends openjdk-21-jre-headless \
-    || apt-get install -y --no-install-recommends default-jre-headless \
-    || warn "JRE install failed; Ghidra will not run until a JDK 17+ is present"
+  warn "curl unavailable; skipping JDK"
 fi
 
-# --- 2. download + unpack the pinned Ghidra release (mirror engine step_ghidra) --
-if command -v analyzeHeadless >/dev/null 2>&1; then
-  log "analyzeHeadless already present ($(command -v analyzeHeadless)); skipping download"
-elif command -v curl >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+# --- 2. Ghidra 12.1.4 (pinned release zip -> /opt) ----------------------------
+if [ -x "${GHIDRA_DIR}/support/analyzeHeadless" ]; then
+  log "Ghidra present: ${GHIDRA_DIR}"
+elif need curl && need unzip; then
   url="https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_RELEASE_TAG}/${GHIDRA_ASSET}"
-  tmp="$(mktemp -d)"
-  log "downloading Ghidra ${GHIDRA_VERSION} -> ${GHIDRA_DIR}"
-  if curl -fsSL -m 600 -o "${tmp}/ghidra.zip" "$url"; then
-    rm -rf "$GHIDRA_DIR"; mkdir -p "$GHIDRA_DIR"
-    if unzip -q -o "${tmp}/ghidra.zip" -d "$GHIDRA_DIR"; then
-      _root="$(find "$GHIDRA_DIR" -maxdepth 1 -type d -name 'ghidra_*' | head -1)"
-      if [ -n "$_root" ]; then
-        chmod +x "${_root}/ghidraRun" "${_root}/support/analyzeHeadless" 2>/dev/null || true
-        ln -sf "${_root}/ghidraRun" /usr/local/bin/ghidra
-        ln -sf "${_root}/support/analyzeHeadless" /usr/local/bin/analyzeHeadless
-        log "installed ${_root} + symlinked ghidra/analyzeHeadless to /usr/local/bin"
+  log "downloading Ghidra ${GHIDRA_VERSION} -> /opt/${GHIDRA_ASSET} (~543MB)"
+  if curl -fsSL --retry 4 --retry-delay 3 -m 900 -o "/opt/${GHIDRA_ASSET}" "$url"; then
+    if verify "$GHIDRA_SHA256" "/opt/${GHIDRA_ASSET}"; then
+      if unzip -q -o "/opt/${GHIDRA_ASSET}" -d /opt; then
+        [ -x "${GHIDRA_DIR}/support/analyzeHeadless" ] \
+          || GHIDRA_DIR="$(find /opt -maxdepth 1 -type d -name 'ghidra_12.1.4*' 2>/dev/null | sort | tail -1)"
+        if [ -n "${GHIDRA_DIR}" ] && [ -x "${GHIDRA_DIR}/support/analyzeHeadless" ]; then
+          chmod +x "${GHIDRA_DIR}/ghidraRun" "${GHIDRA_DIR}/support/analyzeHeadless" 2>/dev/null || true
+          ln -sfn "${GHIDRA_DIR}" /opt/ghidra
+          ln -sf "${GHIDRA_DIR}/ghidraRun" /usr/local/bin/ghidra 2>/dev/null || true
+          ln -sf "${GHIDRA_DIR}/support/analyzeHeadless" /usr/local/bin/analyzeHeadless 2>/dev/null || true
+          log "installed ${GHIDRA_DIR} + symlinked ghidra/analyzeHeadless onto PATH"
+        else
+          warn "analyzeHeadless missing after extract; Ghidra unusable"
+        fi
       else
-        warn "unpacked but no ghidra_* dir found; skipping symlink"
+        warn "Ghidra unzip failed; Ghidra unavailable"
       fi
     else
-      warn "unzip failed; Ghidra unavailable"
+      warn "Ghidra sha256 MISMATCH; discarding download (will not ship a wrong binary)"
     fi
+    rm -f "/opt/${GHIDRA_ASSET}"
   else
-    warn "download failed (${url}); Ghidra unavailable until self-heal/minting installs it"
+    warn "Ghidra download failed (${url}); unavailable until self-heal/minting installs it"
   fi
-  rm -rf "$tmp" 2>/dev/null || true
 else
   warn "curl/unzip missing; skipping Ghidra"
 fi
 
 # --- 3. bake GHIDRA_INSTALL_DIR + JAVA_HOME into the image ---------------------
-GH_ROOT="$(find "$GHIDRA_DIR" -maxdepth 1 -type d -name 'ghidra_*' 2>/dev/null | head -1)"
+GH_ROOT=""
+[ -x "${GHIDRA_DIR}/support/analyzeHeadless" ] && GH_ROOT="${GHIDRA_DIR}"
 JAVA_HOME_DIR=""
-JAVA_BIN="$(command -v java 2>/dev/null || true)"
-if [ -n "$JAVA_BIN" ]; then
-  JAVA_REAL="$(readlink -f "$JAVA_BIN" 2>/dev/null || echo "$JAVA_BIN")"
-  JAVA_HOME_DIR="$(dirname "$(dirname "$JAVA_REAL")")"
-fi
+[ -x "${JDK_DIR}/bin/javac" ] && JAVA_HOME_DIR="${JDK_DIR}"
 
 {
-  echo "# vacti: REA native-decompile engine (Ghidra). Generated by 0310-ghidra.hook.chroot."
-  [ -n "${GH_ROOT}" ]       && echo "export GHIDRA_INSTALL_DIR=\"${GH_ROOT}\""
-  [ -n "${JAVA_HOME_DIR}" ] && echo "export JAVA_HOME=\"${JAVA_HOME_DIR}\""
-} > /etc/profile.d/vacti-ghidra.sh
-chmod 0644 /etc/profile.d/vacti-ghidra.sh
+  echo "# vacti: Ghidra 12.1.4 + Temurin JDK 21 for REA's native decompile path."
+  [ -n "${GH_ROOT}" ]       && echo "export GHIDRA_INSTALL_DIR=${GH_ROOT}"
+  [ -n "${JAVA_HOME_DIR}" ] && echo "export JAVA_HOME=${JAVA_HOME_DIR}"
+} > "$PROFD"
+chmod 0644 "$PROFD"
 
 sed -i '/^GHIDRA_INSTALL_DIR=/d; /^JAVA_HOME=/d' /etc/environment 2>/dev/null || true
 [ -n "${GH_ROOT}" ]       && echo "GHIDRA_INSTALL_DIR=${GH_ROOT}" >> /etc/environment
 [ -n "${JAVA_HOME_DIR}" ] && echo "JAVA_HOME=${JAVA_HOME_DIR}" >> /etc/environment
+
+if [ -n "${GH_ROOT}" ] || [ -n "${JAVA_HOME_DIR}" ]; then
+  mkdir -p "$UNIT_DROPIN_DIR"
+  {
+    echo "# vacti: REA native-decompile env (Ghidra + JDK). Generated by 0310-ghidra.hook.chroot."
+    echo "[Service]"
+    [ -n "${GH_ROOT}" ]       && echo "Environment=GHIDRA_INSTALL_DIR=${GH_ROOT}"
+    [ -n "${JAVA_HOME_DIR}" ] && echo "Environment=JAVA_HOME=${JAVA_HOME_DIR}"
+  } > "$UNIT_DROPIN"
+  chmod 0644 "$UNIT_DROPIN"
+fi
 
 log "Ghidra bake complete (GHIDRA_INSTALL_DIR=${GH_ROOT:-unset}, JAVA_HOME=${JAVA_HOME_DIR:-unset})"
