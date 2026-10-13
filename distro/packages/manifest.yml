@@ -55,6 +55,31 @@ non_apt_post_boot:
   [jadx, ghidra, frida-tools, objection, pymobiledevice3, semgrep,
    re-python-venv, impacket, netexec, bloodhound-python, awscli, kubectl, caido]
 
+# MANDATORY non-apt tool, BAKED on every image + every SKU (not post-boot, not
+# opt-in). npm-installed, PINNED per the 2026-10-13 REA safety vetting. Baked by
+# golden-image/install-rea.sh (golden/cloud/OVA path) and the live-build hook
+# config/hooks/normal/0300-rea.hook.chroot (ISO path); both ensure Node meets
+# REA's engine floor first. Keep the pin in sync with vacti-appliance.env
+# (VACTI_REA_VERSION).
+#
+# DISTRO vs MINTING boundary: the distro bakes only the RUNTIME (a Node >= floor
+# plus the global rea-agents package) so the engine's agent can launch the local
+# `rea` MCP (`npx -y rea-agents@<ver> mcp` / the global `rea` bin) deterministically
+# and offline. The MCP-server REGISTRATION and the reverse-engineer-anything skill
+# are the engine/minting side's responsibility (packaging/bootstrap-apt.sh + the
+# engine .deb's baked mcp config + off-box skill delivery); they are NOT written
+# to disk here, because the image ships ZERO .claude methodology on disk
+# (ci/no-secret-scan.sh fails the build otherwise).
+reverse_engineering_mcp:
+  tool: rea-agents
+  version: "6.4.0"                                  # PINNED; vetted SAFE 2026-10-13
+  install: "npm install -g --ignore-scripts rea-agents@6.4.0"
+  node_floor: "^22.19.0 || ^24.11.0 || >=26.0.0"    # NodeSource setup_22.x satisfies
+  baked_by:
+    golden: golden-image/install-rea.sh
+    iso: live-build-config/config/hooks/normal/0300-rea.hook.chroot
+  mcp_and_skill_owner: "engine-repo (bootstrap-apt.sh + .deb mcp config); never .claude on disk"
+
 # Added only with VACTI_CTF_ARSENAL=1 (ctf.list + golden-image/install-ctf-arsenal.sh).
 # Default OFF - kind=ctf engagements otherwise self-heal post-boot. Lean by design:
 # sagemath / ghidra / stegsolve are DELIBERATELY excluded (multi-GB / GUI).
