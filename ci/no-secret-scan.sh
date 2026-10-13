@@ -60,11 +60,15 @@ scan_rootfs() {
   # large test/sample/man trees with dummy keys/passwords as tool DATA; both are
   # pinned by SHA256 at install, so exclude them from the pattern grep (same
   # rationale as testssl - not a baked vacti secret). Globs match the versioned dirs.
-  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir='ghidra*' --exclude-dir='jdk-*' "$FORBIDDEN_PATTERNS" \
+  # --exclude-dir=jwt_tool/pipx/foundry/caido: the baked engine-mandatory extras
+  # (jwt_tool ships example PEM test keys; the pipx venvs for slither/volatility3/
+  # RsaCtfTool carry RE test fixtures; foundry/caido tool trees) are deterministic
+  # tool DATA from pinned upstreams, not baked vacti secrets - same testssl rationale.
+  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir='ghidra*' --exclude-dir='jdk-*' --exclude-dir=jwt_tool --exclude-dir=pipx --exclude-dir=foundry --exclude-dir=caido "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" \
         2>/dev/null | grep -q .; then
     bad "${label}: a secret-shaped pattern was found in the rootfs:"
-    grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir='ghidra*' --exclude-dir='jdk-*' "$FORBIDDEN_PATTERNS" \
+    grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir='ghidra*' --exclude-dir='jdk-*' --exclude-dir=jwt_tool --exclude-dir=pipx --exclude-dir=foundry --exclude-dir=caido "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" 2>/dev/null \
         | sed 's/^/    /' >&2 || true
   fi
