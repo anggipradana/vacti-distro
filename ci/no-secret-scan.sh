@@ -55,11 +55,14 @@ scan_rootfs() {
   # --exclude-dir=testssl: testssl.sh (an arsenal TLS scanner) ships its own EC
   # test keys under /etc/testssl/tls_data.txt; those "BEGIN EC PRIVATE KEY" test
   # vectors are tool data, not a baked vacti secret, so they must not trip the gate.
-  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl "$FORBIDDEN_PATTERNS" \
+  # --exclude-dir=ghidra: Ghidra (the baked RE engine under /opt/ghidra) ships
+  # large test/sample trees that include dummy keys/passwords as tool DATA, same
+  # rationale as testssl - they are not a baked vacti secret.
+  if grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir=ghidra "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" \
         2>/dev/null | grep -q .; then
     bad "${label}: a secret-shaped pattern was found in the rootfs:"
-    grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl "$FORBIDDEN_PATTERNS" \
+    grep -rEIl --binary-files=without-match --exclude-dir=dpkg --exclude-dir=testssl --exclude-dir=ghidra "$FORBIDDEN_PATTERNS" \
         "${root}/etc" "${root}/root" "${root}/home" "${root}/var/lib" "${root}/opt" 2>/dev/null \
         | sed 's/^/    /' >&2 || true
   fi
