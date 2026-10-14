@@ -29,7 +29,7 @@ terminal-font: "Unifont Regular 16"
   align = "center"
   color = "#6E829E"
   font = "Unifont Regular 16"
-  text = "Vacti OS  -  trixie-based pentest appliance"
+  text = "Vacti OS  -  the complete offensive security platform"
 }
 
 + progress_bar {

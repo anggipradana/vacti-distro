@@ -5,8 +5,12 @@
 # Debian mark; we acknowledge it and do not imply endorsement. ID_LIKE=debian is
 # kept so apt + every Debian tool keeps working. HOME_URL/SUPPORT_URL stay the
 # operator-set placeholder until the final product URL is decided.
+#
+# Vacti OS is the appliance edition of vacti, the complete offensive security
+# platform: AI Pentest, Bug Bounty, CTF, Vulnerability Assessment, Attack
+# Surface, Threat Intelligence, and Leaks / OSINT. Not pentest-only.
 NAME="Vacti OS"
-PRETTY_NAME="Vacti OS (trixie-based pentest appliance)"
+PRETTY_NAME="Vacti OS"
 ID=vacti
 ID_LIKE=debian
 VERSION_ID="0.1.0"

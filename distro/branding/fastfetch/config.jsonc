@@ -15,7 +15,7 @@
     "color": { "keys": "blue", "title": "cyan" }
   },
   "modules": [
-    { "type": "custom", "format": "\u001b[96mVulnerability Assessment  -  AI Pentest  -  Threat Intelligence\u001b[0m" },
+    { "type": "custom", "format": "\u001b[96mAI Pentest  -  Bug Bounty  -  CTF  -  Threat Intel  -  Leaks\u001b[0m" },
     "break",
     { "type": "title", "format": "{user-name}@{host-name}" },
     { "type": "separator", "string": "-" },
