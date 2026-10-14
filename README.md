@@ -200,7 +200,7 @@ vacti-distro/
     vacti-appliance.env        # the ONE config (base pin, engine ver, capabilities, Kali on/off)
     live-build-config/         # live-build config tree (ISO) + build-iso.sh driver
     golden-image/              # build-golden.sh (virt-customize) + convert-*.sh + fanout.sh + OVF templates
-    packages/                  # web-lean.list / full.list + manifest.yml + gen + Kali Option-A source/pin
+    packages/                  # arsenal-manifest.json (vendored) + distro-owned.list + gen + Kali Option-A source/pin
     branding/                  # Vacti OS brand: logo + os-release/issue/dynamic MOTD + fastfetch + grub + plymouth + wallpaper + greeter + xfce + apply-branding.sh + render-assets.sh
     enroll/                    # firstboot unit+script + NoCloud template + make-seed.sh + guestinfo notes
 ```

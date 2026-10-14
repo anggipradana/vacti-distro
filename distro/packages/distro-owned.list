@@ -1,0 +1,76 @@
+# vacti distro-OWNED base packages (NOT engine arsenal)
+#
+# These packages are baked on every image but are NOT part of the engine's
+# arsenal manifest (packaging/arsenal-manifest.json). They are the distro's own
+# responsibility: base runtime, the headless Chromium shared-library closure,
+# the anti-OOM backstops, the branded console banner, and a couple of TLS
+# inspectors the distro chooses to carry. The ENGINE-ARSENAL half of every image
+# is NOT listed here: it is DERIVED from the shared manifest at build time by
+# gen-live-build-list.sh. Keeping the two concerns in separate files is what lets
+# the arsenal half track the engine 1:1 while this distro-owned half stays stable.
+#
+# One package per line; blank lines and "#" comments are ignored (same contract
+# gen-live-build-list.sh applies to the manifest-derived set).
+#
+# DO NOT add engine-arsenal (scanner/recon/exploitation) tools here: those belong
+# in the engine's arsenal.env so every image AND the running fleet track them
+# together. Add here only genuinely distro-specific, non-offensive packages.
+
+# --- Base / runtime the appliance owns (not offensive tooling) ---
+# wget: non-interactive downloader kept alongside curl (curl is engine core) for
+# the occasional recipe/installer that assumes wget. Jev-classified distro_infra.
+wget
+# python3-full: full CPython stdlib metapackage; general scripting substrate the
+# appliance relies on beyond the engine's own python3-venv. Jev: distro_infra.
+python3-full
+
+# --- Networking helper ---
+# netcat-openbsd (nc): the engine manifest carries nc only under its CTF set, so
+# a lean web/infra image would otherwise lack it. The distro keeps it baked on
+# every image (reverse shells / manual OOB). Jev flags this as an ENGINE-ARSENAL
+# gap (0.94): the engine arguably should promote nc into web/infra core, at which
+# point it would arrive via the manifest and could be dropped from here. Until
+# then it stays here so nothing currently installed disappears (superset rule).
+netcat-openbsd
+
+# --- TLS / network inspection ---
+# sslscan + testssl.sh: lightweight TLS posture inspectors used by the tls-review
+# path. Absent from the engine arsenal manifest, so the distro carries them. Jev
+# leans these toward ENGINE-ARSENAL too (0.68 / 0.72) but at low confidence; they
+# stay distro-owned until the engine adopts them, preserving the current set.
+sslscan
+testssl.sh
+
+# --- Anti-OOM backstops (config drop-ins staged by golden-image/oom/) ---
+# zram compressed RAM swap (primary cushion) + earlyoom userspace OOM killer
+# backstop. Pure appliance infrastructure, nothing to do with the arsenal.
+systemd-zram-generator
+earlyoom
+
+# --- Branded console banner ---
+# fastfetch: the branded system-info banner shown over SSH (config + vacti logo
+# shipped by the branding layer). Distro branding, not an engine tool.
+fastfetch
+
+# --- Headless Chromium shared-library closure ---
+# The engine .deb bundles Chromium via playwright-core's pinned build; it is NOT
+# a separate apt package, but its shared-library deps must be present on the thin
+# Debian 13 genericcloud base or headless launch fails (the classic missing
+# libnss3/libgbm1). Debian 13 (trixie) completed the 64-bit time_t transition, so
+# several ship under t64 names. The per-package best-effort install tolerates a
+# name absent on a given point release. These are OS libraries the distro owns,
+# not arsenal tools.
+libnss3
+libgbm1
+libasound2t64
+libatk1.0-0t64
+libatk-bridge2.0-0t64
+libcups2t64
+libdrm2
+libxkbcommon0
+libxcomposite1
+libxdamage1
+libxrandr2
+libxfixes3
+libpango-1.0-0
+libcairo2

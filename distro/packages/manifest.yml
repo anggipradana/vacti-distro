@@ -1,163 +1,53 @@
-# vacti arsenal manifest (documentation of record)
+# vacti arsenal manifest (documentation of record / pointer)
 #
-# The MACHINE-CONSUMED sources are the plain package lists in this directory:
-#   web-lean.list  - baked default (ENGINE_CAPABILITIES=web,infra)
-#   full.list      - the per-vertical apt sets added on top (VACTI_FULL_ARSENAL=1)
-# This YAML documents where each set comes from and keeps the mapping explicit.
-# It is NOT hand-maintained independently: regenerate the .list files from the
-# engine's packaging/bootstrap-apt.sh (APT_PACKAGES + APT_PKGS_* per-vertical
-# arrays), cross-checked against src/runner/arsenal-check.ts (TOOL_APT_PACKAGES),
-# so the image arsenal always matches what the runtime asserts and self-heals.
+# The ENGINE ARSENAL is no longer hand-transcribed into distro package lists. The
+# single machine-readable source of truth is the engine's generated manifest:
+#   engine repo: vacti-pentest-engine
+#   source:      packaging/arsenal.env        (the one declarative tool module)
+#   generated:   packaging/arsenal-manifest.json
+#   shipped:     inside the vacti-engine .deb at
+#                /usr/lib/vacti-engine/packaging/arsenal-manifest.json
+#
+# HOW THE DISTRO CONSUMES IT
+#   - gen-live-build-list.sh DERIVES every image's engine-arsenal apt set from the
+#     manifest (lean = apt.core minus the per-vertical sets; full = apt.core;
+#     +apt.ctf when VACTI_CTF_ARSENAL=1). In-guest builds read the manifest from
+#     the INSTALLED .deb; host-side / ISO / offline builds read the vendored
+#     snapshot arsenal-manifest.json beside the generator.
+#   - distro-owned.list holds the NON-arsenal base packages the distro owns
+#     (Chromium shared-lib closure, anti-OOM backstops, the fastfetch banner, a
+#     couple of TLS inspectors, base runtime). The GUI desktop set (XFCE,
+#     Calamares, Plymouth, LightDM, whisker menu) lives in the ISO's
+#     ../live-build-config/config/package-lists/vacti-gui.list.chroot.in.
+#   - ci/arsenal-sync-check.sh FAILS the build if the vendored snapshot or the
+#     generator diverges from the engine manifest at the pinned VACTI_ENGINE_REF.
+#     This is the enforcement the old prose ("do not hand-maintain a divergent
+#     list") never had.
+#
+# NOT in the manifest (so still distro-owned pins): the heavy non-apt mandatory
+# tools - REA (rea-agents), Ghidra + Temurin JDK, interactsh-client, gau, Caido -
+# are version-pinned in vacti-appliance.env + the ISO hooks (install METHOD is the
+# distro's own concern). A future engine manifest revision can absorb those pins;
+# until then they are intentionally out of the sync set.
 
 source_of_truth:
   engine_repo: vacti-pentest-engine
-  apt_set: packaging/bootstrap-apt.sh # APT_PACKAGES (+ APT_PKGS_SOURCE/MOBILE/IOS/RE)
-  arsenal_check: src/runner/arsenal-check.ts # TOOL_APT_PACKAGES binary->package map
+  arsenal_env: packaging/arsenal.env
+  manifest: packaging/arsenal-manifest.json
+  shipped_in_deb: /usr/lib/vacti-engine/packaging/arsenal-manifest.json
+  vendored_snapshot: distro/packages/arsenal-manifest.json
 
-# Baked on every image (web-lean.list).
-core:
-  scanners_recon:
-    [nmap, nuclei, httpx-toolkit, naabu, subfinder, ffuf, gobuster, dirsearch,
-     sqlmap, weevely, whatweb, commix, dnsx, katana, trufflehog, feroxbuster]
-  wordlists: [seclists, dirb]
-  base_runtime:
-    [default-mysql-client, nftables, jq, curl, wget, git, build-essential,
-     ca-certificates, xvfb, fonts-noto, fonts-noto-cjk, fonts-noto-color-emoji,
-     pipx, golang-go, ripgrep, fd-find, openssh-server, adb, xz-utils, socat,
-     netcat-openbsd, default-jre-headless, unzip, binutils, python3-venv,
-     python3-full]
-  tls_network: [sslscan, testssl.sh]
-  vpn_clients:
-    [openconnect, globalprotect-openconnect, openfortivpn, openvpn,
-     wireguard-tools, strongswan, strongswan-swanctl]
-  evidence_screenshot:
-    [imagemagick, xdotool, x11-xserver-utils, qterminal, sshpass, tmux]
-  # Anti-OOM backstops; config drop-ins staged by golden-image/oom/.
-  anti_oom: [systemd-zram-generator, earlyoom]
-  # chromium: bundled in vacti-engine .deb via playwright-core build 1228; no separate apt pkg.
-  # Its shared-library deps are made explicit (trixie t64 names where renamed)
-  # so headless launch does not fail on the thin genericcloud base.
-  chromium_deps:
-    [libnss3, libgbm1, libasound2t64, libatk1.0-0t64, libatk-bridge2.0-0t64,
-     libcups2t64, libdrm2, libxkbcommon0, libxcomposite1, libxdamage1,
-     libxrandr2, libxfixes3, libpango-1.0-0, libcairo2]
+derivation:
+  generator: distro/packages/gen-live-build-list.sh
+  lean: apt.core minus union(apt.verticals.*) # baked default (ENGINE_CAPABILITIES=web,infra)
+  full: apt.core                              # VACTI_FULL_ARSENAL=1
+  ctf: apt.ctf                                # VACTI_CTF_ARSENAL=1 (also install-ctf-arsenal.sh apt half)
+  distro_owned: distro/packages/distro-owned.list # non-arsenal base (NOT from the manifest)
 
-# Added only with VACTI_FULL_ARSENAL=1 (full.list). Otherwise fetched post-boot
-# by the runtime arsenal-check when ENGINE_CAPABILITIES advertises the vertical.
-verticals:
-  source: [trivy]
-  mobile: [scrcpy, apktool, aapt]
-  ios: [usbmuxd, libimobiledevice-utils, libplist-utils, llvm]
-  re: [gdb-multiarch, binwalk, strace, ltrace, tshark, checksec]
+enforcement:
+  guard: ci/arsenal-sync-check.sh             # fails on snapshot/generator drift vs the engine manifest
+  pinned_ref: VACTI_ENGINE_REF                # vacti-appliance.env; empty = floating latest
 
-# NON-apt heavy tools: never baked; runtime self-heal fetches per capability.
-# NOTE: ghidra + caido MOVED OUT of this list - ghidra is baked MANDATORY (see
-# native_re_engine) and caido is baked MANDATORY (see baked_mandatory_extras),
-# both part of the canonical mandatory set (CORE + web3 + REA + Ghidra).
-non_apt_post_boot:
-  [jadx, frida-tools, objection, pymobiledevice3, semgrep,
-   re-python-venv, impacket, netexec, bloodhound-python, awscli, kubectl]
-
-# MANDATORY-by-default NON-apt tools baked on the BASE image (not VACTI_FULL_ARSENAL-
-# gated) by golden-image/install-engine-extras.sh + the ISO hook
-# config/hooks/normal/0320-engine-extras.hook.chroot. These are the engine-mandatory
-# tools (confirmed by engine 0.2.302: CORE + web3 + REA + Ghidra) that the plain apt
-# lists cannot express. Install METHODS mirror packaging/bootstrap-apt.sh; all are
-# made reachable on /usr/local/bin (or, for Caido, the engine home start-arsenal
-# expects). globalprotect-openconnect (the 6th gap) is an apt tool -> web-lean.list.
-baked_mandatory_extras:
-  web3:                                  # step_web3_arsenal (DEFAULT-ON / mandatory)
-    slither: "pipx slither-analyzer (PIPX_HOME=/opt/pipx, PIPX_BIN_DIR=/usr/local/bin)"
-    foundry: "foundryup -> /opt/foundry; forge/cast/anvil symlinked to /usr/local/bin"
-  recon_go_tools:                        # step_apt go-install fallbacks (pinned)
-    interactsh-client: "v1.2.4 (go install, GOBIN=/usr/local/bin) - OOB/SSRF confirmation"
-    gau: "v2.2.4 (go install, GOBIN=/usr/local/bin) - passive URL mining"
-  jwt_tool: "git clone -> /opt/jwt_tool (run via python3 jwt_tool.py)"   # step_jwt_tool
-  caido:                                 # step_caido (guest-mode proxy/evidence)
-    cli: "v0.57.0 caido-cli -> <engine_home>/caido (arch-aware)"
-    mcp: "caido-mcp-server v1.1.0 (go build) -> /usr/local/bin"
-  vpn_apt: "globalprotect-openconnect -> packages/web-lean.list (core.vpn_clients)"
-
-# MANDATORY non-apt tool, BAKED on every image + every SKU (not post-boot, not
-# opt-in). npm-installed, PINNED per the 2026-10-13 REA safety vetting. Baked by
-# golden-image/install-rea.sh (golden/cloud/OVA path) and the live-build hook
-# config/hooks/normal/0300-rea.hook.chroot (ISO path); both ensure Node meets
-# REA's engine floor first. Keep the pin in sync with vacti-appliance.env
-# (VACTI_REA_VERSION).
-#
-# DISTRO vs MINTING boundary: the distro bakes only the RUNTIME (a Node >= floor
-# plus the global rea-agents package) so the engine's agent can launch the local
-# `rea` MCP (`npx -y rea-agents@<ver> mcp` / the global `rea` bin) deterministically
-# and offline. The MCP-server REGISTRATION and the reverse-engineer-anything skill
-# are the engine/minting side's responsibility (packaging/bootstrap-apt.sh + the
-# engine .deb's baked mcp config + off-box skill delivery); they are NOT written
-# to disk here, because the image ships ZERO .claude methodology on disk
-# (ci/no-secret-scan.sh fails the build otherwise).
-reverse_engineering_mcp:
-  tool: rea-agents
-  version: "6.4.0"                                  # PINNED; vetted SAFE 2026-10-13
-  install: "npm install -g --ignore-scripts rea-agents@6.4.0"
-  node_floor: "^22.19.0 || ^24.11.0 || >=26.0.0"    # NodeSource setup_22.x satisfies
-  baked_by:
-    golden: golden-image/install-rea.sh
-    iso: live-build-config/config/hooks/normal/0300-rea.hook.chroot
-  mcp_and_skill_owner: "engine-repo (bootstrap-apt.sh + .deb mcp config); never .claude on disk"
-
-# MANDATORY native RE engine (REA's native binary-decompile dependency), BAKED on
-# every image + every SKU. The PIN IS DICTATED BY REA 6.4.0, not by the engine's
-# bootstrap-apt.sh: REA's GhidraInstallationPolicy.ts requires Ghidra major==12 &&
-# minor==1 (SUPPORTED_GHIDRA_VERSION 12.1.4) AND a 64-bit FULL JDK major 21 - a
-# jre/jre-headless is REJECTED as runtime-only (so an 11.x Ghidra or a jre-headless
-# would be installed-but-unusable by REA). Assets + SHA256 are the exact ones the
-# fleet install agent verified empirically (analyzeHeadless import + rea doctor).
-# The installers bake GHIDRA_INSTALL_DIR + JAVA_HOME (/etc/environment + profile.d +
-# a vacti-engine.service systemd drop-in); they do NOT write engine.env (forbidden
-# on a shipped image). ci/no-secret-scan.sh --exclude-dir='ghidra*'/'jdk-*' keeps the
-# tools' sample keys/passwords (tool DATA, SHA-pinned) from tripping the secret gate.
-native_re_engine:
-  tool: ghidra
-  version: "12.1.4"                                 # PINNED by REA (major==12 && minor==1)
-  release_tag: "Ghidra_12.1.4_build"
-  asset: "ghidra_12.1.4_PUBLIC_20260921.zip"
-  sha256: "ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db"
-  install_dir: "/opt/ghidra_12.1.4_PUBLIC"
-  source: "github.com/NationalSecurityAgency/ghidra (pinned release zip -> /opt)"
-  jdk:
-    vendor_pkg: "Temurin 21 FULL JDK (NOT a jre/jre-headless; REA rejects runtime-only)"
-    tarball: "OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz (x86_64; arm64 handled separately)"
-    sha256: "ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94"
-    home: "/opt/jdk-21.0.12.1+1"
-  env_baked: [GHIDRA_INSTALL_DIR, JAVA_HOME]        # /etc/environment + /etc/profile.d + vacti-engine.service.d drop-in
-  size_note: "~1.3GB under /opt (Ghidra ~1GB + Temurin JDK ~0.3GB; deliberate)"
-  baked_by:
-    golden: golden-image/install-ghidra.sh
-    iso: live-build-config/config/hooks/normal/0310-ghidra.hook.chroot
-
-# Added only with VACTI_CTF_ARSENAL=1 (ctf.list + golden-image/install-ctf-arsenal.sh).
-# Default OFF - kind=ctf engagements otherwise self-heal post-boot. Lean by design:
-# sagemath / ghidra / stegsolve are DELIBERATELY excluded (multi-GB / GUI).
-ctf:
-  apt:                 # packages/ctf.list (Debian main; radare2+exploitdb via Kali pin)
-    forensics:   [foremost, scalpel, sleuthkit, binwalk]
-    steg:        [steghide, libimage-exiftool-perl]
-    crypto:      [python3-pycryptodome]
-    pwn:         [python3-pwntools, python3-ropgadget, gdb, nasm]
-    reverse:     [radare2, ltrace, strace]    # radare2 from Kali pin (absent from trixie main)
-    cracking:    [john, hashcat]
-    net:         [netcat-openbsd]
-    exploitdb:   [exploitdb]                   # from Kali pin; git-clone fallback in installer
-    toolchain:   [ruby, ruby-dev, python3-pip]
-  non_apt:             # installed by install-ctf-arsenal.sh (best-effort)
-    ruby_gems:   [zsteg, one_gadget]
-    pipx:        [volatility3, RsaCtfTool]     # RsaCtfTool from upstream git
-    gdb_plugin:  [gef]                         # single-file; pwndbg deliberately skipped (heavy)
-    git_fallback: [exploitdb]                  # when apt (Kali) cannot supply searchsploit
-  # ghidra was excluded here as too-heavy for the CTF arsenal, but it is now baked
-  # GLOBALLY + MANDATORY (see native_re_engine) as REA's decompile engine, so the
-  # CTF path inherits it. sagemath/stegsolve/pwndbg stay excluded.
-  excluded_too_heavy: [sagemath, stegsolve, pwndbg-full-setup]
-
-# The ~6 CORE tools absent from Debian main; how they resolve.
 debian_main_gaps:
   tools: [nuclei, httpx-toolkit, naabu, feroxbuster, seclists, commix]
   option_a: Kali apt source, pinned prio 100 (see kali-repo/) # default

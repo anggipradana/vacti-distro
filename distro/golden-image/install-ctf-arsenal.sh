@@ -2,8 +2,9 @@
 # install-ctf-arsenal.sh - the CTF tool set installer (VACTI_CTF_ARSENAL=1).
 #
 # Runs INSIDE the guest during build-golden.sh's provision step, invoked ONLY
-# when VACTI_CTF_ARSENAL=1. Self-contained: it installs the apt half (from the
-# staged packages/ctf.list) PLUS the non-apt half (ruby gems, pipx tools, the
+# when VACTI_CTF_ARSENAL=1. Self-contained: it installs the apt half (from a CTF
+# apt list DERIVED from the engine manifest, passed in by provision.sh via
+# gen-live-build-list.sh VACTI_GEN_MODE=ctf-apt) PLUS the non-apt half (ruby gems, pipx tools, the
 # GEF gdb plugin, and an exploitdb git fallback). It is deliberately kept lean -
 # NO sagemath (~2GB), NO Ghidra (JDK + hundreds of MB), NO stegsolve (java GUI,
 # useless on a headless appliance).
@@ -17,18 +18,26 @@
 #   - Non-interactive throughout (DEBIAN_FRONTEND, gem --no-document, pipx
 #     --force), suitable for virt-customize / live-build with no TTY.
 #
-# This script and packages/ctf.list are staged under /opt/vacti-build, which
-# build-golden.sh's FINALIZE step rm -rf's before the disk is sealed - so no CTF
-# tool manifest or installer is left on the shipped image.
+# This script (and the generated CTF apt list) are staged under /opt/vacti-build,
+# which build-golden.sh's FINALIZE step rm -rf's before the disk is sealed - so no
+# CTF tool manifest or installer is left on the shipped image.
 #
 # Usage: install-ctf-arsenal.sh [CTF_LIST_PATH]
-#   CTF_LIST_PATH  apt package list (default: /opt/vacti-build/ctf.list, then the
-#                  copy next to this script for a dev-box run)
+#   CTF_LIST_PATH  apt package list (default: /opt/vacti-build/ctf-apt.list). When
+#                  absent (a dev-box run), it is derived from the engine manifest
+#                  via the sibling packages/gen-live-build-list.sh (ctf-apt mode).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CTF_LIST="${1:-/opt/vacti-build/ctf.list}"
-[[ -f "$CTF_LIST" ]] || CTF_LIST="${HERE}/../packages/ctf.list"
+CTF_LIST="${1:-/opt/vacti-build/ctf-apt.list}"
+if [[ ! -f "$CTF_LIST" ]]; then
+  # dev-box / fallback: derive the CTF apt set from the engine manifest.
+  _gen="${HERE}/../packages/gen-live-build-list.sh"
+  if [[ -x "$_gen" ]]; then
+    CTF_LIST="$(mktemp)"
+    VACTI_GEN_MODE=ctf-apt "$_gen" "$CTF_LIST" >/dev/null 2>&1 || true
+  fi
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 export PIP_BREAK_SYSTEM_PACKAGES=1   # trixie PEP-668; pipx is isolated anyway
@@ -42,7 +51,7 @@ export PIPX_HOME="/opt/pipx"
 export PIPX_BIN_DIR="/usr/local/bin"
 mkdir -p "$PIPX_HOME" "$PIPX_BIN_DIR"
 
-# --- 1. apt half (from packages/ctf.list) ------------------------------------
+# --- 1. apt half (from the manifest-derived CTF apt list) --------------------
 if [[ -f "$CTF_LIST" ]]; then
   mapfile -t CTF_PKGS < <(sed -e 's/#.*$//' -e 's/[[:space:]]\+$//' "$CTF_LIST" | grep -vE '^[[:space:]]*$')
   log "apt: installing ${#CTF_PKGS[@]} CTF packages from $(basename "$CTF_LIST")"
@@ -55,7 +64,7 @@ if [[ -f "$CTF_LIST" ]]; then
     done
   fi
 else
-  warn "ctf.list not found at $CTF_LIST; skipping apt half"
+  warn "CTF apt list not found at $CTF_LIST; skipping apt half"
 fi
 
 # --- 2. ruby gems (not in Debian: zsteg, one_gadget) -------------------------

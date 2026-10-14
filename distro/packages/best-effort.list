@@ -16,9 +16,11 @@
 # installs the names below via config/hooks/normal/0330-vpn-besteffort.hook.chroot
 # with the same warn-and-continue semantics the OVA uses.
 #
-# These stay in packages/web-lean.list (and thus in the OVA arsenal.list and the
-# ISO's generated full list) as the single source of truth; this file only marks
-# which of them must not hard-fail the ISO.
+# These remain in the generated arsenal list (the OVA arsenal.list and the ISO's
+# generated vacti-core list, derived from the engine manifest by
+# gen-live-build-list.sh); this file only marks which of them must not hard-fail
+# the ISO. It is a distro-OWNED install-policy file, independent of where the
+# package names originate.
 #
 # One package per line. Comments (#...) and blank lines are ignored.
 #

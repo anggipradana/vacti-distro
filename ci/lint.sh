@@ -40,5 +40,16 @@ else
   echo "xmllint not available; skipping OVF check"
 fi
 
+echo "== arsenal sync (distro <-> engine manifest) =="
+# The divergence guard. It self-resolves the authoritative engine manifest
+# (VACTI_ENGINE_MANIFEST, else a best-effort apt pull via VACTI_APT_URL +
+# VACTI_APT_PRODUCER_TOKEN) and SOFT-SKIPS when no reference is reachable, so
+# `make lint` stays offline-safe; it only hard-FAILS on a real divergence.
+if [[ -x ci/arsenal-sync-check.sh ]]; then
+  ci/arsenal-sync-check.sh || rc=1
+else
+  echo "  ci/arsenal-sync-check.sh missing; skipping"
+fi
+
 [[ $rc -eq 0 ]] && echo "== lint PASS ==" || echo "== lint FAIL ==" >&2
 exit $rc
