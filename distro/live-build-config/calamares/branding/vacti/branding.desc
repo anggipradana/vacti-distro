@@ -3,13 +3,13 @@
 componentName: vacti
 welcomeStyleCalamares: true
 strings:
-  productName:         vacti
-  shortProductName:    vacti
+  productName:         Vacti OS
+  shortProductName:    Vacti OS
   version:             0.1.0
   shortVersion:        0.1.0
-  versionedName:       vacti pentest appliance 0.1.0
-  shortVersionedName:  vacti 0.1.0
-  bootloaderEntryName: vacti
+  versionedName:       Vacti OS (trixie-based pentest appliance) 0.1.0
+  shortVersionedName:  Vacti OS 0.1.0
+  bootloaderEntryName: Vacti OS
   productUrl:          https://vacti.example/
   supportUrl:          https://vacti.example/support
 images:
@@ -18,5 +18,7 @@ images:
   productWelcome: welcome.png
 slideshow: show.qml
 style:
-  sidebarBackground: "#0b0b0d"
-  sidebarText:       "#ffffff"
+  sidebarBackground: "#0B1324"
+  sidebarText:       "#EEF2F8"
+  sidebarTextSelect: "#1E66E3"
+  sidebarTextHighlight: "#37B6FF"

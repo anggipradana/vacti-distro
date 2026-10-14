@@ -1,0 +1,16 @@
+# Regenerate the dynamic Vacti OS MOTD into /etc/motd at boot (and when the
+# network comes up), so pam_motd shows a current host/IP/enrollment banner on
+# every console and SSH login. Lightweight oneshot; no timer, no daemon.
+[Unit]
+Description=Vacti OS dynamic MOTD
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/sbin/vacti-motd
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/local/sbin/vacti-motd > /etc/motd.tmp && mv /etc/motd.tmp /etc/motd'
+
+[Install]
+WantedBy=multi-user.target

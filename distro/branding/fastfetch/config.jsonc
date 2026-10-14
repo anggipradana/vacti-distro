@@ -1,0 +1,37 @@
+// Vacti OS fastfetch config. Installed to /etc/skel/.config/fastfetch and
+// /root/.config/fastfetch by apply-branding.sh, so `fastfetch` over SSH shows
+// the vacti radar-shield logo + brand accents. The logo is a pre-rendered,
+// faithful miniature of the real logomark (truecolor half-blocks); fastfetch
+// falls back to text cleanly on a terminal without truecolor.
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file-raw",
+    "source": "/usr/share/vacti/branding/console/fastfetch-logo.ansi",
+    "padding": { "top": 1, "left": 2, "right": 3 }
+  },
+  "display": {
+    "separator": "  ",
+    "color": { "keys": "blue", "title": "cyan" }
+  },
+  "modules": [
+    { "type": "custom", "format": "\u001b[96mVulnerability Assessment  -  AI Pentest  -  Threat Intelligence\u001b[0m" },
+    "break",
+    { "type": "title", "format": "{user-name}@{host-name}" },
+    { "type": "separator", "string": "-" },
+    { "type": "os", "key": "OS" },
+    { "type": "host", "key": "Appliance" },
+    { "type": "kernel", "key": "Kernel" },
+    { "type": "uptime", "key": "Uptime" },
+    { "type": "packages", "key": "Packages" },
+    { "type": "shell", "key": "Shell" },
+    { "type": "terminal", "key": "Terminal" },
+    { "type": "cpu", "key": "CPU" },
+    { "type": "memory", "key": "Memory" },
+    { "type": "swap", "key": "Swap" },
+    { "type": "disk", "key": "Disk" },
+    { "type": "localip", "key": "Local IP" },
+    "break",
+    { "type": "colors", "paddingLeft": 2, "symbol": "circle" }
+  ]
+}

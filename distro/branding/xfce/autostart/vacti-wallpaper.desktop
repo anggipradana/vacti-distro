@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Vacti OS wallpaper
+Comment=Apply the Vacti OS brand wallpaper to all connected monitors
+Exec=/usr/local/bin/vacti-set-wallpaper
+OnlyShowIn=XFCE;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

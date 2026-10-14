@@ -1,5 +1,11 @@
-vacti pentest appliance \r (\l)
 
-vacti is a derivative based on Debian GNU/Linux; it is not produced by, endorsed
-by, or affiliated with the Debian Project. Debian is a trademark of Software in
-the Public Interest, Inc.
+Vacti OS (trixie-based pentest appliance) \r
+Vulnerability Assessment  -  AI Pentest  -  Threat Intelligence
+
+ host \n   tty \l
+
+This appliance is inert without a live vacti enrollment.
+Vacti OS is a derivative based on Debian GNU/Linux; it is not produced by,
+endorsed by, or affiliated with the Debian Project. Debian is a trademark of
+Software in the Public Interest, Inc.
+

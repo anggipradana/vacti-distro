@@ -1,6 +1,6 @@
 [Plymouth Theme]
-Name=vacti
-Description=vacti pentest appliance boot splash
+Name=Vacti OS
+Description=Vacti OS boot splash (radar-shield logomark on brand navy)
 ModuleName=script
 
 [script]

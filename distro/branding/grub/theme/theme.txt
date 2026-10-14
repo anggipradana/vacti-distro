@@ -1,13 +1,46 @@
-# Minimal vacti GRUB theme stub. Replace with the final branded theme.
-# See https://www.gnu.org/software/grub/manual/grub/html_node/Theme-file-format.html
-title-text: "vacti pentest appliance"
-desktop-color: "#0b0b0d"
+# Vacti OS GRUB theme. Brand-navy background with the radar-shield lockup
+# (background.png), a readable menu, and an accent-blue countdown bar. No Debian
+# marks. Lightweight: a single background image plus text, nothing GPU-heavy.
+
+title-text: ""
+desktop-image: "background.png"
+desktop-color: "#070D1A"
 terminal-font: "Unifont Regular 16"
+
 + boot_menu {
-  left = 15%
-  width = 70%
-  top = 30%
-  height = 40%
-  item_color = "#c8c8c8"
-  selected_item_color = "#ffffff"
+  left = 20%
+  top = 56%
+  width = 60%
+  height = 32%
+  item_font = "Unifont Regular 16"
+  item_color = "#9FB0C6"
+  selected_item_color = "#FFFFFF"
+  item_height = 34
+  item_spacing = 8
+  item_padding = 8
+  icon_width = 0
+  icon_height = 0
+}
+
++ label {
+  top = 90%
+  left = 0
+  width = 100%
+  align = "center"
+  color = "#6E829E"
+  font = "Unifont Regular 16"
+  text = "Vacti OS  -  trixie-based pentest appliance"
+}
+
++ progress_bar {
+  id = "__timeout__"
+  top = 85%
+  left = 25%
+  width = 50%
+  height = 14
+  fg_color = "#1E66E3"
+  bg_color = "#101B30"
+  border_color = "#20406E"
+  text_color = "#9FB0C6"
+  text = "@TIMEOUT_NOTIFICATION_MIDDLE@"
 }

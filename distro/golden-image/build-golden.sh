@@ -75,9 +75,9 @@ rm -rf "$STAGE"; mkdir -p \
   "${STAGE}/etc/default" \
   "${STAGE}/opt/vacti-build"
 # branding assets -> /usr/share/vacti/branding (apply-branding.sh reads these)
-cp -a "${BRAND_DIR}/os-release" "${BRAND_DIR}/issue" "${BRAND_DIR}/motd" \
-      "${BRAND_DIR}/disclaimer.txt" "${STAGE}/usr/share/vacti/branding/"
-for d in grub plymouth wallpaper; do
+cp -a "${BRAND_DIR}/os-release" "${BRAND_DIR}/issue" "${BRAND_DIR}/issue.net" \
+      "${BRAND_DIR}/motd" "${BRAND_DIR}/disclaimer.txt" "${STAGE}/usr/share/vacti/branding/"
+for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo; do
   [[ -d "${BRAND_DIR}/${d}" ]] && cp -a "${BRAND_DIR}/${d}" "${STAGE}/usr/share/vacti/branding/"
 done
 cp -a "${BRAND_DIR}/apply-branding.sh" "${STAGE}/opt/vacti-build/apply-branding.sh"
