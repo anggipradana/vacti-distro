@@ -33,7 +33,7 @@ fi
 
 # 2. tagline + capability line (full-platform scope, not pentest-only)
 printf '\n  %sThe complete offensive security platform%s\n' "$C_DIM" "$C_RST"
-printf '  %sAI Pentest  -  Bug Bounty  -  CTF  -  Threat Intel  -  Leaks%s\n' "$C_CY" "$C_RST"
+printf '  %sVA  -  AI Pentest  -  Bug Bounty  -  CTF  -  Threat Intel%s\n' "$C_CY" "$C_RST"
 
 # 3. host + enrolment status (the dynamic part)
 host="$(hostname -s 2>/dev/null || echo vacti)"

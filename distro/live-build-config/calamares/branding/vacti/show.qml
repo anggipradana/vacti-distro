@@ -44,7 +44,7 @@ Presentation {
                 width: parent.width * 0.7
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-                text: "AI Pentest   -   Bug Bounty   -   CTF   -   Threat Intel   -   Leaks"
+                text: "VA   -   AI Pentest   -   Bug Bounty   -   CTF   -   Threat Intel"
                 color: "#37B6FF"
                 font.pixelSize: 22
             }

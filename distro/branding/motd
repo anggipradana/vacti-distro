@@ -2,7 +2,7 @@
   Vacti OS
 
   The complete offensive security platform
-  AI Pentest  -  Bug Bounty  -  CTF  -  Threat Intel  -  Leaks
+  VA  -  AI Pentest  -  Bug Bounty  -  CTF  -  Threat Intel
 
   This appliance is inert without a live vacti enrollment: it cannot run an
   engagement without a live, operator-minted enrollment token, the per-engagement
