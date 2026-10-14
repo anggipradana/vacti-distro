@@ -1,7 +1,8 @@
 
-  Vacti OS (trixie-based pentest appliance)
+  Vacti OS
 
-  Vulnerability Assessment  -  AI Pentest  -  Threat Intelligence
+  The complete offensive security platform
+  AI Pentest  -  Bug Bounty  -  CTF  -  Threat Intel  -  Leaks
 
   This appliance is inert without a live vacti enrollment: it cannot run an
   engagement without a live, operator-minted enrollment token, the per-engagement

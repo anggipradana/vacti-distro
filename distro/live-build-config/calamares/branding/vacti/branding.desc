@@ -7,7 +7,7 @@ strings:
   shortProductName:    Vacti OS
   version:             0.1.0
   shortVersion:        0.1.0
-  versionedName:       Vacti OS (trixie-based pentest appliance) 0.1.0
+  versionedName:       Vacti OS 0.1.0
   shortVersionedName:  Vacti OS 0.1.0
   bootloaderEntryName: Vacti OS
   productUrl:          https://vacti.example/

@@ -27,7 +27,7 @@ Presentation {
                 }
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    text: "Installing the vacti pentest appliance"
+                    text: "The complete offensive security platform"
                     color: "#9FB0C6"
                     font.pixelSize: 18
                 }
@@ -44,7 +44,7 @@ Presentation {
                 width: parent.width * 0.7
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-                text: "Vulnerability Assessment   -   AI Pentest   -   Threat Intelligence"
+                text: "AI Pentest   -   Bug Bounty   -   CTF   -   Threat Intel   -   Leaks"
                 color: "#37B6FF"
                 font.pixelSize: 22
             }
