@@ -7,8 +7,8 @@
 # operator-set placeholder until the final product URL is decided.
 #
 # Vacti OS is the appliance edition of vacti, the complete offensive security
-# platform: AI Pentest, Bug Bounty, CTF, Vulnerability Assessment, Attack
-# Surface, Threat Intelligence, and Leaks / OSINT. Not pentest-only.
+# platform: VA (Vulnerability Assessment), AI Pentest, Bug Bounty, CTF, and
+# Threat Intel. Not pentest-only.
 NAME="Vacti OS"
 PRETTY_NAME="Vacti OS"
 ID=vacti
