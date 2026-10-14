@@ -1,0 +1,33 @@
+# best-effort.list - arsenal packages that MAY be absent from the Debian/Kali
+# apt archives on some suites and therefore must be installed BEST-EFFORT, never
+# as a hard dependency that aborts a build.
+#
+# WHY THIS FILE EXISTS (OVA/ISO parity). The golden/OVA path (build-golden.sh)
+# and the engine's own packaging/bootstrap-apt.sh install the curated arsenal
+# best-effort per-package: a package with no apt candidate produces a warning and
+# the build continues (the engine's runtime arsenal-check self-heals the residual
+# via src/runner/arsenal-check.ts). live-build, by contrast, installs a
+# config/package-lists/*.list.chroot ALL-OR-NOTHING, so a single name that apt
+# cannot locate aborts the WHOLE ISO build with
+# "E: Unable to locate package <name>", even though the identical OVA build only
+# warns. That asymmetry (same apt SOURCES on both paths - Debian + pinned Kali +
+# vacti - but hard-fail vs best-effort install semantics) is the bug this file
+# fixes: build-iso.sh keeps the hard package-list to the resolvable packages and
+# installs the names below via config/hooks/normal/0330-vpn-besteffort.hook.chroot
+# with the same warn-and-continue semantics the OVA uses.
+#
+# These stay in packages/web-lean.list (and thus in the OVA arsenal.list and the
+# ISO's generated full list) as the single source of truth; this file only marks
+# which of them must not hard-fail the ISO.
+#
+# One package per line. Comments (#...) and blank lines are ignored.
+#
+# globalprotect-openconnect: gpclient's real GlobalProtect portal pre-auth flow.
+# Not packaged in Debian 13 trixie NOR in the pinned Kali rolling archive (only
+# gp-saml-gui exists there, and openconnect already covers the GlobalProtect
+# tunnel via `openconnect --protocol=gp`). Verified absent via apt-cache policy
+# on a debian:trixie chroot with the pinned Kali source active. The engine's
+# bootstrap-apt.sh documents it as "absent from some Debian suites" and installs
+# it best-effort; the runtime arsenal-check maps gpclient -> this package for
+# post-boot self-heal where an archive does carry it.
+globalprotect-openconnect

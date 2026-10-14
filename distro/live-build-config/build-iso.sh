@@ -24,8 +24,39 @@ command -v lb >/dev/null 2>&1 || { echo "live-build (lb) not found (apt-get inst
 
 echo "[iso] materializing the shared distro/ tree into config/ (SKU=${SKU})"
 
-# 1. package list: generate vacti-core from the shared manifest (honors VACTI_FULL_ARSENAL)
-"${DISTRO_DIR}/packages/gen-live-build-list.sh" "${HERE}/config/package-lists/vacti-core.list.chroot"
+# 1. package list: generate vacti-core from the shared manifest (honors VACTI_FULL_ARSENAL),
+#    then split out the BEST-EFFORT packages. The golden/OVA path (build-golden.sh)
+#    and the engine's bootstrap-apt.sh install the arsenal best-effort per-package
+#    ("no apt candidate = a warning, never an aborted bootstrap"); live-build instead
+#    installs a package-list ALL-OR-NOTHING, so a name apt cannot locate (e.g.
+#    globalprotect-openconnect, which is in NEITHER Debian 13 trixie NOR the pinned
+#    Kali archive) aborts the WHOLE ISO build ("E: Unable to locate package ...") while
+#    the identical OVA build only warns. To restore OVA/ISO parity, keep the hard
+#    package-list to the resolvable packages and hand the best-effort set to
+#    0330-vpn-besteffort.hook.chroot (same warn-and-continue semantics; runtime
+#    arsenal-check self-heals any residual). packages/best-effort.list is the single
+#    source for which arsenal packages may be absent.
+CORE_LIST="${HERE}/config/package-lists/vacti-core.list.chroot"
+BE_SRC="${DISTRO_DIR}/packages/best-effort.list"
+"${DISTRO_DIR}/packages/gen-live-build-list.sh" "${CORE_LIST}"
+if [[ -f "$BE_SRC" ]]; then
+  # stripped best-effort package names (drop comments + blank lines)
+  BE_NAMES="$(sed -e 's/#.*$//' -e 's/[[:space:]]\+$//' "$BE_SRC" | grep -vE '^[[:space:]]*$' || true)"
+  if [[ -n "$BE_NAMES" ]]; then
+    # a) remove them from the hard package-list so live-build never hard-fails on an
+    #    absent candidate (grep -vxF: exact whole-line, fixed-string match). `|| true`
+    #    guards the grep exit-1 (empty result) case under `set -e`.
+    grep -vxF -f <(printf '%s\n' "$BE_NAMES") "$CORE_LIST" > "${CORE_LIST}.tmp" || true
+    mv -f "${CORE_LIST}.tmp" "$CORE_LIST"
+    # b) stage the best-effort list into the build chroot for the hook. It lands
+    #    under /opt/vacti-build (gitignored before_packages overlay) and is removed
+    #    by the hook + 0900-remove-build-auth, so it never ships.
+    BE_STAGE="${HERE}/config/includes.chroot_before_packages/opt/vacti-build"
+    install -d "$BE_STAGE"
+    printf '%s\n' "$BE_NAMES" > "${BE_STAGE}/best-effort.list"
+    echo "[iso] best-effort packages moved to 0330 hook (not the hard list): $(printf '%s' "$BE_NAMES" | tr '\n' ' ')"
+  fi
+fi
 
 # 2. branding assets -> includes.chroot (apply-branding.sh reads /usr/share/vacti/branding)
 install -d "${HERE}/config/includes.chroot/usr/share/vacti/branding"
