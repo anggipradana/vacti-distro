@@ -38,6 +38,10 @@ permissions:
 env:
   VACTI_RELEASE: ${{ github.event.inputs.release || github.event.client_payload.release || '0.1.0' }}
   VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '0' }}
+  # Pinned engine ref the image builds against + the arsenal manifest the sync
+  # guard checks. Empty = floating latest (historical behavior). The engine-deb-
+  # published dispatch feeds the just-published version in via client_payload.release.
+  VACTI_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF || github.event.client_payload.release || '' }}
   # Form scoping. workflow_dispatch defaults to the cheap golden+cloud path; a
   # repository_dispatch (engine-deb-published) has no input, so it falls back to
   # 'all' - the full matrix, exactly as before. NOTE: the `env` context is not
@@ -221,7 +225,9 @@ jobs:
       - name: Install live-build toolchain
         run: |
           apt-get update
-          apt-get install -y live-build xorriso squashfs-tools ca-certificates curl gnupg make
+          # jq: gen-live-build-list.sh parses the engine arsenal manifest with it
+          # (the debian:trixie container has neither jq nor python3 by default).
+          apt-get install -y live-build xorriso squashfs-tools ca-certificates curl gnupg make jq
       - name: Build ISO (${{ matrix.sku }}, off-prod)
         run: VACTI_ISO_SKU=${{ matrix.sku }} make $([ "${{ matrix.sku }}" = gui ] && echo iso-gui || echo iso)
       - name: No-secret scan (iso)  # MANDATORY

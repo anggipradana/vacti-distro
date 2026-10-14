@@ -1,0 +1,263 @@
+{
+  "schema": "vacti-arsenal-manifest/v1",
+  "generated_by": "scripts/gen-arsenal-manifest.mjs",
+  "source": "packaging/arsenal.env",
+  "note": "GENERATED - do not edit by hand. Regenerate: node scripts/gen-arsenal-manifest.mjs",
+  "playwright_mcp_spec": "@playwright/mcp@0.0.82",
+  "apt": {
+    "grant": [
+      "aapt",
+      "adb",
+      "apktool",
+      "dirb",
+      "dirsearch",
+      "dnsx",
+      "exploitdb",
+      "feroxbuster",
+      "ffuf",
+      "gau",
+      "gobuster",
+      "httpx-toolkit",
+      "imagemagick",
+      "interactsh-client",
+      "naabu",
+      "nmap",
+      "nuclei",
+      "openconnect",
+      "openvpn",
+      "qterminal",
+      "scrcpy",
+      "seclists",
+      "sqlmap",
+      "strongswan-swanctl",
+      "tesseract-ocr",
+      "tesseract-ocr-eng",
+      "tesseract-ocr-ind",
+      "trufflehog",
+      "whatweb",
+      "wireguard-tools",
+      "x11-xserver-utils",
+      "xdotool"
+    ],
+    "core": [
+      "nmap",
+      "nuclei",
+      "httpx-toolkit",
+      "naabu",
+      "subfinder",
+      "ffuf",
+      "gobuster",
+      "dirsearch",
+      "sqlmap",
+      "weevely",
+      "whatweb",
+      "commix",
+      "dnsx",
+      "katana",
+      "trufflehog",
+      "feroxbuster",
+      "seclists",
+      "dirb",
+      "default-mysql-client",
+      "nftables",
+      "jq",
+      "curl",
+      "git",
+      "build-essential",
+      "ca-certificates",
+      "xvfb",
+      "fonts-noto",
+      "fonts-noto-cjk",
+      "fonts-noto-color-emoji",
+      "pipx",
+      "golang-go",
+      "ripgrep",
+      "fd-find",
+      "trivy",
+      "openssh-server",
+      "adb",
+      "xz-utils",
+      "socat",
+      "openconnect",
+      "globalprotect-openconnect",
+      "openfortivpn",
+      "openvpn",
+      "wireguard-tools",
+      "strongswan",
+      "strongswan-swanctl",
+      "scrcpy",
+      "apktool",
+      "aapt",
+      "default-jre-headless",
+      "unzip",
+      "usbmuxd",
+      "libimobiledevice-utils",
+      "libplist-utils",
+      "llvm",
+      "gdb-multiarch",
+      "binwalk",
+      "strace",
+      "ltrace",
+      "tshark",
+      "checksec",
+      "binutils",
+      "python3-venv",
+      "imagemagick",
+      "xdotool",
+      "x11-xserver-utils",
+      "qterminal",
+      "sshpass",
+      "tmux"
+    ],
+    "verticals": {
+      "source": [
+        "trivy"
+      ],
+      "mobile": [
+        "scrcpy",
+        "apktool",
+        "aapt"
+      ],
+      "ios": [
+        "usbmuxd",
+        "libimobiledevice-utils",
+        "libplist-utils",
+        "llvm"
+      ],
+      "re": [
+        "gdb-multiarch",
+        "binwalk",
+        "strace",
+        "ltrace",
+        "tshark",
+        "checksec"
+      ]
+    },
+    "ctf": [
+      "foremost",
+      "scalpel",
+      "sleuthkit",
+      "binwalk",
+      "steghide",
+      "libimage-exiftool-perl",
+      "python3-pycryptodome",
+      "python3-pwntools",
+      "python3-ropgadget",
+      "gdb",
+      "nasm",
+      "radare2",
+      "ltrace",
+      "strace",
+      "john",
+      "hashcat",
+      "netcat-openbsd",
+      "exploitdb",
+      "ruby",
+      "ruby-dev",
+      "python3-pip"
+    ]
+  },
+  "tools": [
+    {
+      "name": "certipy",
+      "method": "pipx",
+      "package": "certipy-ad",
+      "capability": "ad",
+      "binaries": [
+        "certipy"
+      ],
+      "arch": null
+    },
+    {
+      "name": "frida",
+      "method": "pipx",
+      "package": "frida-tools",
+      "capability": "mobile",
+      "binaries": [
+        "frida",
+        "frida-ps",
+        "frida-trace"
+      ],
+      "arch": null
+    },
+    {
+      "name": "ilspycmd",
+      "method": "dotnet",
+      "package": "ilspycmd",
+      "capability": "re",
+      "binaries": [
+        "ilspycmd"
+      ],
+      "arch": null
+    },
+    {
+      "name": "objection",
+      "method": "pipx",
+      "package": "objection",
+      "capability": "mobile",
+      "binaries": [
+        "objection"
+      ],
+      "arch": null
+    },
+    {
+      "name": "playwright-mcp",
+      "method": "npm",
+      "package": "@playwright/mcp@0.0.82",
+      "capability": "core",
+      "binaries": [],
+      "arch": null
+    },
+    {
+      "name": "pymobiledevice3",
+      "method": "pipx",
+      "package": "pymobiledevice3",
+      "capability": "ios",
+      "binaries": [
+        "pymobiledevice3"
+      ],
+      "arch": null
+    },
+    {
+      "name": "semgrep",
+      "method": "pipx",
+      "package": "semgrep",
+      "capability": "source",
+      "binaries": [
+        "semgrep"
+      ],
+      "arch": null
+    },
+    {
+      "name": "slither",
+      "method": "pipx",
+      "package": "slither-analyzer",
+      "capability": "web3",
+      "binaries": [
+        "slither"
+      ],
+      "arch": null
+    },
+    {
+      "name": "uv",
+      "method": "pipx",
+      "package": "uv",
+      "capability": "core",
+      "binaries": [
+        "uv",
+        "uvx"
+      ],
+      "arch": null
+    },
+    {
+      "name": "vol",
+      "method": "pipx",
+      "package": "volatility3",
+      "capability": "ctf",
+      "binaries": [
+        "vol"
+      ],
+      "arch": null
+    }
+  ]
+}

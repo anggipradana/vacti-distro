@@ -27,7 +27,7 @@
 # (slither/foundry/jwt_tool are unpinned exactly as the engine leaves them).
 # POSIX sh; best-effort - a transient blip warns and the (multi-GB) build continues
 # (runtime self-heal / minting covers any gap). Only the apt VPN client
-# globalprotect-openconnect is handled elsewhere (packages/web-lean.list).
+# globalprotect-openconnect is handled elsewhere (an apt arsenal tool from the engine manifest).
 set -u
 
 INTERACTSH_VERSION="${VACTI_INTERACTSH_VERSION:-v1.2.4}"

@@ -92,8 +92,16 @@ cp -a "${OOM_DIR}/sysctl-90-vacti.conf"    "${STAGE}/etc/sysctl.d/90-vacti.conf"
 cp -a "${OOM_DIR}/zram-generator.conf"     "${STAGE}/etc/systemd/zram-generator.conf"
 cp -a "${OOM_DIR}/tmpfiles-vacti-thp.conf" "${STAGE}/etc/tmpfiles.d/vacti-thp.conf"
 cp -a "${OOM_DIR}/earlyoom.default"        "${STAGE}/etc/default/earlyoom"
-# resolve the arsenal list for this build flavour
-"${PKG_DIR}/gen-live-build-list.sh" "${STAGE}/opt/vacti-build/arsenal.list"
+# arsenal derivation: stage the manifest-driven generator + its inputs so
+# provision.sh can derive the arsenal list INSIDE the guest from the manifest the
+# installed vacti-engine .deb ships (/usr/lib/vacti-engine/packaging/arsenal-manifest.json).
+# The vendored snapshot travels too as an offline fallback. No forked package list
+# is pre-generated on the host anymore - the engine manifest is the single source.
+install -d "${STAGE}/opt/vacti-build/packages"
+cp -a "${PKG_DIR}/gen-live-build-list.sh" "${PKG_DIR}/manifest-lib.sh" \
+      "${PKG_DIR}/distro-owned.list"      "${PKG_DIR}/arsenal-manifest.json" \
+      "${STAGE}/opt/vacti-build/packages/"
+chmod 0755 "${STAGE}/opt/vacti-build/packages/gen-live-build-list.sh"
 # kali repo files (Option A)
 if [[ ! "${VACTI_NO_KALI_REPO}" =~ ^(1|true|yes|on)$ ]]; then
   mkdir -p "${STAGE}/opt/vacti-build/kali-repo"
@@ -122,8 +130,9 @@ chmod 0755 "${STAGE}/opt/vacti-build/install-engine-extras.sh"
 # rm -rf's, so no CTF tool manifest/installer is left on the shipped image.
 if [[ "${VACTI_CTF_ARSENAL}" =~ ^(1|true|yes|on)$ ]]; then
   cp -a "${HERE}/install-ctf-arsenal.sh" "${STAGE}/opt/vacti-build/install-ctf-arsenal.sh"
-  cp -a "${PKG_DIR}/ctf.list"            "${STAGE}/opt/vacti-build/ctf.list"
   chmod 0755 "${STAGE}/opt/vacti-build/install-ctf-arsenal.sh"
+  # The CTF apt list is no longer a forked file: provision.sh generates it from
+  # the engine manifest (VACTI_GEN_MODE=ctf-apt) and hands the path to the installer.
 fi
 chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/vacti-swap-firstboot" "${STAGE}/opt/vacti-build/apply-branding.sh"
 
@@ -136,6 +145,9 @@ chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/va
 # which is a prefix of the sources path its-ai.site/api/pentest/apt (match).
 APT_MACHINE="$(printf '%s/apt' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://##')"
 APT_SCHEME_HOST="${VACTI_APT_URL%/}"
+# Engine install spec: pin to VACTI_ENGINE_REF when set, else floating latest.
+ENGINE_INSTALL_SPEC="${VACTI_ENGINE_PKG}"
+[[ -n "${VACTI_ENGINE_REF:-}" ]] && ENGINE_INSTALL_SPEC="${VACTI_ENGINE_PKG}=${VACTI_ENGINE_REF}"
 cat > "${WORK}/provision.sh" <<PROV
 #!/usr/bin/env bash
 set -euo pipefail
@@ -233,14 +245,32 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 
 apt-get update -y
 
-# the engine + the arsenal
-echo "[prov] installing ${VACTI_ENGINE_PKG} + arsenal"
-mapfile -t PKGS < <(grep -vE '^[[:space:]]*(#|\$)' /opt/vacti-build/arsenal.list)
-apt-get install -y --no-install-recommends ${VACTI_ENGINE_PKG} "\${PKGS[@]}" || {
-  echo "[prov] bulk install hit a snag; retrying best-effort per-package for the arsenal"
-  apt-get install -y --no-install-recommends ${VACTI_ENGINE_PKG}
-  for p in "\${PKGS[@]}"; do apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] \$p not installable here (runtime self-heal will cover it)"; done
-}
+# --- (phase 1) the engine .deb -----------------------------------------------
+# Install the engine FIRST so its shipped arsenal manifest
+# (/usr/lib/vacti-engine/packaging/arsenal-manifest.json) is on disk to derive the
+# arsenal from. ENGINE_INSTALL_SPEC is host-expanded (pinned to VACTI_ENGINE_REF
+# when set, else floating latest).
+echo "[prov] installing ${ENGINE_INSTALL_SPEC}"
+apt-get install -y --no-install-recommends ${ENGINE_INSTALL_SPEC}
+
+# --- (phase 2) derive the arsenal from the INSTALLED .deb manifest, then install
+# gen-live-build-list.sh resolves the manifest from the installed .deb path first,
+# falling back to the vendored snapshot staged beside it. This replaces the old
+# hand-forked web-lean/full/ctf lists: the baked arsenal is now 1:1 with the engine.
+echo "[prov] deriving the arsenal list from the installed engine manifest"
+VACTI_FULL_ARSENAL="${VACTI_FULL_ARSENAL}" VACTI_CTF_ARSENAL="${VACTI_CTF_ARSENAL}" \
+  /opt/vacti-build/packages/gen-live-build-list.sh /opt/vacti-build/arsenal.list \
+  || echo "[prov][warn] arsenal list generation reported an issue"
+mapfile -t PKGS < <(grep -vE '^[[:space:]]*(#|\$)' /opt/vacti-build/arsenal.list 2>/dev/null || true)
+echo "[prov] installing arsenal (\${#PKGS[@]} packages)"
+if [ "\${#PKGS[@]}" -gt 0 ]; then
+  apt-get install -y --no-install-recommends "\${PKGS[@]}" || {
+    echo "[prov] bulk arsenal install hit a snag; retrying best-effort per-package"
+    for p in "\${PKGS[@]}"; do apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] \$p not installable here (runtime self-heal will cover it)"; done
+  }
+else
+  echo "[prov][warn] arsenal list empty; relying on runtime self-heal"
+fi
 
 # REA (rea-agents): MANDATORY, baked on every image. Runs after Node + engine
 # install (the NodeSource 22.x repo was added above). install-rea.sh verifies the
@@ -278,12 +308,15 @@ fi
 
 # CTF arsenal (opt-in): run the staged installer only when VACTI_CTF_ARSENAL=1.
 # The flag value is baked by the HOST into this build-only script. The installer
-# + ctf.list live under /opt/vacti-build, which FINALIZE rm -rf's, so no CTF
-# tooling manifest leaks onto the shipped image. All CTF installs are best-effort.
+# + the generated CTF apt list live under /opt/vacti-build, which FINALIZE rm -rf's,
+# so no CTF tooling manifest leaks onto the shipped image. All CTF installs are best-effort.
 VACTI_CTF_ARSENAL="${VACTI_CTF_ARSENAL}"
 if [[ "\${VACTI_CTF_ARSENAL}" =~ ^(1|true|yes|on)\$ ]] && [[ -x /opt/vacti-build/install-ctf-arsenal.sh ]]; then
   echo "[prov] installing CTF arsenal (VACTI_CTF_ARSENAL=1)"
-  /opt/vacti-build/install-ctf-arsenal.sh /opt/vacti-build/ctf.list || echo "[prov][warn] CTF arsenal install partial (best-effort)"
+  # derive the CTF apt list from the engine manifest (not a forked ctf.list)
+  VACTI_GEN_MODE=ctf-apt /opt/vacti-build/packages/gen-live-build-list.sh /opt/vacti-build/ctf-apt.list \
+    || echo "[prov][warn] CTF apt list generation reported an issue"
+  /opt/vacti-build/install-ctf-arsenal.sh /opt/vacti-build/ctf-apt.list || echo "[prov][warn] CTF arsenal install partial (best-effort)"
 fi
 
 # guest integration (both hypervisors coexist in one rootfs) + tailscale client
@@ -292,7 +325,7 @@ apt-get install -y --no-install-recommends open-vm-tools virtualbox-guest-utils 
 curl -fsSL https://tailscale.com/install.sh | sh || echo "[prov][warn] tailscale install deferred to runtime"
 systemctl enable tailscaled 2>/dev/null || true
 
-# openssh-server is baked (packages/web-lean.list) but the apt install does NOT
+# openssh-server is baked (engine arsenal manifest core) but the apt install does NOT
 # enable it, so engines boot with sshd DOWN and are unreachable over tailscale
 # SSH (the kali-azza symptom). Enable it here so the wants/ symlink ships in the
 # golden image and sshd starts on every boot. 'systemctl start' is a no-op in the

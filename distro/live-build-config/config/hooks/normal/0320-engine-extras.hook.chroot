@@ -11,7 +11,7 @@
 #   (2) jwt_tool                 -> git clone -> /opt/jwt_tool
 #   (3) web3: slither + Foundry  -> pipx(/opt/pipx) + foundryup(/opt/foundry), symlinked
 #   (4) Caido CLI + caido-mcp-server -> engine-home cli + go-built MCP
-# (globalprotect-openconnect is an apt tool -> packages/web-lean.list.)
+# (globalprotect-openconnect is an apt tool -> the engine arsenal manifest core.)
 #
 # MANDATORY on every SKU. Zero .claude on disk; /root cleaned. Runs at chroot_hooks
 # (after packages, so go/pipx/git/curl + the vacti-engine user exist). Best-effort.
