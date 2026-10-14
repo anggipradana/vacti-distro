@@ -2,7 +2,15 @@
 # installer. Pulled on top of vacti-core.list.chroot. Headless SKU omits all of this.
 xfce4
 xfce4-terminal
+# Whisker menu: the branded start-menu button (vacti radar-shield icon) wired by
+# the skel xfce4-panel.xml in the branding layer.
+xfce4-whiskermenu-plugin
 lightdm
+# GTK greeter: the LightDM greeter the brand greeter theme targets.
+lightdm-gtk-greeter
 network-manager-gnome
+# Plymouth: the graphical boot splash (vacti theme set by apply-branding.sh).
+plymouth
+plymouth-themes
 calamares
 calamares-settings-debian

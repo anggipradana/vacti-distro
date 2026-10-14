@@ -30,10 +30,11 @@ echo "[iso] materializing the shared distro/ tree into config/ (SKU=${SKU})"
 # 2. branding assets -> includes.chroot (apply-branding.sh reads /usr/share/vacti/branding)
 install -d "${HERE}/config/includes.chroot/usr/share/vacti/branding"
 cp -a "${DISTRO_DIR}/branding/os-release" "${DISTRO_DIR}/branding/issue" \
+      "${DISTRO_DIR}/branding/issue.net" \
       "${DISTRO_DIR}/branding/motd" "${DISTRO_DIR}/branding/disclaimer.txt" \
       "${DISTRO_DIR}/branding/apply-branding.sh" \
       "${HERE}/config/includes.chroot/usr/share/vacti/branding/"
-for d in grub plymouth wallpaper; do
+for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo; do
   [[ -d "${DISTRO_DIR}/branding/${d}" ]] && cp -a "${DISTRO_DIR}/branding/${d}" "${HERE}/config/includes.chroot/usr/share/vacti/branding/"
 done
 # GRUB boot-menu splash (binary overlay), if the operator provided one

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="132" viewBox="0 0 120 132" fill="none"><g transform="translate(0.000,0.000) scale(1.00000)">
+  <defs>
+    <linearGradient id="shield-lm" x1="60" y1="8" x2="60" y2="126" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1F5BD6"/><stop offset="1" stop-color="#0E347E"/>
+    </linearGradient>
+    <radialGradient id="sweep-lm" cx="60" cy="64" r="52" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#37B6FF" stop-opacity="0.55"/><stop offset="1" stop-color="#37B6FF" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="clip-lm"><path d="M60 8 L108 26 V64 C108 95 88 116 60 126 C32 116 12 95 12 64 V26 Z"/></clipPath>
+  </defs>
+  <path d="M60 8 L108 26 V64 C108 95 88 116 60 126 C32 116 12 95 12 64 V26 Z" fill="url(#shield-lm)"/>
+  <g clip-path="url(#clip-lm)">
+    <path d="M60 64 L112 30 L120 70 L96 104 Z" fill="url(#sweep-lm)"/>
+    <g stroke="#FFFFFF" stroke-width="2.2" fill="none" opacity="0.4">
+      <circle cx="60" cy="64" r="18"/><circle cx="60" cy="64" r="36"/>
+    </g>
+    <path d="M60 64 L104 34" stroke="#8FD4FF" stroke-width="3.2" stroke-linecap="round"/>
+  </g>
+  <circle cx="60" cy="64" r="5" fill="#FFFFFF"/>
+  <circle cx="40" cy="48" r="3.6" fill="#FFFFFF" opacity="0.8"/>
+  <circle cx="78" cy="86" r="3.6" fill="#FFFFFF" opacity="0.8"/>
+  <circle cx="86" cy="50" r="6" fill="#FF5A5A" stroke="#FFFFFF" stroke-width="2.5"/>
+</g></svg>

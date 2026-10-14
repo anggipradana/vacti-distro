@@ -1,0 +1,29 @@
+#!/bin/sh
+# vacti-set-wallpaper - set the Vacti OS wallpaper on every connected monitor at
+# login. Installed to /usr/local/bin and launched by the skel autostart entry.
+#
+# It adapts to whatever displays exist instead of hardcoding monitor names, so it
+# works on one screen or many, on any hardware (the "works everywhere" rule). It
+# is a no-op when xfconf is unavailable (e.g. the headless SKU).
+set -u
+
+WP="/usr/share/backgrounds/vacti/vacti-wallpaper-1920x1080.png"
+[ -r "$WP" ] || exit 0
+command -v xfconf-query >/dev/null 2>&1 || exit 0
+
+seeded=0
+for p in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep -E '/backdrop/.*/last-image$'); do
+  base="${p%/last-image}"
+  xfconf-query -c xfce4-desktop -p "$p" -s "$WP" 2>/dev/null || true
+  xfconf-query -c xfce4-desktop -p "${base}/image-style" -s 5 2>/dev/null \
+    || xfconf-query -c xfce4-desktop -p "${base}/image-style" -n -t int -s 5 2>/dev/null || true
+  seeded=1
+done
+
+# Fresh profile with no backdrop keys yet: seed the legacy monitor0 path so the
+# first session still shows the brand wallpaper.
+if [ "$seeded" -eq 0 ]; then
+  xfconf-query -c xfce4-desktop -p /backdrop/screen0/monitor0/workspace0/last-image -n -t string -s "$WP" 2>/dev/null || true
+  xfconf-query -c xfce4-desktop -p /backdrop/screen0/monitor0/workspace0/image-style -n -t int -s 5 2>/dev/null || true
+fi
+exit 0

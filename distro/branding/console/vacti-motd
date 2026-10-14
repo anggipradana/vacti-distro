@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# vacti-motd - render the dynamic Vacti OS message-of-the-day to stdout.
+#
+# Installed to /usr/local/sbin/vacti-motd and run at boot by vacti-motd.service,
+# which writes the result to /etc/motd; pam_motd then prints it on every console
+# and SSH login (Debian pam_motd uses 'noupdate', so /etc/motd is the banner).
+#
+# Output is 16-colour ANSI + the U+2580/2584/2588 half-block glyphs that exist in
+# the Linux VT font and every UTF-8 terminal, so it renders the same on a bare
+# console and over SSH. No colour is assumed to be supported: a NO_COLOR env or a
+# dumb TERM drops the escapes. Lightweight and dependency-free by design.
+set -u
+
+BRAND_DIR="/usr/share/vacti/branding"
+WORDMARK="${BRAND_DIR}/console/motd-wordmark.ansi"
+
+# Colour palette (brand): bright cyan wordmark, blue rule, dim labels. Disabled
+# when NO_COLOR is set or the terminal is non-colour, so this is safe everywhere.
+if [[ -n "${NO_COLOR:-}" || "${TERM:-dumb}" == "dumb" ]]; then
+  C_CY=""; C_FG=""; C_DIM=""; C_GRN=""; C_RED=""; C_RST=""
+else
+  C_CY=$'\033[96m'; C_FG=$'\033[97m'
+  C_DIM=$'\033[90m'; C_GRN=$'\033[92m'; C_RED=$'\033[91m'; C_RST=$'\033[0m'
+fi
+
+echo
+# 1. wordmark (pre-rendered half-block art from the product font)
+if [[ -r "$WORDMARK" ]]; then
+  sed 's/^/  /' "$WORDMARK"
+else
+  printf '  %svacti%s\n' "$C_CY" "$C_RST"
+fi
+
+# 2. tagline
+printf '\n  %sVulnerability Assessment  -  AI Pentest  -  Threat Intelligence%s\n' "$C_DIM" "$C_RST"
+
+# 3. host + enrolment status (the dynamic part)
+host="$(hostname -s 2>/dev/null || echo vacti)"
+ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd, - 2>/dev/null)"
+[[ -z "$ip" ]] && ip="(no address yet)"
+ts="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+
+if [[ -f /etc/vacti-engine/engine.env ]]; then
+  enroll="${C_GRN}enrolled${C_RST}"
+else
+  enroll="${C_RED}awaiting enrollment${C_RST}"
+fi
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet vacti-engine 2>/dev/null; then
+  engine="${C_GRN}active${C_RST}"
+else
+  engine="${C_DIM}inactive${C_RST}"
+fi
+
+printf '\n  %sHost%s    %s%-18s%s  %sIP%s %s%s%s\n' "$C_DIM" "$C_RST" "$C_FG" "$host" "$C_RST" "$C_DIM" "$C_RST" "$C_FG" "$ip" "$C_RST"
+printf '  %sEngine%s  %s   %sEnrollment%s %s\n' "$C_DIM" "$C_RST" "$engine" "$C_DIM" "$C_RST" "$enroll"
+[[ -n "$ts" ]] && printf '  %sTailnet%s %s%s%s\n' "$C_DIM" "$C_RST" "$C_FG" "$ts" "$C_RST"
+
+# 4. non-affiliation (required)
+printf '\n  %sVacti OS is a derivative based on Debian GNU/Linux; it is not produced by,%s\n' "$C_DIM" "$C_RST"
+printf '  %sendorsed by, or affiliated with the Debian Project. Debian is a trademark%s\n' "$C_DIM" "$C_RST"
+printf '  %sof Software in the Public Interest, Inc.%s\n\n' "$C_DIM" "$C_RST"

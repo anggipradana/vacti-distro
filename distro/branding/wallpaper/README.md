@@ -1,7 +1,9 @@
 # Desktop wallpaper (GUI SKU)
 
-Place the wallpaper image(s) here (e.g. `vacti-1920x1080.png`). `apply-branding.sh`
-stages them to `/usr/share/backgrounds/vacti/`; the XFCE skel + LightDM greeter in
-the live-build overlay default to one of them. No Debian marks.
+`vacti-wallpaper-1920x1080.png` and `vacti-wallpaper-2560x1440.png` are the brand wallpapers
+(rendered from the `.svg` sources here: radar-shield lockup + mono tagline on the navy canvas).
+`apply-branding.sh` stages them to `/usr/share/backgrounds/vacti/`. The XFCE skel sets the wallpaper
+on every connected monitor at login via `/usr/local/bin/vacti-set-wallpaper` (adapts to any display
+layout), and the LightDM greeter uses the `greeter/` background.
 
-Placeholder: no binary asset is committed; operator supplies final artwork.
+Re-render from the SVG sources with `../render-assets.sh`. No Debian marks.

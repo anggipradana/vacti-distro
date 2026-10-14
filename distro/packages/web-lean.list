@@ -36,6 +36,9 @@ dirb
 default-mysql-client
 nftables
 jq
+# fastfetch: branded system-info banner shown by `fastfetch` over SSH (config +
+# vacti logo shipped by the branding layer). Present on both SKUs.
+fastfetch
 curl
 wget
 git
