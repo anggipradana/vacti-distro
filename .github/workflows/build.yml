@@ -216,12 +216,37 @@ jobs:
     container:
       image: debian:trixie
       options: --privileged   # loop devices + mount for live-build/squashfs
+      # The host's small ~14GB / backs the container overlay; live-build's heavy
+      # work tree (debootstrap chroot + squashfs + apt cache) exhausts it. Bind
+      # the runner's large ~70GB /mnt temp disk into the container so the build
+      # relocates its work dirs there (see the relocate step + TMPDIR below).
+      volumes:
+        - /mnt:/mnt
     strategy:
       fail-fast: false
       matrix:
         sku: [headless, gui]
     steps:
       - uses: actions/checkout@v4
+      - name: Relocate live-build work tree onto /mnt (container-aware disk headroom)
+        # This job runs INSIDE a debian:trixie container, so the HOST-only reclaim
+        # the golden/fanout jobs use (rm -rf /usr/share/dotnet, /opt/hostedtoolcache,
+        # ...) does NOT help here: those paths are on the host, while live-build's
+        # debootstrap chroot + squashfs + apt cache fill the container overlay on
+        # the host's small ~14GB /. Instead, the runner's large ~70GB /mnt temp disk
+        # is bound into the container (container.volumes above); point live-build's
+        # heavy work dirs (chroot/binary/cache/.build) at it via symlinks so only the
+        # ~3GB final .hybrid.iso lands on /. Lightweight, bakes no secret.
+        run: |
+          echo "[disk] before:"; df -h / /mnt || true
+          work="/mnt/vacti-lb"
+          mkdir -p "$work"/chroot "$work"/binary "$work"/cache "$work"/.build "$work"/tmp
+          cd distro/live-build-config
+          for d in chroot binary cache .build; do
+            rm -rf "./$d"
+            ln -sfn "$work/$d" "./$d"
+          done
+          echo "[disk] live-build work tree relocated onto /mnt:"; ls -ld chroot binary cache .build
       - name: Install live-build toolchain
         run: |
           apt-get update
@@ -229,6 +254,9 @@ jobs:
           # (the debian:trixie container has neither jq nor python3 by default).
           apt-get install -y live-build xorriso squashfs-tools ca-certificates curl gnupg make jq
       - name: Build ISO (${{ matrix.sku }}, off-prod)
+        env:
+          # Keep scratch off the small container / too; share the big /mnt disk.
+          TMPDIR: /mnt/vacti-lb/tmp
         run: VACTI_ISO_SKU=${{ matrix.sku }} make $([ "${{ matrix.sku }}" = gui ] && echo iso-gui || echo iso)
       - name: No-secret scan (iso)  # MANDATORY
         run: |
