@@ -1,0 +1,70 @@
+#!/bin/sh
+# 0330-vpn-besteffort.hook.chroot - install the BEST-EFFORT arsenal packages
+# (packages/best-effort.list) that may be absent from the Debian/Kali apt
+# archives on some suites, with the SAME warn-and-continue semantics the
+# golden/OVA path and the engine's own bootstrap-apt.sh use.
+#
+# WHY. live-build installs config/package-lists/*.list.chroot all-or-nothing, so a
+# single name apt cannot locate aborts the WHOLE ISO build ("E: Unable to locate
+# package ..."), while the identical OVA build only warns and self-heals at
+# runtime. build-iso.sh keeps those names OUT of the hard package-list and stages
+# them to /opt/vacti-build/best-effort.list for this hook, which installs each one
+# best-effort - restoring OVA/ISO parity (see packages/best-effort.list and
+# golden-image/build-golden.sh's per-package arsenal fallback). The engine's
+# runtime arsenal-check (src/runner/arsenal-check.ts) self-heals any residual
+# post-boot (e.g. it maps the gpclient binary to globalprotect-openconnect).
+#
+# Runs at the chroot_hooks stage (after the package lists install, so the pinned
+# Kali + vacti sources are present and apt-updated). MANDATORY on every SKU but
+# fully best-effort: a missing candidate or a transient apt blip warns and the
+# build continues. No `set -e` - never abort the ISO on an absent/flaky tool.
+set -u
+
+STAGED_LIST="/opt/vacti-build/best-effort.list"
+
+log()  { echo "[vpn-besteffort] $*"; }
+warn() { echo "[vpn-besteffort][warn] $*" >&2; }
+
+export DEBIAN_FRONTEND=noninteractive
+
+if [ ! -f "$STAGED_LIST" ]; then
+  log "no staged best-effort list (${STAGED_LIST}); nothing to do"
+  exit 0
+fi
+
+installed_any=0
+while IFS= read -r pkg; do
+  # strip inline comments + surrounding whitespace; skip blanks/comment-only lines
+  pkg=$(printf '%s\n' "$pkg" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  [ -n "$pkg" ] || continue
+
+  if dpkg -s "$pkg" >/dev/null 2>&1; then
+    log "${pkg} already installed"
+    continue
+  fi
+
+  # Only attempt the install when apt actually has a candidate; otherwise this is
+  # the expected "absent from this suite" case -> warn, never fail (mirrors the
+  # engine bootstrap-apt.sh candidate check).
+  cand=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/{print $2}')
+  if [ -z "$cand" ] || [ "$cand" = "(none)" ]; then
+    warn "${pkg} has no apt candidate in this image's sources; skipping (runtime arsenal-check self-heals where an archive carries it)"
+    continue
+  fi
+
+  log "installing ${pkg} (candidate ${cand})"
+  if apt-get install -y --no-install-recommends "$pkg"; then
+    installed_any=1
+    log "${pkg} installed"
+  else
+    warn "${pkg} failed to install despite a candidate; skipping (runtime self-heal covers it)"
+  fi
+done < "$STAGED_LIST"
+
+# Housekeeping: drop the staged list so it never ships (0900-remove-build-auth
+# also rm -rf's /opt/vacti-build as a backstop).
+rm -f "$STAGED_LIST" 2>/dev/null || true
+rmdir /opt/vacti-build 2>/dev/null || true
+
+[ "$installed_any" = "1" ] && log "best-effort arsenal bake complete" || log "best-effort arsenal: nothing installable here (expected on trixie for globalprotect-openconnect)"
+exit 0
