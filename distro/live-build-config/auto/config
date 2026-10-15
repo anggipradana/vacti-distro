@@ -15,12 +15,19 @@ VACTI_ISO_SKU="${VACTI_ISO_SKU:-headless}"   # headless | gui
 DI_FLAVOUR="live"
 [ "$VACTI_ISO_SKU" = "headless" ] && DI_FLAVOUR="true"
 
+# bootappend-live carries a serial console (console=ttyS0) IN ADDITION to the
+# video console (console=tty0, kept primary for the GUI/live session). This lets
+# kernel + systemd ("Reached target ...") output and an auto-spawned serial getty
+# login prompt reach a serial line - needed so the qemu-TCG smoke test (which
+# runs -nographic -serial file:) can observe the boot, and genuinely useful for a
+# headless appliance over a serial/virtual console. Harmless on hardware with no
+# serial port (output is discarded; the screen stays primary).
 lb config noauto \
   --distribution trixie \
   --archive-areas "main contrib non-free non-free-firmware" \
   --architectures amd64 \
   --binary-images iso-hybrid \
-  --bootappend-live "boot=live components quiet splash" \
+  --bootappend-live "boot=live components quiet splash console=tty0 console=ttyS0,115200" \
   --debian-installer "${DI_FLAVOUR}" \
   --iso-application "vacti" \
   --iso-publisher "vacti; https://vacti.example; info@vacti.example" \
