@@ -1,0 +1,74 @@
+#!/bin/sh
+# 0400-serial-boot.hook.binary - make the ISO bootloaders AUTO-BOOT headlessly
+# and speak to a serial console.
+#
+# WHY: under qemu -nographic -serial (the CI smoke-boot test, and any real
+# headless / serial-console deployment) the generated isolinux (BIOS) and grub
+# (UEFI) boot menus render ONLY to the video console and wait for a keypress
+# that never arrives, so the default entry never boots and the kernel never
+# starts -- nothing reaches the serial line. Evidence from a failing smoke run:
+# the serial log stopped at the "ISOLINUX ... Copyright" banner (BIOS) and at
+# OVMF's "BdsDxe: starting Boot0001 UEFI QEMU DVD-ROM" (UEFI), then silence for
+# the whole watch. The kernel never launched, so console=ttyS0 (already on the
+# live cmdline via auto/config) could not help.
+#
+# This hook runs in the BINARY stage, AFTER live-build has assembled the
+# bootloader configs under binary/, and:
+#   - isolinux: adds a `serial` directive + a short finite `timeout` + `prompt 0`
+#     so syslinux drives its menu over serial and auto-boots its DEFAULT label;
+#   - grub: switches to a serial+console terminal with a short finite timeout so
+#     grub auto-boots its default entry over serial instead of stalling on a
+#     graphical (gfxterm) menu.
+# Once the default entry auto-boots, the console=ttyS0 kernel arg makes
+# kernel + systemd + the serial getty login prompt (and the vacti-branded
+# /etc/issue) flow to serial, which is what the smoke harness watches for.
+#
+# Benign for real deployments: a headless/serial box now boots unattended; a box
+# with a monitor still boots (short auto-boot countdown, text menu on the video
+# console). Idempotent + best-effort: a missing config is simply skipped.
+set -e
+
+SPEED=115200
+
+# live-build assembles the bootloader configs under binary/ at this stage.
+ROOT=binary
+[ -d "$ROOT" ] || ROOT=.
+
+# --- isolinux / syslinux (BIOS) ---------------------------------------------
+# SERIAL must be the first directive of the top-level isolinux.cfg. syslinux
+# TIMEOUT is in 1/10 s (100 = 10 s). We strip any serial/timeout/prompt we
+# manage from each cfg, then re-assert ours so the final parsed values win.
+find "$ROOT" -type f -path '*isolinux*' -name '*.cfg' ! -path '*/chroot/*' 2>/dev/null \
+| while IFS= read -r cfg; do
+  tmp="${cfg}.vtmp"
+  grep -viE '^[[:space:]]*(serial|timeout|prompt)([[:space:]]|$)' "$cfg" > "$tmp" 2>/dev/null || true
+  {
+    case "$cfg" in */isolinux.cfg) echo "serial 0 ${SPEED}" ;; esac
+    echo "timeout 100"
+    echo "prompt 0"
+    cat "$tmp"
+  } > "$cfg"
+  rm -f "$tmp"
+  echo "[0400-serial-boot] patched isolinux cfg: $cfg"
+done
+
+# --- grub (UEFI) ------------------------------------------------------------
+# Prepend a serial+console terminal and a finite countdown, and strip any
+# existing serial/terminal/timeout lines so ours take effect (auto-boot default
+# entry 0 over serial rather than stalling on gfxterm).
+find "$ROOT" -type f -name 'grub.cfg' ! -path '*/chroot/*' 2>/dev/null \
+| while IFS= read -r g; do
+  tmp="${g}.vtmp"
+  {
+    echo "serial --unit=0 --speed=${SPEED}"
+    echo "terminal_input serial console"
+    echo "terminal_output serial console"
+    echo "set timeout=5"
+    echo "set timeout_style=countdown"
+  } > "$tmp"
+  grep -viE '^[[:space:]]*(serial|terminal_input|terminal_output|set[[:space:]]+timeout|set[[:space:]]+timeout_style)([[:space:]]|$)' "$g" >> "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$g"
+  echo "[0400-serial-boot] patched grub cfg: $g"
+done
+
+exit 0
