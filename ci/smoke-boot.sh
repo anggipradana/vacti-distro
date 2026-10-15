@@ -75,7 +75,17 @@ ${enroll_block}
       #!/usr/bin/env bash
       C=/dev/console
       echo "SMOKE_BOOT_REACHED" > \$C
-      state="\$(systemctl is-system-running 2>/dev/null || true)"
+      # Poll until systemd settles to a terminal state. This probe is launched
+      # DETACHED via systemd-run (see runcmd), so it is NOT part of the boot
+      # transaction; if it ran inside cloud-final, is-system-running would stay
+      # 'starting' forever (cloud-final is itself an activating job). Under qemu
+      # TCG the settle is slow, so poll up to ~240s instead of sampling once.
+      state="starting"
+      for _ in \$(seq 1 120); do
+        state="\$(systemctl is-system-running 2>/dev/null || true)"
+        case "\$state" in running|degraded) break ;; esac
+        sleep 2
+      done
       echo "SMOKE_SYSTEMD=\${state:-unknown}" > \$C
       for u in vacti-firstboot.service vacti-swap-firstboot.service earlyoom.service; do
         en="\$(systemctl is-enabled \$u 2>/dev/null || echo missing)"
@@ -92,11 +102,14 @@ ${enroll_block}
       else
         echo "SMOKE_ENGINE=absent" > \$C
       fi
-      if ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
-        echo "SMOKE_NET=up" > \$C
-      else
-        echo "SMOKE_NET=down" > \$C
-      fi
+      # Network: poll briefly for a global IPv4 (user-net DHCP can lag the
+      # systemd settle under TCG). Up to ~60s.
+      net="down"
+      for _ in \$(seq 1 30); do
+        if ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then net="up"; break; fi
+        sleep 2
+      done
+      echo "SMOKE_NET=\${net}" > \$C
       if [[ -f /etc/vacti-engine/engine.env ]]; then
         echo "SMOKE_ENROLL=ok" > \$C
       else
@@ -105,8 +118,12 @@ ${enroll_block}
       echo "SMOKE_RESULT=DONE" > \$C
       sync; sleep 2; systemctl poweroff -i 2>/dev/null || poweroff -f
 runcmd:
-  - [ systemctl, start, vacti-firstboot.service ]
-  - [ /usr/local/sbin/vacti-smoke-probe ]
+  # Start the enroll unit non-blocking (it fails loudly token-less -> systemd
+  # 'degraded', an accepted terminal state), then launch the probe as a DETACHED
+  # transient unit so it is not part of the boot transaction and
+  # is-system-running can actually reach running/degraded.
+  - [ systemctl, start, --no-block, vacti-firstboot.service ]
+  - [ systemd-run, --unit=vacti-smoke-probe, --collect, /usr/local/sbin/vacti-smoke-probe ]
 CFG
   if command -v genisoimage >/dev/null 2>&1; then
     genisoimage -quiet -output "$out" -volid CIDATA -joliet -rock "${sd}/user-data" "${sd}/meta-data"
@@ -154,6 +171,13 @@ smoke_disk() {
       -nographic -serial "file:${log}" -monitor none -display none \
       -no-reboot < /dev/null > /dev/null 2>&1 || true
 
+  # The guest serial console emits CRLF, so every marker lands as "VALUE\r".
+  # Strip the CR before parsing, or string compares fail ("up\r" != "up",
+  # "enabled\r" misses the case arm, "starting\r" misses, etc.). This is the fix
+  # for the disk-image smoke FPs: it makes the probe read the TRUE guest state,
+  # it does NOT blind any check.
+  if [[ -s "$log" ]]; then tr -d '\r' < "$log" > "${log}.nocr" && mv -f "${log}.nocr" "$log"; fi
+
   if ! grep -q 'SMOKE_RESULT=DONE' "$log"; then
     bad "${base}: health probe did not complete (no SMOKE_RESULT; boot hang or timeout)"
     say "--- last 40 serial lines (${base}) ---"; tail -40 "$log" >&2 || true
@@ -164,8 +188,8 @@ smoke_disk() {
   # the token-less firstboot) are both acceptable; "failed"/offline are not.
   local st; st="$(sed -n 's/^SMOKE_SYSTEMD=//p' "$log" | tail -1)"
   case "$st" in
-    running|degraded|starting) ok "${base}: systemd state=${st}" ;;
-    *) bad "${base}: systemd state=${st:-unknown} (expected running/degraded)" ;;
+    running|degraded) ok "${base}: systemd state=${st}" ;;
+    *) bad "${base}: systemd state=${st:-unknown} (expected running/degraded after settle)" ;;
   esac
   local net; net="$(sed -n 's/^SMOKE_NET=//p' "$log" | tail -1)"
   [[ "$net" == "up" ]] && ok "${base}: network up" || bad "${base}: network ${net:-unknown}"
@@ -208,8 +232,11 @@ smoke_iso() {
       -netdev user,id=n0 -device virtio-net-pci,netdev=n0
       -nographic -serial "file:${log}" -monitor none -display none -no-reboot )
   [[ -n "$ovmf" ]] && args=( -bios "$ovmf" "${args[@]}" )
-  # ISO boot never powers itself off; rely on a short watch for a prompt marker.
-  local watch="${ISO_WATCH:-300}"
+  # ISO boot never powers itself off; rely on a bounded watch for a prompt
+  # marker. TCG boots a live-build squashfs slowly, so inherit the generous disk
+  # budget unless ISO_WATCH overrides; the loop still breaks the instant a marker
+  # appears (so a healthy ISO exits in minutes, not the full budget).
+  local watch="${ISO_WATCH:-${BOOT_TIMEOUT}}"
   ( timeout "${watch}" "$QEMU" "${args[@]}" < /dev/null > /dev/null 2>&1 || true ) &
   local qpid=$!
   local waited=0 found=0

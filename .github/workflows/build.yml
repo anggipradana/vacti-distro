@@ -335,6 +335,11 @@ jobs:
           STAGING_CP_URL: ${{ vars.STAGING_CP_URL }}
           STAGING_ENROLL_TOKEN: ${{ secrets.STAGING_ENROLL_TOKEN }}
           BOOT_TIMEOUT: "900"
+          # ISO legs reach a serial login/boot marker early now that the live
+          # cmdline carries console=ttyS0; bound each leg's watch so a genuine
+          # hang still fails in reasonable time under TCG (the loop breaks the
+          # instant a marker appears, so a healthy ISO exits in minutes).
+          ISO_WATCH: "600"
         run: ci/smoke-boot.sh out
 
   # --- publish as PRIVATE GitHub Release assets on this private repo -----------
