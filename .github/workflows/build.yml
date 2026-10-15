@@ -216,37 +216,41 @@ jobs:
     container:
       image: debian:trixie
       options: --privileged   # loop devices + mount for live-build/squashfs
-      # The host's small ~14GB / backs the container overlay; live-build's heavy
-      # work tree (debootstrap chroot + squashfs + apt cache) exhausts it. Bind
-      # the runner's large ~70GB /mnt temp disk into the container so the build
-      # relocates its work dirs there (see the relocate step + TMPDIR below).
+      # This container's overlay, the workspace and /tmp all live on the HOST's
+      # root disk (/dev/root, ~14GB free; on these runners /mnt is that same
+      # disk, not a spare volume). Bind the host toolchain trees in so the first
+      # step can reclaim that disk from inside the container.
       volumes:
-        - /mnt:/mnt
+        - /usr:/host/usr
+        - /opt:/host/opt
     strategy:
       fail-fast: false
       matrix:
         sku: [headless, gui]
     steps:
-      - uses: actions/checkout@v4
-      - name: Relocate live-build work tree onto /mnt (container-aware disk headroom)
-        # This job runs INSIDE a debian:trixie container, so the HOST-only reclaim
-        # the golden/fanout jobs use (rm -rf /usr/share/dotnet, /opt/hostedtoolcache,
-        # ...) does NOT help here: those paths are on the host, while live-build's
-        # debootstrap chroot + squashfs + apt cache fill the container overlay on
-        # the host's small ~14GB /. Instead, the runner's large ~70GB /mnt temp disk
-        # is bound into the container (container.volumes above); point live-build's
-        # heavy work dirs (chroot/binary/cache/.build) at it via symlinks so only the
-        # ~3GB final .hybrid.iso lands on /. Lightweight, bakes no secret.
+      # Same squeeze as golden/fanout, done from INSIDE the container: live-build
+      # copies its ~8-9GB chroot (installer + binary stages) and adds the squashfs,
+      # .deb cache and ISO, which exhausted ~14GB free. The host /usr and /opt
+      # are bound in above, so deleting the same toolchains golden drops frees the
+      # very disk this container writes to (14GB -> ~44GB+). live-build itself
+      # keeps REAL work dirs in place: it moves/copies chroot/ and binary/ into the
+      # chroot and runs mksquashfs/xorriso there, so they must not be symlinks.
+      # Runs FIRST, before any checkout or build.
+      - name: Free disk space (reclaim >30GB of the host disk from the container)
         run: |
-          echo "[disk] before:"; df -h / /mnt || true
-          work="/mnt/vacti-lb"
-          mkdir -p "$work"/chroot "$work"/binary "$work"/cache "$work"/.build "$work"/tmp
-          cd distro/live-build-config
-          for d in chroot binary cache .build; do
-            rm -rf "./$d"
-            ln -sfn "$work/$d" "./$d"
-          done
-          echo "[disk] live-build work tree relocated onto /mnt:"; ls -ld chroot binary cache .build
+          echo "[disk] before:"; df -h /
+          rm -rf \
+            /host/usr/local/lib/android \
+            /host/usr/share/dotnet \
+            /host/opt/ghc /host/usr/local/.ghcup \
+            /host/opt/hostedtoolcache \
+            /host/usr/local/share/boost \
+            /host/usr/share/swift \
+            /host/usr/lib/jvm \
+            /host/usr/local/share/powershell \
+            /host/usr/lib/google-cloud-sdk || true
+          echo "[disk] after:"; df -h /
+      - uses: actions/checkout@v4
       - name: Install live-build toolchain
         run: |
           apt-get update
@@ -254,10 +258,17 @@ jobs:
           # (the debian:trixie container has neither jq nor python3 by default).
           apt-get install -y live-build xorriso squashfs-tools ca-certificates curl gnupg make jq
       - name: Build ISO (${{ matrix.sku }}, off-prod)
-        env:
-          # Keep scratch off the small container / too; share the big /mnt disk.
-          TMPDIR: /mnt/vacti-lb/tmp
         run: VACTI_ISO_SKU=${{ matrix.sku }} make $([ "${{ matrix.sku }}" = gui ] && echo iso-gui || echo iso)
+      - name: Reclaim live-build work tree before scan
+        # Only the finished *.hybrid.iso is needed downstream. Drop the chroot,
+        # binary tree and .deb cache (many GB) so the scan, which extracts the ISO
+        # and unsquashes its rootfs under /tmp, has headroom. --one-file-system
+        # never descends into anything live-build might have left mounted.
+        run: |
+          echo "[disk] before cleanup:"; df -h /
+          cd distro/live-build-config
+          rm -rf --one-file-system chroot binary cache .build || true
+          echo "[disk] after cleanup:"; df -h /
       - name: No-secret scan (iso)  # MANDATORY
         run: |
           apt-get install -y libguestfs-tools qemu-utils bsdextrautils
@@ -285,6 +296,23 @@ jobs:
     if: ${{ always() && needs.fanout.result == 'success' && (needs.iso.result == 'success' || needs.iso.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
+      # Same squeeze as golden/fanout: on the full matrix smoke fetches every
+      # built form (~25GB: cloud qcow2 + raw.gz, both OVAs, both ISOs, golden)
+      # and converts each OVA to a temp qcow2, past the runner's ~14GB free.
+      # Reclaim >30GB first, before checkout or download.
+      - name: Free disk space (reclaim >30GB on the runner)
+        run: |
+          echo "[disk] before:"; df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
       - name: Install qemu + tools
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils genisoimage ovmf
