@@ -270,6 +270,9 @@ jobs:
           rm -rf --one-file-system chroot binary cache .build || true
           echo "[disk] after cleanup:"; df -h /
       - name: No-secret scan (iso)  # MANDATORY
+        # bash, not the container default sh (dash): this block uses shopt, a bash
+        # builtin. The host jobs default to bash; this container job does not.
+        shell: bash
         run: |
           apt-get install -y libguestfs-tools qemu-utils bsdextrautils
           shopt -s nullglob
