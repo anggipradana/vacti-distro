@@ -16,6 +16,6 @@ ConditionPathExists=!/etc/vacti-engine/engine.env
 Type=oneshot
 RemainAfterExit=yes
 # Console marker for the boot smoke test (fail-open demonstrated), then a login.
-ExecStart=/bin/sh -c 'echo "VACTI_ACTIVATE_FALLBACK=getty (kiosk unavailable; box reachable)" > /dev/console 2>/dev/null || true; systemctl start getty@tty1.service 2>/dev/null || true'
+ExecStart=/bin/sh -c 'echo "VACTI_ACTIVATE_FALLBACK=getty (kiosk unavailable; box reachable)" > /dev/console 2>/dev/null || true; systemctl start --no-block getty@tty1.service 2>/dev/null || true'
 StandardOutput=journal+console
 StandardError=journal+console

@@ -79,6 +79,26 @@ else
   log "plymouth skipped (headless or theme absent)"
 fi
 
+# plymouth-quit-wait hang guard (GUI pre-login gate). On a normal GUI boot the
+# display manager quits plymouth; the vacti gate WITHHOLDS LightDM until the box
+# is enrolled, so nothing quits plymouth and plymouth-quit-wait.service waits
+# "no limit" -> graphical.target is never reached -> the activation kiosk never
+# starts (and its fail-open fallback never runs). Bound that wait so the splash
+# can NEVER hang the boot (works-everywhere; a display-less / broken-GPU box must
+# still progress). On a normal post-enrollment boot LightDM quits plymouth well
+# under this cap, so the timeout is inert. Installed only where plymouth exists.
+if command -v plymouth >/dev/null 2>&1 || [[ -d /usr/share/plymouth ]]; then
+  install -d /etc/systemd/system/plymouth-quit-wait.service.d
+  cat > /etc/systemd/system/plymouth-quit-wait.service.d/10-vacti-timeout.conf <<'EOF'
+# vacti: never let the boot splash wait block graphical.target forever. The
+# pre-login gate withholds the display manager (which normally quits plymouth),
+# so cap the wait; on timeout the boot proceeds and the activation kiosk starts.
+[Service]
+TimeoutStartSec=45
+EOF
+  log "plymouth-quit-wait timeout guard installed (pre-login gate)"
+fi
+
 # ---------------------------------------------------------------------------
 # 7. GRUB splash + theme + brand menu colours
 # ---------------------------------------------------------------------------
