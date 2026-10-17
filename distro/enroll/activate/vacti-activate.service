@@ -1,0 +1,40 @@
+# vacti-activate.service - the PRE-LOGIN activation kiosk (GUI SKU only).
+#
+# Owns tty1 BEFORE the desktop display manager. LightDM is withheld until the box
+# is enrolled (/etc/systemd/system/lightdm.service.d/10-vacti-gate.conf keys on
+# engine.env); this unit runs the network->enroll kiosk until engine.env exists,
+# then starts LightDM and exits. The two conditions below are mutually exclusive
+# with LightDM's gate (both key on engine.env), so there is no greeter race.
+#
+# FAIL-OPEN: StartLimit* bounds the restarts; once exhausted the unit enters
+# 'failed' and OnFailure= starts vacti-activate-fallback.service (a plain getty)
+# so a kiosk bug can NEVER brick the appliance.
+[Unit]
+Description=vacti pre-login activation kiosk (network -> enroll, before desktop login)
+After=systemd-user-sessions.service plymouth-quit-wait.service network-online.target
+Wants=network-online.target
+Conflicts=getty@tty1.service
+Before=lightdm.service
+OnFailure=vacti-activate-fallback.service
+# Only before enrollment, and only on the GUI SKU (LightDM installed).
+ConditionPathExists=!/etc/vacti-engine/engine.env
+ConditionPathExists=/etc/lightdm
+# Fail-open budget: after 3 crashes in 60s, stop restarting -> OnFailure fires.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+# Serial/console marker so the boot smoke test can prove the kiosk is the boot
+# destination (not a bare login). Harmless in production.
+ExecStartPre=/bin/sh -c 'echo "VACTI_ACTIVATE_KIOSK=start" > /dev/console 2>/dev/null || true'
+ExecStart=/usr/local/sbin/vacti-activate
+Restart=on-failure
+RestartSec=2
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=graphical.target

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# make-seed.sh - mint-to-seed helper. Takes a FRESH, single-use, 30-minute
+# make-seed.sh - mint-to-seed helper. Takes a FRESH, single-use, 3-hour-TTL
 # enroll token (and the control-plane URL) and produces a CIDATA-labelled
 # cidata.iso to attach as a second CD-ROM. The published image is NEVER
 # pre-filled; the secret lives only in the seed the operator builds here, and
@@ -10,7 +10,7 @@
 #
 # Token discipline: this helper does NOT mint the token (minting is a
 # control-plane action, mintEnrollmentTokenAction). It only packages a token the
-# operator just minted. The token is single-use and expires in 30 minutes, so
+# operator just minted. The token is single-use and expires in 3 hours, so
 # build the seed and boot promptly; if it expires, re-mint and re-run.
 set -euo pipefail
 
@@ -55,5 +55,5 @@ fi
 
 chmod 0600 "$OUT" 2>/dev/null || true
 echo "[+] wrote ${OUT} (volid=CIDATA, instance-id=${INSTANCE_ID})."
-echo "    Attach it as a second CD-ROM and boot. The token is single-use / 30-min; boot promptly."
+echo "    Attach it as a second CD-ROM and boot. The token is single-use / 3h TTL; boot promptly."
 echo "    Do NOT commit or redistribute ${OUT} - it carries the live token."

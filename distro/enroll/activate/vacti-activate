@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/vacti-activate - the PRE-LOGIN activation kiosk (GUI SKU).
+#
+# Runs BEFORE the desktop display manager (LightDM is gated off until the box is
+# enrolled - see /etc/systemd/system/lightdm.service.d/10-vacti-gate.conf). It is
+# a front-end that drives the EXISTING enroll chain; it NEVER reimplements enroll:
+#
+#   Stage A (network): bring the box onto the network (NetworkManager frontends),
+#                      optional proxy / host VPN / tailscale, then probe that the
+#                      control-plane URL is reachable.
+#   Stage B (enroll):  collect the control-plane URL + the enrollment token
+#                      ("license"), write them to /etc/vacti-engine/enroll.token
+#                      in the EXACT format vacti-firstboot already parses
+#                      (line 1 = token, line 2 = url), chmod 0600, then start the
+#                      existing first-boot enroll unit and wait for engine.env.
+#
+# On success (engine.env appears) it starts LightDM and exits 0 -> the gate flips
+# and the normal desktop login is now allowed. The token VALUE is never logged;
+# all crypto/token parsing is deferred to vacti-firstboot (single source of truth).
+#
+# FAIL-OPEN: if no usable graphical display is available (headless/broken GPU) or
+# the kiosk cannot complete, it exits NON-ZERO. systemd then runs
+# vacti-activate-fallback.service (OnFailure=) which drops a plain getty so the box
+# is NEVER bricked by a kiosk bug. The engine stays inert without engine.env
+# regardless, so failing open costs no security (the moat is server-side).
+set -euo pipefail
+
+CFG_DIR="/etc/vacti-engine"
+CFG_ENV="${CFG_DIR}/engine.env"
+TOKEN_FILE="${CFG_DIR}/enroll.token"
+PROXY_ENV="${CFG_DIR}/proxy.env"
+XLOG="/var/log/vacti-activate.xorg.log"
+
+log() { echo "[vacti-activate] $*"; }
+
+# Marker for the boot smoke test + operator console: the activation kiosk is the
+# boot destination (not a bare login). Harmless in production.
+echo "VACTI_ACTIVATE_KIOSK=start" > /dev/console 2>/dev/null || true
+
+# Already enrolled? Nothing to do - let LightDM take over immediately.
+if [[ -f "$CFG_ENV" ]]; then
+  log "engine.env present - handing off to the desktop login"
+  systemctl start lightdm.service 2>/dev/null || true
+  exit 0
+fi
+
+# The existing first-boot enroll unit is named vacti-firstrun.service on the
+# installed/live ISO and vacti-firstboot.service on the cloud/VM golden. Drive
+# whichever this image ships - do NOT reimplement the enroll POST.
+pick_firstboot_unit() {
+  local u
+  for u in vacti-firstrun.service vacti-firstboot.service; do
+    if systemctl cat "$u" >/dev/null 2>&1; then
+      echo "$u"
+      return 0
+    fi
+  done
+  echo "vacti-firstboot.service"
+}
+FB_UNIT="$(pick_firstboot_unit)"
+
+# A usable graphical display must exist, or we fail OPEN to the fallback getty.
+# (-vga none / a headless VM / a broken GPU all land here deterministically.)
+graphical_possible() {
+  command -v Xorg >/dev/null 2>&1 || command -v X >/dev/null 2>&1 || return 1
+  local f
+  for f in /dev/dri/card*; do
+    [[ -e "$f" ]] && return 0
+  done
+  [[ -e /dev/fb0 ]] && return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# GUI wizard (runs INSIDE the Xorg session via the __wizard re-exec below).
+# Lightweight + renderer-agnostic (yad preferred, zenity fallback) per the
+# works-everywhere rule: no GPU/compositor assumption.
+# ---------------------------------------------------------------------------
+DIALOG=""
+pick_dialog() {
+  if command -v yad >/dev/null 2>&1; then DIALOG="yad"; return 0; fi
+  if command -v zenity >/dev/null 2>&1; then DIALOG="zenity"; return 0; fi
+  return 1
+}
+
+msg() { # title text
+  case "$DIALOG" in
+    yad)    yad --title="$1" --text="$2" --button=OK:0 --width=460 2>/dev/null || true ;;
+    zenity) zenity --info --title="$1" --text="$2" 2>/dev/null || true ;;
+    *)      log "$1: $2" ;;
+  esac
+}
+
+ask_two() { # url_var token_var -> echoes "URL\nTOKEN"
+  case "$DIALOG" in
+    yad)
+      yad --title="vacti activation" --form --width=520 \
+        --text="Enter the control-plane URL and your enrollment token (license)." \
+        --field="Control-plane URL":TEXT "" \
+        --field="Enrollment token":H "" 2>/dev/null
+      ;;
+    zenity)
+      local u t
+      u="$(zenity --entry --title="vacti activation" --text="Control-plane URL" 2>/dev/null || true)"
+      t="$(zenity --password --title="Enrollment token (license)" 2>/dev/null || true)"
+      printf '%s|%s|\n' "$u" "$t"
+      ;;
+  esac
+}
+
+network_stage() {
+  msg "vacti - Step 1 of 2: Network" \
+      "Set up networking so the box can reach the control plane.\n\nThe NetworkManager editor will open for Wi-Fi / wired / 802.1x / DNS / VPN. Proxy and Tailscale are optional. Close the editor when done."
+  if command -v nm-connection-editor >/dev/null 2>&1; then
+    nm-connection-editor 2>/dev/null || true
+  elif command -v nmtui >/dev/null 2>&1; then
+    nmtui 2>/dev/null || true
+  fi
+  # Optional proxy: persist for the enroll curl AND the engine (WEB_PROXY/HTTPS_PROXY).
+  local px=""
+  case "$DIALOG" in
+    yad)    px="$(yad --title="Proxy (optional)" --entry --text="HTTP(S) proxy URL, or leave blank" 2>/dev/null || true)" ;;
+    zenity) px="$(zenity --entry --title="Proxy (optional)" --text="HTTP(S) proxy URL, or leave blank" 2>/dev/null || true)" ;;
+  esac
+  if [[ -n "$px" ]]; then
+    install -d -m0755 "$CFG_DIR"
+    umask 077
+    { echo "WEB_PROXY=${px}"; echo "HTTPS_PROXY=${px}"; echo "HTTP_PROXY=${px}"; } > "$PROXY_ENV"
+    umask 022
+    log "proxy saved to ${PROXY_ENV}"
+  fi
+}
+
+# Returns 0 if the control-plane URL answers within 10s (HEAD), else non-zero.
+reachable() { # url
+  local base="${1%/}"
+  curl -sS -o /dev/null --connect-timeout 10 --max-time 15 -I "${base}/" >/dev/null 2>&1
+}
+
+enroll_stage() { # loops until engine.env appears or the kiosk exits
+  while [[ ! -f "$CFG_ENV" ]]; do
+    local raw url token
+    raw="$(ask_two || true)"
+    url="$(printf '%s' "$raw" | cut -d'|' -f1)"
+    token="$(printf '%s' "$raw" | cut -d'|' -f2)"
+    if [[ -z "$url" || -z "$token" ]]; then
+      msg "vacti activation" "URL and token are both required."
+      continue
+    fi
+    if ! reachable "$url"; then
+      msg "vacti activation" "Could not reach ${url}. Check Step 1 (network/proxy/VPN) and retry."
+      continue
+    fi
+    # Hand the token to the EXISTING enroll chain - never parse/validate it here.
+    install -d -m0755 "$CFG_DIR"
+    umask 077
+    { printf '%s\n' "$token"; printf '%s\n' "$url"; } > "$TOKEN_FILE"
+    chmod 0600 "$TOKEN_FILE"
+    umask 022
+    log "token staged; starting ${FB_UNIT} (token not logged)"
+    systemctl start "$FB_UNIT" 2>/dev/null || true
+    # Wait up to 90s for the enroll chain to produce engine.env.
+    local _
+    for _ in $(seq 1 45); do
+      [[ -f "$CFG_ENV" ]] && break
+      sleep 2
+    done
+    if [[ -f "$CFG_ENV" ]]; then
+      msg "vacti activation" "Activated. Starting the desktop..."
+      return 0
+    fi
+    msg "vacti activation" "Enrollment did not complete (the token may be expired or single-use - it is valid for 3h). Re-mint in the dashboard and retry. See: journalctl -u ${FB_UNIT}"
+  done
+  return 0
+}
+
+run_wizard() {
+  if ! pick_dialog; then
+    log "no yad/zenity dialog toolkit present - cannot render the kiosk"
+    return 1
+  fi
+  network_stage
+  enroll_stage
+}
+
+# When re-executed by xinit inside the X session, just run the wizard.
+if [[ "${1:-}" == "__wizard" ]]; then
+  run_wizard || exit 1
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Top level: bring up a bare Xorg on vt1 and run the wizard inside it. If no
+# usable display exists, fail OPEN (exit non-zero -> fallback getty).
+# ---------------------------------------------------------------------------
+if ! graphical_possible; then
+  log "no usable graphical display (headless/no-GPU) - failing open to the console"
+  echo "VACTI_ACTIVATE_NODISPLAY=1" > /dev/console 2>/dev/null || true
+  exit 1
+fi
+
+if command -v xinit >/dev/null 2>&1; then
+  # Bare X (no desktop): xinit runs this script's __wizard client, then exits.
+  if xinit "$0" __wizard -- :0 vt1 -keeptty -nolisten tcp > "$XLOG" 2>&1; then
+    :
+  else
+    log "Xorg/xinit exited non-zero (see ${XLOG})"
+  fi
+else
+  log "xinit not installed - cannot start the kiosk X session"
+  exit 1
+fi
+
+if [[ -f "$CFG_ENV" ]]; then
+  log "enrollment complete - starting LightDM"
+  systemctl start lightdm.service 2>/dev/null || true
+  exit 0
+fi
+
+# Did not enroll and the X session ended: exit non-zero so systemd restarts us
+# (and ultimately fails open to the console) rather than leaving a blank screen.
+log "kiosk ended without enrollment - exiting non-zero (systemd will retry / fail open)"
+exit 1

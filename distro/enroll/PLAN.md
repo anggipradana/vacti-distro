@@ -10,7 +10,7 @@ per-instance via a NoCloud seed, provider metadata, or VMware guestinfo - never 
   - `vacti-firstboot.service` (cloud/VM) / `vacti-firstrun.service` (ISO) - oneshot, runs once:
     reads a per-boot enroll token (from NoCloud user-data / provider metadata / guestinfo / a
     console-dropped file / a GUI first-run dialog), runs the existing enroll path (single-use,
-    30-min expiry, server-deletes the token) to obtain the scoped tokens, writes
+    3-hour TTL, server-deletes the token) to obtain the scoped tokens, writes
     `/etc/vacti-engine/engine.env`, then disables itself. Fails **loudly** on a missing/expired
     token - no longer-lived fallback.
 - `nocloud/` - the NoCloud seed template (the lingua franca across cloud / VMware / VBox / ISO):

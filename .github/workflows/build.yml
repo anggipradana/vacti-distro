@@ -347,6 +347,25 @@ jobs:
     needs: smoke
     runs-on: ubuntu-latest
     steps:
+      # Same squeeze as golden/fanout/iso/smoke: publish downloads EVERY built
+      # form (~25GB on the full matrix) onto the runner's ~14GB free at "Collect
+      # all artifacts"/"Flatten", so without this reclaim it ENOSPC's before it
+      # can even assemble the release. This is the ONLY job that lacked the step.
+      # (It does NOT fix the >2GiB-asset host limit - that is the separate,
+      # operator-gated R2 wiring - but it lets the collect/flatten step run.)
+      - name: Free disk space (reclaim >30GB on the runner)
+        run: |
+          echo "[disk] before:"; df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
       - name: Collect all artifacts
         uses: actions/download-artifact@v4

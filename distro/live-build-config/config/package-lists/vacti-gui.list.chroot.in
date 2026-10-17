@@ -9,6 +9,28 @@ lightdm
 # GTK greeter: the LightDM greeter the brand greeter theme targets.
 lightdm-gtk-greeter
 network-manager-gnome
+# --- PRE-LOGIN activation kiosk (vacti-activate, runs before LightDM) ---------
+# Bare Xorg + a minimal kiosk WM so the kiosk renders without a desktop/compositor
+# (works-everywhere: no GPU/compositor assumption).
+xserver-xorg
+xinit
+openbox
+# NetworkManager core (the -gnome frontend above pulls nm-connection-editor) +
+# nmtui fallback. network-manager is the core daemon the kiosk drives.
+network-manager
+# Host-VPN frontends so the box can reach the control plane from behind a
+# corporate VPN (HOST layer, distinct from the engine's per-engagement VpnProfile
+# registry). NetworkManager VPN plugins + wireguard-tools / openconnect CLIs.
+network-manager-openvpn-gnome
+network-manager-openconnect-gnome
+wireguard-tools
+openconnect
+# Lightweight dialog toolkit for the kiosk UI (yad preferred; zenity fallback).
+yad
+zenity
+# NOTE: polkit (polkitd) is pulled transitively by network-manager + lightdm, so
+# the narrow 49-vacti-activate.rules applies without naming the package here
+# (avoids an all-or-nothing live-build abort on a package-name mismatch).
 # Plymouth: the graphical boot splash (vacti theme set by apply-branding.sh).
 plymouth
 plymouth-themes

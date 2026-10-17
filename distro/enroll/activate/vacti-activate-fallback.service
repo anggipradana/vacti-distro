@@ -1,0 +1,21 @@
+# vacti-activate-fallback.service - the FAIL-OPEN safety net.
+#
+# Started by OnFailure= of vacti-activate.service: if the activation kiosk
+# crash-loops (a UI bug, a broken/absent GPU, a display-less VM), this drops a
+# plain getty on tty1 so the operator can still log in and provision by hand -
+# the appliance is NEVER bricked by a kiosk failure. Only runs while the box is
+# unenrolled; once engine.env exists the normal desktop login path takes over.
+# The engine stays inert without engine.env regardless, so failing open costs no
+# security (the moat is the server-side token kill-switch, not this local gate).
+[Unit]
+Description=vacti activation fail-open console (kiosk unavailable -> never brick the box)
+After=vacti-activate.service
+ConditionPathExists=!/etc/vacti-engine/engine.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Console marker for the boot smoke test (fail-open demonstrated), then a login.
+ExecStart=/bin/sh -c 'echo "VACTI_ACTIVATE_FALLBACK=getty (kiosk unavailable; box reachable)" > /dev/console 2>/dev/null || true; systemctl start getty@tty1.service 2>/dev/null || true'
+StandardOutput=journal+console
+StandardError=journal+console

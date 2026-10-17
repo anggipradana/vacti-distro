@@ -78,11 +78,45 @@ install -D -m0755 "${DISTRO_DIR}/enroll/firstboot/vacti-firstboot" \
 install -D -m0644 "${HERE}/config/includes.chroot/etc/systemd/system/vacti-firstrun.service" \
   "${HERE}/config/includes.chroot/etc/systemd/system/vacti-firstrun.service" 2>/dev/null || true
 
+# 3b. PRE-LOGIN activation (both SKUs ship the files; the GUI gate is wired by
+#     the GUI package list + 0100-branding.hook.chroot + apply-branding.sh). On
+#     the installed system these travel verbatim in the squashfs (Calamares
+#     unpackfs), so the gate carries through to the installed box.
+install -D -m0755 "${DISTRO_DIR}/enroll/activate/vacti-activate" \
+  "${HERE}/config/includes.chroot/usr/local/sbin/vacti-activate"
+install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate.service" \
+  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-activate.service"
+install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate-fallback.service" \
+  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-activate-fallback.service"
+install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate-polkit.rules" \
+  "${HERE}/config/includes.chroot/etc/polkit-1/rules.d/49-vacti-activate.rules"
+install -D -m0755 "${DISTRO_DIR}/enroll/netsetup/vacti-netsetup" \
+  "${HERE}/config/includes.chroot/usr/local/sbin/vacti-netsetup"
+
 # 4. GUI SKU gets the extra package list; headless does not
 if [[ "$SKU" == "gui" ]]; then
   cp -f "${HERE}/config/package-lists/vacti-gui.list.chroot.in" "${HERE}/config/package-lists/vacti-gui.list.chroot"
 else
   rm -f "${HERE}/config/package-lists/vacti-gui.list.chroot"
+fi
+
+# 4b. Headless NetworkManager opt-in (VACTI_HEADLESS_NM=1). Default 0 keeps
+#     systemd-networkd + cloud-init (zero-touch seed) and is a no-op. When opted
+#     in on the HEADLESS SKU, add network-manager to the package set and stage a
+#     mask of systemd-networkd + an NM enable + the NetworkManager renderer so the
+#     two renderers never fight. Symlinks in includes.chroot are preserved by
+#     live-build. (The GUI SKU already ships network-manager-gnome; no-op there.)
+if [[ "${VACTI_HEADLESS_NM:-0}" =~ ^(1|true|yes|on)$ && "$SKU" == "headless" ]]; then
+  echo "[iso] VACTI_HEADLESS_NM=1 (headless) - adding NetworkManager, masking systemd-networkd"
+  printf 'network-manager\n' > "${HERE}/config/package-lists/vacti-nm.list.chroot"
+  install -d "${HERE}/config/includes.chroot/etc/systemd/system/multi-user.target.wants"
+  ln -sf /dev/null                                   "${HERE}/config/includes.chroot/etc/systemd/system/systemd-networkd.service"
+  ln -sf /lib/systemd/system/NetworkManager.service  "${HERE}/config/includes.chroot/etc/systemd/system/multi-user.target.wants/NetworkManager.service"
+  install -d "${HERE}/config/includes.chroot/etc/cloud/cloud.cfg.d"
+  printf 'system_info:\n  network:\n    renderers: [NetworkManager]\n' \
+    > "${HERE}/config/includes.chroot/etc/cloud/cloud.cfg.d/99-vacti-nm.cfg"
+else
+  rm -f "${HERE}/config/package-lists/vacti-nm.list.chroot" 2>/dev/null || true
 fi
 
 # 5. BUILD-TIME vacti apt wiring (source + credential + TLS-off): staged so it is
