@@ -70,6 +70,8 @@ rm -rf "$STAGE"; mkdir -p \
   "${STAGE}/usr/share/vacti/branding" \
   "${STAGE}/usr/local/sbin" \
   "${STAGE}/etc/systemd/system" \
+  "${STAGE}/etc/systemd/system/lightdm.service.d" \
+  "${STAGE}/etc/polkit-1/rules.d" \
   "${STAGE}/etc/sysctl.d" \
   "${STAGE}/etc/tmpfiles.d" \
   "${STAGE}/etc/default" \
@@ -87,6 +89,18 @@ cp -a "${ENROLL_DIR}/firstboot/vacti-firstboot.service"  "${STAGE}/etc/systemd/s
 # first-boot swapfile sizing (RAM known only at deploy) + its oneshot unit
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot"         "${STAGE}/usr/local/sbin/vacti-swap-firstboot"
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot.service" "${STAGE}/etc/systemd/system/vacti-swap-firstboot.service"
+# PRE-LOGIN activation: the GUI kiosk (network->enroll before the DM) + its
+# fail-open fallback + the narrow polkit rule, and the headless netsetup TUI.
+# Staged UNCONDITIONALLY (harmless on the headless golden: vacti-activate's
+# ConditionPathExists=/etc/lightdm is false with no LightDM, and the lightdm
+# drop-in has no lightdm.service to affect). The LightDM gate drop-in itself is
+# installed by apply-branding.sh (GUI-only). vacti-netsetup is the headless
+# operator command surfaced in the MOTD while unenrolled.
+cp -a "${ENROLL_DIR}/activate/vacti-activate"                 "${STAGE}/usr/local/sbin/vacti-activate"
+cp -a "${ENROLL_DIR}/activate/vacti-activate.service"         "${STAGE}/etc/systemd/system/vacti-activate.service"
+cp -a "${ENROLL_DIR}/activate/vacti-activate-fallback.service" "${STAGE}/etc/systemd/system/vacti-activate-fallback.service"
+cp -a "${ENROLL_DIR}/activate/vacti-activate-polkit.rules"    "${STAGE}/etc/polkit-1/rules.d/49-vacti-activate.rules"
+cp -a "${ENROLL_DIR}/netsetup/vacti-netsetup"                 "${STAGE}/usr/local/sbin/vacti-netsetup"
 # anti-OOM drop-ins (sysctl / zram / THP / earlyoom) baked into the golden image
 cp -a "${OOM_DIR}/sysctl-90-vacti.conf"    "${STAGE}/etc/sysctl.d/90-vacti.conf"
 cp -a "${OOM_DIR}/zram-generator.conf"     "${STAGE}/etc/systemd/zram-generator.conf"
@@ -134,7 +148,9 @@ if [[ "${VACTI_CTF_ARSENAL}" =~ ^(1|true|yes|on)$ ]]; then
   # The CTF apt list is no longer a forked file: provision.sh generates it from
   # the engine manifest (VACTI_GEN_MODE=ctf-apt) and hands the path to the installer.
 fi
-chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/vacti-swap-firstboot" "${STAGE}/opt/vacti-build/apply-branding.sh"
+chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/vacti-swap-firstboot" \
+           "${STAGE}/usr/local/sbin/vacti-activate" "${STAGE}/usr/local/sbin/vacti-netsetup" \
+           "${STAGE}/opt/vacti-build/apply-branding.sh"
 
 # --- 4. the provisioning script that runs INSIDE the guest --------------------
 # Build-time apt wiring (source + auth.conf) is written here and REMOVED before
@@ -333,6 +349,20 @@ systemctl enable tailscaled 2>/dev/null || true
 # first-boot path (enroll/firstboot/vacti-firstboot) does 'enable --now' to also
 # start it on first boot. earlyoom's --avoid list already protects sshd.
 systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
+
+# Headless NetworkManager opt-in (VACTI_HEADLESS_NM=1). Default stays
+# systemd-networkd + cloud-init (zero-touch seed path untouched). When opted in,
+# install NM and MASK systemd-networkd so the two renderers never fight over the
+# same links, and point cloud-init at the NetworkManager renderer. The flag value
+# is host-expanded into this build-only script.
+if [[ "${VACTI_HEADLESS_NM}" =~ ^(1|true|yes|on)\$ ]]; then
+  echo "[prov] VACTI_HEADLESS_NM=1 - installing NetworkManager, masking systemd-networkd"
+  apt-get install -y --no-install-recommends network-manager || echo "[prov][warn] network-manager install partial"
+  systemctl mask systemd-networkd.service systemd-networkd.socket 2>/dev/null || true
+  systemctl enable NetworkManager.service 2>/dev/null || true
+  install -d -m0755 /etc/cloud/cloud.cfg.d
+  printf 'system_info:\n  network:\n    renderers: [NetworkManager]\n' > /etc/cloud/cloud.cfg.d/99-vacti-nm.cfg
+fi
 
 # branding
 echo "[prov] branding"

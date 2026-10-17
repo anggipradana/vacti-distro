@@ -77,7 +77,7 @@ http_code="$(curl -sS -o /run/vacti-enroll.out -w '%{http_code}' \
 
 [[ "$http_code" == "200" ]] || {
   body="$(cat /run/vacti-enroll.out 2>/dev/null || true)"; rm -f /run/vacti-enroll.out
-  die "enroll failed (HTTP ${http_code}). The token may be expired/used (single-use, 30-min). Re-mint and retry. Response: ${body:-none}"
+  die "enroll failed (HTTP ${http_code}). The token may be expired/used (single-use, 3h TTL). Re-mint and retry. Response: ${body:-none}"
 }
 
 # --- 3. write engine.env (0600). The actual field parsing is the engine's job;

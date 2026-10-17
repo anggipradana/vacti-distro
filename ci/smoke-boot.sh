@@ -102,6 +102,12 @@ ${enroll_block}
       else
         echo "SMOKE_ENGINE=absent" > \$C
       fi
+      # headless provisioning TUI present (the console twin of the GUI kiosk)?
+      if [[ -x /usr/local/sbin/vacti-netsetup ]]; then
+        echo "SMOKE_NETSETUP=present" > \$C
+      else
+        echo "SMOKE_NETSETUP=absent" > \$C
+      fi
       # Network: poll briefly for a global IPv4 (user-net DHCP can lag the
       # systemd settle under TCG). Up to ~60s.
       net="down"
@@ -206,6 +212,10 @@ smoke_disk() {
   [[ "$zr" == "present" ]] && ok "${base}: zram swap present" || say "${base}: zram=${zr:-?} (non-blocking)"
   local eng; eng="$(sed -n 's/^SMOKE_ENGINE=//p' "$log" | tail -1)"
   [[ "$eng" == "present" ]] && ok "${base}: vacti-engine present" || say "${base}: vacti-engine=${eng:-?} (non-blocking: runtime self-heal covers gaps)"
+  # headless pre-login provisioning TUI must be baked (the console twin of the
+  # GUI activation kiosk). Golden/cloud images are headless and ship vacti-netsetup.
+  local ns; ns="$(sed -n 's/^SMOKE_NETSETUP=//p' "$log" | tail -1)"
+  [[ "$ns" == "present" ]] && ok "${base}: vacti-netsetup (headless provisioning TUI) present" || bad "${base}: vacti-netsetup missing (=${ns:-?}) - headless pre-login provisioning path absent"
   # optional enroll roundtrip (only when staging secrets were provided)
   if [[ -n "${STAGING_CP_URL:-}" && -n "${STAGING_ENROLL_TOKEN:-}" ]]; then
     local er; er="$(sed -n 's/^SMOKE_ENROLL=//p' "$log" | tail -1)"
@@ -250,6 +260,51 @@ smoke_iso() {
   else bad "${base} (${fw}): no login/boot marker within ${watch}s"; tail -30 "$log" >&2 || true; fi
 }
 
+# --- GUI ISO pre-login gate smoke: verify the activation kiosk + fail-open -----
+# Boots the GUI ISO with -vga none (no framebuffer/GPU). The vacti-activate
+# kiosk's display pre-flight then fails DETERMINISTICALLY, which FORCES the
+# fail-open path: the kiosk exits, systemd runs vacti-activate-fallback.service,
+# which drops a getty so the box stays reachable. This exercises the REAL
+# fail-open behavior (a display-less / broken-GPU box must never brick) with no
+# contrived crash injection. Serial (console=ttyS0) carries the two gate markers
+# plus the getty login prompt. Asserts (without weakening the boot check):
+#   - the GUI boot REACHES the vacti-activate kiosk (not a bare login)
+#   - fail-open engages (kiosk unavailable -> fallback getty)
+#   - the box is reachable (a boot/login marker appears)
+smoke_iso_gate() {
+  local art="$1" base; base="$(basename "$art")"
+  say "iso GATE smoke (gui, pre-login activation): ${base}"
+  local log="${TMPROOT}/iso-gate.log"; : > "$log"
+  # commas in `user,id=n0` are qemu option syntax, not array separators.
+  # shellcheck disable=SC2054
+  local args=( -cpu qemu64 -smp 2 -m "${SMOKE_MEM_MB}"
+      -cdrom "$art" -boot d -vga none
+      -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+      -nographic -serial "file:${log}" -monitor none -display none -no-reboot )
+  local watch="${ISO_WATCH:-${BOOT_TIMEOUT}}"
+  ( timeout "${watch}" "$QEMU" "${args[@]}" < /dev/null > /dev/null 2>&1 || true ) &
+  local qpid=$!
+  local waited=0 seen_kiosk=0 seen_fallback=0 seen_login=0
+  while [[ "$waited" -lt "$watch" ]]; do
+    if [[ -s "$log" ]]; then
+      grep -q 'VACTI_ACTIVATE_KIOSK=start' "$log" 2>/dev/null && seen_kiosk=1
+      grep -q 'VACTI_ACTIVATE_FALLBACK=' "$log" 2>/dev/null && seen_fallback=1
+      grep -qiE 'login:|reached target|Welcome to|systemd\[1\]' "$log" 2>/dev/null && seen_login=1
+    fi
+    [[ "$seen_kiosk" -eq 1 && "$seen_fallback" -eq 1 && "$seen_login" -eq 1 ]] && break
+    kill -0 "$qpid" 2>/dev/null || break
+    sleep 5; waited=$((waited+5))
+  done
+  kill "$qpid" 2>/dev/null || true; wait "$qpid" 2>/dev/null || true
+  if [[ -s "$log" ]]; then tr -d '\r' < "$log" > "${log}.nocr" && mv -f "${log}.nocr" "$log"; fi
+  if [[ "$seen_kiosk" -eq 1 ]]; then ok "${base} (gui): reached the vacti-activate kiosk (pre-login gate, not a bare login)"
+  else bad "${base} (gui): never reached the vacti-activate kiosk (no VACTI_ACTIVATE_KIOSK marker)"; tail -40 "$log" >&2 || true; fi
+  if [[ "$seen_fallback" -eq 1 ]]; then ok "${base} (gui): FAIL-OPEN engaged (display-less kiosk -> fallback getty; box reachable)"
+  else bad "${base} (gui): fail-open fallback did not engage (no VACTI_ACTIVATE_FALLBACK marker)"; tail -40 "$log" >&2 || true; fi
+  if [[ "$seen_login" -eq 1 ]]; then ok "${base} (gui): box reachable (boot/login marker present)"
+  else bad "${base} (gui): no boot/login marker within ${watch}s (box may be hung)"; fi
+}
+
 # --- discover + dispatch -----------------------------------------------------
 declare -a TARGETS=()
 for arg in "$@"; do
@@ -263,7 +318,14 @@ done
 
 for t in "${TARGETS[@]}"; do
   case "$t" in
-    *.iso) smoke_iso "$t" bios; smoke_iso "$t" uefi ;;
+    *.iso)
+      # The GUI ISO additionally runs the pre-login activation GATE leg (kiosk +
+      # fail-open); the headless ISO has no GUI kiosk, so it keeps bios+uefi boot.
+      case "$(basename "$t")" in
+        *gui*) smoke_iso_gate "$t"; smoke_iso "$t" uefi ;;
+        *)     smoke_iso "$t" bios; smoke_iso "$t" uefi ;;
+      esac
+      ;;
     *.qcow2|*.ova|*.raw|*.raw.gz|*.img) smoke_disk "$t" ;;
     *) say "skipping unsupported artifact: $(basename "$t")" ;;
   esac

@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/vacti-netsetup - the HEADLESS SKU console twin of the GUI
+# activation kiosk's enroll stage. For an operator on a console with NO cloud-init
+# seed: set networking, (optional) proxy / host VPN, then supply the control-plane
+# URL + enrollment token and drive the EXISTING first-boot enroll chain.
+#
+# It does NOT reimplement enroll and NEVER auto-seizes a TTY: the headless default
+# stays cloud-init + systemd-networkd (zero-touch via a cidata.iso seed). This is
+# an interactive, operator-invoked command, surfaced in the MOTD while the box is
+# unenrolled. Run it as root (sudo vacti-netsetup).
+set -euo pipefail
+
+CFG_DIR="/etc/vacti-engine"
+CFG_ENV="${CFG_DIR}/engine.env"
+TOKEN_FILE="${CFG_DIR}/enroll.token"
+PROXY_ENV="${CFG_DIR}/proxy.env"
+NETWORKD_DIR="/etc/systemd/network"
+
+log() { echo "[vacti-netsetup] $*"; }
+die() { echo "[vacti-netsetup][ERROR] $*" >&2; exit 1; }
+
+[[ "$(id -u)" == "0" ]] || die "must run as root (try: sudo vacti-netsetup)"
+
+if [[ -f "$CFG_ENV" ]]; then
+  log "engine.env already present - this box is already enrolled. Nothing to do."
+  exit 0
+fi
+
+HAVE_WHIPTAIL=0
+if command -v whiptail >/dev/null 2>&1; then HAVE_WHIPTAIL=1; fi
+
+ask() { # prompt default -> echoes value (whiptail if present, else read)
+  local prompt="$1" def="${2:-}"
+  if [[ "$HAVE_WHIPTAIL" == "1" ]]; then
+    whiptail --inputbox "$prompt" 10 70 "$def" 3>&1 1>&2 2>&3 || echo "$def"
+  else
+    local v
+    read -r -p "${prompt} [${def}]: " v || true
+    echo "${v:-$def}"
+  fi
+}
+
+ask_secret() { # prompt -> echoes value (no echo to screen)
+  local prompt="$1"
+  if [[ "$HAVE_WHIPTAIL" == "1" ]]; then
+    whiptail --passwordbox "$prompt" 10 70 3>&1 1>&2 2>&3 || true
+  else
+    local v
+    read -r -s -p "${prompt}: " v || true
+    echo >&2
+    echo "$v"
+  fi
+}
+
+confirm() { # prompt -> 0 yes / 1 no
+  if [[ "$HAVE_WHIPTAIL" == "1" ]]; then
+    whiptail --yesno "$1" 10 70 3>&1 1>&2 2>&3
+  else
+    local v
+    read -r -p "$1 [y/N]: " v || true
+    [[ "$v" =~ ^(y|Y|yes|YES)$ ]]
+  fi
+}
+
+# --- 1. networking ----------------------------------------------------------
+# Default renderer is systemd-networkd. Offer a static profile; otherwise DHCP
+# (the base default) is left untouched. If NetworkManager is the active renderer
+# (VACTI_HEADLESS_NM=1 image), prefer nmtui.
+if command -v nmtui >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+  log "NetworkManager active - launching nmtui for network setup"
+  nmtui 2>/dev/null || true
+elif confirm "Configure a STATIC IPv4 address? (No = keep DHCP)"; then
+  iface="$(ask "Interface name" "$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')")"
+  addr="$(ask "Address/CIDR (e.g. 192.168.1.50/24)" "")"
+  gw="$(ask "Gateway" "")"
+  dns="$(ask "DNS servers (space-separated)" "1.1.1.1 8.8.8.8")"
+  if [[ -n "$iface" && -n "$addr" ]]; then
+    install -d -m0755 "$NETWORKD_DIR"
+    {
+      echo "[Match]"
+      echo "Name=${iface}"
+      echo
+      echo "[Network]"
+      echo "Address=${addr}"
+      [[ -n "$gw" ]] && echo "Gateway=${gw}"
+      # shellcheck disable=SC2086  # intentional word-split of the DNS list
+      for d in $dns; do echo "DNS=${d}"; done
+    } > "${NETWORKD_DIR}/10-vacti-${iface}.network"
+    log "wrote ${NETWORKD_DIR}/10-vacti-${iface}.network"
+    systemctl restart systemd-networkd 2>/dev/null || true
+  fi
+fi
+
+# --- 2. optional proxy ------------------------------------------------------
+if confirm "Set an HTTP(S) proxy for enrollment + the engine?"; then
+  px="$(ask "Proxy URL (http://host:port)" "")"
+  if [[ -n "$px" ]]; then
+    install -d -m0755 "$CFG_DIR"
+    umask 077
+    { echo "WEB_PROXY=${px}"; echo "HTTPS_PROXY=${px}"; echo "HTTP_PROXY=${px}"; } > "$PROXY_ENV"
+    umask 022
+    log "proxy saved to ${PROXY_ENV}"
+  fi
+fi
+
+# --- 3. optional host VPN (reach the CP behind a corporate VPN) --------------
+if confirm "Bring up a host VPN now (wg-quick / openconnect)?"; then
+  if command -v wg-quick >/dev/null 2>&1 && confirm "Use a WireGuard config at /etc/wireguard/wg0.conf?"; then
+    wg-quick up wg0 2>/dev/null || log "wg-quick up wg0 failed (check /etc/wireguard/wg0.conf)"
+  elif command -v openconnect >/dev/null 2>&1; then
+    srv="$(ask "openconnect server (host)" "")"
+    [[ -n "$srv" ]] && { log "launching openconnect to ${srv} (interactive)"; openconnect "$srv" || log "openconnect exited"; }
+  else
+    log "no wg-quick/openconnect available; configure host VPN manually, then re-run"
+  fi
+fi
+
+# --- 4. enroll via the EXISTING first-boot chain ----------------------------
+url="$(ask "Control-plane URL (e.g. https://cp.example)" "")"
+token="$(ask_secret "Enrollment token (license; single-use, valid 3h)")"
+[[ -n "$url" && -n "$token" ]] || die "both the control-plane URL and the enrollment token are required"
+
+install -d -m0755 "$CFG_DIR"
+umask 077
+{ printf '%s\n' "$token"; printf '%s\n' "$url"; } > "$TOKEN_FILE"
+chmod 0600 "$TOKEN_FILE"
+umask 022
+log "token staged (not logged); starting enrollment via vacti-firstboot"
+
+if systemctl cat vacti-firstrun.service >/dev/null 2>&1; then
+  systemctl start vacti-firstrun.service 2>/dev/null || true
+else
+  systemctl start vacti-firstboot.service 2>/dev/null || true
+fi
+
+for _ in $(seq 1 45); do
+  [[ -f "$CFG_ENV" ]] && break
+  sleep 2
+done
+
+if [[ -f "$CFG_ENV" ]]; then
+  log "SUCCESS: engine.env written - the engine will start. Enrollment complete."
+  exit 0
+fi
+die "enrollment did not complete. The token may be expired/used (single-use, valid 3h) - re-mint and retry. See: journalctl -u vacti-firstboot.service (or vacti-firstrun.service)"

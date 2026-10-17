@@ -118,6 +118,17 @@ if [[ -f "${SRC}/greeter/lightdm-gtk-greeter.conf" ]] && { [[ -d /etc/lightdm ]]
   log "lightdm greeter theme installed"
 fi
 
+# PRE-LOGIN GATE drop-in: withhold the desktop login until the box is enrolled
+# (LightDM starts only once /etc/vacti-engine/engine.env exists). Installed ONLY
+# when LightDM is present (GUI SKU); harmless/absent on headless. Co-located with
+# the greeter theme so the gate + theme ship together, in BOTH the golden guest
+# (virt-customize) and the ISO chroot (and thus the Calamares-installed system).
+if [[ -f "${SRC}/greeter/lightdm.service.d/10-vacti-gate.conf" ]] && { [[ -d /etc/lightdm ]] || command -v lightdm >/dev/null 2>&1; }; then
+  install -D -m0644 "${SRC}/greeter/lightdm.service.d/10-vacti-gate.conf" \
+    /etc/systemd/system/lightdm.service.d/10-vacti-gate.conf
+  log "lightdm pre-login gate drop-in installed (no desktop login until enrolled)"
+fi
+
 # ---------------------------------------------------------------------------
 # 9. XFCE defaults (skel): wallpaper setter, dark theme, whisker panel
 # ---------------------------------------------------------------------------

@@ -46,6 +46,12 @@ if [[ -f /etc/vacti-engine/engine.env ]]; then
 else
   enroll="${C_RED}awaiting enrollment${C_RST}"
 fi
+# Provisioning hint while unenrolled (headless console twin of the GUI kiosk):
+# tell the operator how to provision this box with no cloud-init seed.
+unenrolled_hint=""
+if [[ ! -f /etc/vacti-engine/engine.env ]] && command -v vacti-netsetup >/dev/null 2>&1; then
+  unenrolled_hint=1
+fi
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet vacti-engine 2>/dev/null; then
   engine="${C_GRN}active${C_RST}"
 else
@@ -55,6 +61,8 @@ fi
 printf '\n  %sHost%s    %s%-18s%s  %sIP%s %s%s%s\n' "$C_DIM" "$C_RST" "$C_FG" "$host" "$C_RST" "$C_DIM" "$C_RST" "$C_FG" "$ip" "$C_RST"
 printf '  %sEngine%s  %s   %sEnrollment%s %s\n' "$C_DIM" "$C_RST" "$engine" "$C_DIM" "$C_RST" "$enroll"
 [[ -n "$ts" ]] && printf '  %sTailnet%s %s%s%s\n' "$C_DIM" "$C_RST" "$C_FG" "$ts" "$C_RST"
+[[ -n "$unenrolled_hint" ]] && printf '  %sProvision%s %srun%s %ssudo vacti-netsetup%s %s(network + enroll; no seed needed)%s\n' \
+  "$C_DIM" "$C_RST" "$C_DIM" "$C_RST" "$C_CY" "$C_RST" "$C_DIM" "$C_RST"
 
 # 4. non-affiliation (required)
 printf '\n  %sVacti OS is a derivative based on Debian GNU/Linux; it is not produced by,%s\n' "$C_DIM" "$C_RST"

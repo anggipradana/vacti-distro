@@ -4,6 +4,13 @@ set -e
 /usr/share/vacti/branding/apply-branding.sh || true
 # enable the first-run enroll unit so it runs once on the installed/live system
 systemctl enable vacti-firstrun.service 2>/dev/null || true
+# GUI SKU only: enable the PRE-LOGIN activation kiosk (network->enroll before the
+# desktop login). On the headless SKU LightDM is absent, so skip it there. The
+# enabled symlink travels in the squashfs, so Calamares carries the gate into the
+# installed system. The fail-open fallback is wired via OnFailure= (not enabled).
+if [ -d /etc/lightdm ] || command -v lightdm >/dev/null 2>&1; then
+  systemctl enable vacti-activate.service 2>/dev/null || true
+fi
 # openssh-server is baked (engine arsenal manifest core) but the package install never enables
 # it, so the ISO would boot with sshd DOWN and be unreachable over tailscale SSH.
 # Enable it here for build-time parity with the golden image (vacti-firstboot

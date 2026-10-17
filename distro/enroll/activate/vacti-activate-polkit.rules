@@ -1,0 +1,33 @@
+// 49-vacti-activate.rules -> /etc/polkit-1/rules.d/49-vacti-activate.rules
+//
+// NARROW pre-login allowances for the activation kiosk. Lets the kiosk drive
+// NetworkManager + Tailscale and start ONLY the enroll/DM units it needs,
+// WITHOUT a password prompt, scoped to the 'vacti-activate' user/group. No
+// blanket admin is granted. This is forward-looking: the kiosk currently runs
+// from its systemd unit (root, for reliable VT/Xorg access on all hardware), so
+// these actions do not require polkit today; the rule applies when the kiosk is
+// run as the dedicated unprivileged 'vacti-activate' user. Harmless once the box
+// is enrolled - the kiosk no longer runs.
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "vacti-activate" && !subject.isInGroup("vacti-activate")) {
+        return;
+    }
+    // NetworkManager: all connection/VPN/device actions (network setup stage).
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
+        return polkit.Result.YES;
+    }
+    // Tailscale operator actions (host VPN / mesh, when the plugin is present).
+    if (action.id.indexOf("com.tailscale.") === 0) {
+        return polkit.Result.YES;
+    }
+    // systemd: start ONLY the enroll units + the display manager (nothing else).
+    if (action.id === "org.freedesktop.systemd1.manage-units") {
+        var unit = action.lookup("unit") || "";
+        if (unit === "vacti-firstboot.service" ||
+            unit === "vacti-firstrun.service" ||
+            unit === "lightdm.service" ||
+            unit === "getty@tty1.service") {
+            return polkit.Result.YES;
+        }
+    }
+});
