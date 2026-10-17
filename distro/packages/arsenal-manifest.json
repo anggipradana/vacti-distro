@@ -159,6 +159,22 @@
   },
   "tools": [
     {
+      "name": "amass",
+      "method": "apt",
+      "package": "amass",
+      "capability": "web-recon",
+      "binaries": [],
+      "arch": null
+    },
+    {
+      "name": "arjun",
+      "method": "apt",
+      "package": "arjun",
+      "capability": "web-recon",
+      "binaries": [],
+      "arch": null
+    },
+    {
       "name": "certipy",
       "method": "pipx",
       "package": "certipy-ad",
@@ -166,6 +182,14 @@
       "binaries": [
         "certipy"
       ],
+      "arch": null
+    },
+    {
+      "name": "dalfox",
+      "method": "apt",
+      "package": "dalfox",
+      "capability": "web-recon",
+      "binaries": [],
       "arch": null
     },
     {
@@ -178,6 +202,14 @@
         "frida-ps",
         "frida-trace"
       ],
+      "arch": null
+    },
+    {
+      "name": "hakrawler",
+      "method": "apt",
+      "package": "hakrawler",
+      "capability": "web-recon",
+      "binaries": [],
       "arch": null
     },
     {
@@ -257,6 +289,14 @@
       "binaries": [
         "vol"
       ],
+      "arch": null
+    },
+    {
+      "name": "wafw00f",
+      "method": "apt",
+      "package": "wafw00f",
+      "capability": "web-recon",
+      "binaries": [],
       "arch": null
     }
   ]
