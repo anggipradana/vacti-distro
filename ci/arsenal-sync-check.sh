@@ -42,6 +42,18 @@ warn() { echo "[arsenal-sync][warn] $*" >&2; }
 skip() { echo "[arsenal-sync][SKIP] $*" >&2; exit 0; }
 fail() { echo "[arsenal-sync][FAIL] $*" >&2; exit 1; }
 
+# --revendor <dest>: resolve the AUTHORITATIVE engine manifest (exactly as the
+# normal check does - one resolver, no second source of truth) and copy it to
+# <dest>, then stop WITHOUT running CHECK A/B. This is how an auto-triggered
+# distro rebuild refreshes the vendored snapshot so an expected arsenal drift
+# does not red-lint. A soft-skip (no reference reachable) exits 0 and leaves
+# <dest> untouched, so the build falls back to the committed snapshot.
+REVENDOR_DEST=""
+if [[ "${1:-}" == "--revendor" ]]; then
+  REVENDOR_DEST="${2:-}"
+  [[ -n "$REVENDOR_DEST" ]] || fail "--revendor requires a destination path"
+fi
+
 command -v python3 >/dev/null 2>&1 || skip "python3 not available; cannot compare manifests"
 [[ -f "$VENDORED" ]] || fail "vendored snapshot missing: ${VENDORED}"
 
@@ -102,6 +114,16 @@ PY
   [[ -n "$ENGINE_MANIFEST" ]] || skip "could not pull the engine .deb (apt creds/repo unreachable); check stays dormant until wired"
 else
   skip "no authoritative manifest (set VACTI_ENGINE_MANIFEST, or VACTI_APT_URL + VACTI_APT_PRODUCER_TOKEN); vendored snapshot assumed current"
+fi
+
+# --- --revendor: write the resolved authoritative manifest and stop -----------
+# Reached only when a manifest WAS resolved above (every no-reference path has
+# already soft-skipped/exited). The copy runs before the EXIT trap clears the
+# temp dir. Normal (no --revendor) runs skip this and fall through to the checks.
+if [[ -n "$REVENDOR_DEST" ]]; then
+  cp -f "$ENGINE_MANIFEST" "$REVENDOR_DEST" || fail "could not write revendored manifest to ${REVENDOR_DEST}"
+  log "revendored authoritative engine manifest -> ${REVENDOR_DEST} (ref='${VACTI_ENGINE_REF:-latest}')"
+  exit 0
 fi
 
 # --- CHECK A: vendored snapshot == engine manifest (arsenal fields) -----------
