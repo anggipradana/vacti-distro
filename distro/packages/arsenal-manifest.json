@@ -8,6 +8,7 @@
     "grant": [
       "aapt",
       "adb",
+      "apksigner",
       "apktool",
       "dirb",
       "dirsearch",
@@ -37,7 +38,8 @@
       "whatweb",
       "wireguard-tools",
       "x11-xserver-utils",
-      "xdotool"
+      "xdotool",
+      "zipalign"
     ],
     "core": [
       "nmap",
@@ -88,6 +90,8 @@
       "scrcpy",
       "apktool",
       "aapt",
+      "apksigner",
+      "zipalign",
       "default-jre-headless",
       "unzip",
       "usbmuxd",
@@ -116,7 +120,9 @@
       "mobile": [
         "scrcpy",
         "apktool",
-        "aapt"
+        "aapt",
+        "apksigner",
+        "zipalign"
       ],
       "ios": [
         "usbmuxd",
@@ -196,7 +202,7 @@
       "name": "frida",
       "method": "pipx",
       "package": "frida-tools",
-      "capability": "mobile",
+      "capability": "core",
       "binaries": [
         "frida",
         "frida-ps",
@@ -223,10 +229,18 @@
       "arch": null
     },
     {
+      "name": "mobile-mcp",
+      "method": "npm",
+      "package": "@mobilenext/mobile-mcp@1.0.4",
+      "capability": "core",
+      "binaries": [],
+      "arch": null
+    },
+    {
       "name": "objection",
       "method": "pipx",
       "package": "objection",
-      "capability": "mobile",
+      "capability": "core",
       "binaries": [
         "objection"
       ],
@@ -299,5 +313,36 @@
       "binaries": [],
       "arch": null
     }
-  ]
+  ],
+  "assets": {
+    "frida": {
+      "version": "17.24.3",
+      "arches": [
+        "android-arm64",
+        "android-arm",
+        "android-x86_64",
+        "android-x86"
+      ],
+      "server": {
+        "android-arm64": "a56beefc862e5cc6d02ba9a6203cc98057839c2097a62f8eaba867eb537b6d12",
+        "android-arm": "ac562ce0a51ce0ea96ff64f4e72f416d5ab1c8b31c7f5d9c21ca31134f31acc8",
+        "android-x86_64": "44aead87103ab9738771e5eff659640fb6bf566fe83b8629444c1be99f87ce68",
+        "android-x86": "0cfe0427d1b4c4566ccd9048c223fe00173569389f44aabfe3ee705b25c29356"
+      },
+      "gadget": {
+        "android-arm64": "c5b86db3569d06769da2b29a80c7a275422c3bb292bd7881ea30566fd2161948",
+        "android-arm": "2cdf287ab42fdb9908dd214cc17d14cc317c70cff0aefa04ba02dbcc518408c4",
+        "android-x86_64": "b9007e5181fa5021420d05abd29ddfa15b88fb68e090d0825ce9a3b1724b234c",
+        "android-x86": "3073c4545f72c6fcc81147aedd3c14d68e19f37ca6e04b5eef1220902c296e39"
+      }
+    }
+  },
+  "pins": {
+    "caido_cli": "v0.57.0",
+    "caido_mcp": "v1.1.0",
+    "mobile_mcp": "1.0.4",
+    "jadx": "1.5.0",
+    "frida": "17.24.3",
+    "frida_cli": "frida-tools==14.11.0"
+  }
 }
