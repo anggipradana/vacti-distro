@@ -24,7 +24,8 @@
 #                       engine-deb-published dispatch.
 #   CHECK A      : the vendored snapshot must EQUAL the engine manifest on every
 #                  arsenal field (apt.grant / apt.core / apt.verticals.* / apt.ctf
-#                  / tools / playwright_mcp_spec). A diff is a hard FAIL.
+#                  / tools / playwright_mcp_spec / assets.frida / pins). A diff is a
+#                  hard FAIL.
 #   CHECK B      : the generator must actually EMIT every manifest arsenal package
 #                  for the right flavour (full + ctf is a superset of core + ctf).
 #
@@ -168,6 +169,14 @@ cmp_set("tools", toolset(vend), toolset(eng))
 if vend.get("playwright_mcp_spec") != eng.get("playwright_mcp_spec"):
     diffs.append("playwright_mcp_spec: distro=%r engine=%r"
                  % (vend.get("playwright_mcp_spec"), eng.get("playwright_mcp_spec")))
+
+# assets.frida (multi-arch frida-server/gadget blob set: version + arches + per-arch sha256) and the mobile-stack
+# pins (caido_cli/caido_mcp/mobile_mcp/jadx/frida/frida_cli) are non-apt declarations the guard must also diff, so a
+# drifted frida version/sha or a bumped Caido/mobile-mcp pin in the engine can never slip past the vendored snapshot.
+if vend.get("assets") != eng.get("assets"):
+    diffs.append("assets: distro=%r engine=%r" % (vend.get("assets"), eng.get("assets")))
+if vend.get("pins") != eng.get("pins"):
+    diffs.append("pins: distro=%r engine=%r" % (vend.get("pins"), eng.get("pins")))
 
 if diffs:
     sys.stderr.write("[arsenal-sync][FAIL] vendored snapshot DIVERGES from the engine manifest:\n")
