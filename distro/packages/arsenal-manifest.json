@@ -265,6 +265,16 @@
       "arch": null
     },
     {
+      "name": "reflutter",
+      "method": "pipx",
+      "package": "reflutter",
+      "capability": "core",
+      "binaries": [
+        "reflutter"
+      ],
+      "arch": null
+    },
+    {
       "name": "semgrep",
       "method": "pipx",
       "package": "semgrep",
