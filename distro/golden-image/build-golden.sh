@@ -157,8 +157,8 @@ chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/va
 # finalize. Mirrors the engine bootstrap-apt.sh configure_apt exactly.
 # auth.conf `machine` must match the sources.list path by host+path-PREFIX, so
 # derive it from the FULL repo URL (scheme stripped, /apt appended) - NOT host
-# only. VACTI_APT_URL=https://its-ai.site/api/pentest -> its-ai.site/api/pentest/apt
-# which is a prefix of the sources path its-ai.site/api/pentest/apt (match).
+# only. VACTI_APT_URL=https://itsai.sbs/api/pentest -> itsai.sbs/api/pentest/apt
+# which is a prefix of the sources path itsai.sbs/api/pentest/apt (match).
 APT_MACHINE="$(printf '%s/apt' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://##')"
 APT_SCHEME_HOST="${VACTI_APT_URL%/}"
 # Engine install spec: pin to VACTI_ENGINE_REF when set, else floating latest.
