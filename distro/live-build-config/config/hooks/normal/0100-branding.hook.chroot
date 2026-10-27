@@ -8,8 +8,16 @@ systemctl enable vacti-firstrun.service 2>/dev/null || true
 # desktop login). On the headless SKU LightDM is absent, so skip it there. The
 # enabled symlink travels in the squashfs, so Calamares carries the gate into the
 # installed system. The fail-open fallback is wired via OnFailure= (not enabled).
+# Also wire the GUI boot path explicitly: enable lightdm + set graphical.target as
+# default. live-build runs apt inside a chroot where systemd isn't PID 1, so the
+# preset/enable triggers that normally fire during a desktop metapackage install
+# don't run, leaving a GUI SKU that boots to a TTY after Calamares (default-target
+# stays multi-user.target, lightdm stays disabled). The two symlinks created here
+# travel in the squashfs so Calamares carries them into the installed system.
 if [ -d /etc/lightdm ] || command -v lightdm >/dev/null 2>&1; then
   systemctl enable vacti-activate.service 2>/dev/null || true
+  systemctl enable lightdm.service 2>/dev/null || true
+  systemctl set-default graphical.target 2>/dev/null || true
 fi
 # openssh-server is baked (engine arsenal manifest core) but the package install never enables
 # it, so the ISO would boot with sshd DOWN and be unreachable over tailscale SSH.
