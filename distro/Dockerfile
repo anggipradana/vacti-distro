@@ -17,16 +17,30 @@
 # never on disk. The image is inert without a live vacti enrollment, exactly like
 # the .deb and the disk images.
 #
+# NO PRIVATE HOST IN THE PUBLISHED HISTORY. The whole private-apt transaction
+# (and therefore every reference to the private apt URL) is confined to a
+# throw-away `builder` stage. The published stage starts from a fresh base and
+# ingests the fully-installed root filesystem from the builder over a build-time
+# bind mount, so the private apt host appears in NO layer command, ARG default,
+# or metadata of the final image. The build-arg contract is unchanged: CI still
+# passes VACTI_APT_URL (same name); the ARG default here is empty.
+#
 # Multi-arch: debian:trixie-slim publishes linux/amd64 and linux/arm64, and the
 # flat vacti apt repo serves a native .deb for each (dpkg resolves the right arch
 # automatically), so a single buildx invocation produces one manifest list with
 # both arch children.
 
-FROM debian:trixie-slim
+# =============================================================================
+# Stage 1 (builder): the full install, INCLUDING the private-apt transaction.
+# This stage is never published; its history may name the private apt host.
+# =============================================================================
+FROM debian:trixie-slim AS builder
 
 # Build-time inputs. None of these is a secret (the apt token is a secret mount
 # below). VACTI_APT_URL and the engine ref/version are fed from the CI env.
-ARG VACTI_APT_URL="https://repo.example.com"
+# The ARG default is EMPTY on purpose so no private host is baked into metadata;
+# CI supplies the real value with --build-arg VACTI_APT_URL=...
+ARG VACTI_APT_URL=""
 ARG VACTI_ENGINE_PKG="vacti-engine"
 ARG VACTI_ENGINE_REF=""
 ARG VACTI_FULL_ARSENAL="0"
@@ -125,7 +139,8 @@ RUN --mount=type=secret,id=vacti_apt_token set -eu; \
 # --- FINALIZE identity + housekeeping (no credential in this layer) ------------
 # Zero the machine identity so every container start is a fresh engine, drop the
 # build-only staging tree and any methodology that must never ship, and prepare
-# the state volume. Mirrors the golden image FINALIZE block.
+# the state volume. Mirrors the golden image FINALIZE block. Runs in the builder
+# so the transferred root filesystem is already finalized and clean.
 RUN set -eu; \
     rm -rf /opt/vacti-build; \
     rm -rf /root/.claude /etc/vacti-engine/.claude 2>/dev/null || true; \
@@ -135,8 +150,53 @@ RUN set -eu; \
     ln -sf /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true; \
     rm -f /etc/ssh/ssh_host_* 2>/dev/null || true; \
     apt-get clean; \
-    rm -rf /var/log/apt/* /tmp/* /var/tmp/* 2>/dev/null || true; \
+    rm -rf /var/log/apt/* /tmp/* /var/tmp/* /var/cache/apt/archives/*.deb 2>/dev/null || true; \
     install -d -m0755 "${ENGINE_STATE_DIR}"
+
+# =============================================================================
+# Stage 2 (final, published): a fresh base that ingests the builder's fully
+# installed and finalized root filesystem. This stage performs NO apt operation
+# and references NO private host: the only thing it pulls from the builder is the
+# complete installed filesystem, streamed over a build-time bind mount so no
+# intermediate tarball is persisted in a layer. The resulting image therefore
+# carries the identical install state (all engine files, postinst-created
+# users/groups, systemd units, chromium, dpkg database, arsenal packages) with
+# the private apt host absent from every layer command and from image metadata.
+# =============================================================================
+FROM debian:trixie-slim
+
+# Runtime environment (ENV is image metadata, not filesystem, so it is declared
+# here; it is identical to the builder's runtime env). None of these name a
+# private host.
+ENV DEBIAN_FRONTEND=noninteractive \
+    APP=/usr/lib/vacti-engine \
+    ENGINE_STATE_DIR=/var/lib/vacti-engine \
+    PLAYWRIGHT_BROWSERS_PATH=/usr/lib/vacti-engine/ms-playwright \
+    DISPLAY=:0 \
+    VACTI_AUTO_UPDATE=0
+
+# Fail the transfer pipe if the producing tar errors (otherwise the extracting
+# tar's exit status would mask a partial stream).
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Ingest the builder's finalized root filesystem. The builder stage is bind
+# mounted read-only at /builder-root and its contents are streamed straight into
+# the final layer (tar | tar), so every installed file, user/group, systemd unit,
+# chromium, the dpkg database, and the arsenal land here byte-for-byte. The
+# pseudo/volatile directories are excluded so docker's own runtime mounts
+# (/proc, /sys, /dev, /tmp, /run) are not shadowed by empty build-time dirs, and
+# /etc/resolv.conf, /etc/hostname and /etc/hosts are excluded because docker
+# bind-mounts them (read-only here, regenerated per-run) and they cannot be
+# overwritten by the extract.
+# hadolint ignore=DL3059
+RUN --mount=type=bind,from=builder,source=/,target=/builder-root,readonly set -eu; \
+    tar -C /builder-root --numeric-owner --one-file-system -p -cf - \
+      --exclude=./proc --exclude=./sys --exclude=./dev \
+      --exclude=./tmp --exclude=./run --exclude=./builder-root \
+      --exclude=./var/cache/apt/archives --exclude=./var/lib/apt/lists \
+      --exclude=./etc/resolv.conf --exclude=./etc/hostname --exclude=./etc/hosts \
+      . \
+    | tar -C / --numeric-owner -p -xf -
 
 VOLUME ["/var/lib/vacti-engine"]
 WORKDIR /usr/lib/vacti-engine
