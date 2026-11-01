@@ -372,6 +372,12 @@ jobs:
   publish:
     needs: smoke
     runs-on: ubuntu-latest
+    # The final no-secret scan below guestmounts each published qcow2/ova, so this
+    # job needs the SAME libguestfs runner environment as golden/fanout: the
+    # direct backend plus the readable-kernel / KVM / passt-AppArmor / userns
+    # workarounds the composite action applies.
+    env:
+      LIBGUESTFS_BACKEND: direct
     steps:
       # Same squeeze as golden/fanout/iso/smoke: publish downloads EVERY built
       # form (~25GB on the full matrix) onto the runner's ~14GB free at "Collect
@@ -393,6 +399,18 @@ jobs:
           sudo apt-get clean || true
           echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
+      - name: Install libguestfs toolchain (+ runner workarounds)
+        # WHY: the "Final no-secret scan gate" step guestmounts every published
+        # artifact. Without the composite action's readable-kernel / KVM / passt
+        # workarounds (and LIBGUESTFS_BACKEND=direct above) guestmount fails on the
+        # GH-hosted runner, and the fail-closed scan refuses to publish the images
+        # as UNSCANNED. This mirrors the fan-out job, whose identical guestmount
+        # scan passes with exactly this setup. extra-packages are the non-base
+        # tools the scan needs: bsdextrautils (raw.gz path), squashfs-tools
+        # (unsquashfs for the ISO), fuse3 (guestmount).
+        uses: ./.github/actions/libguestfs-runner
+        with:
+          extra-packages: bsdextrautils squashfs-tools fuse3
       - name: Collect all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -404,8 +422,9 @@ jobs:
             -exec cp -n {} release/ \;
           ( cd release && sha256sum ./*.qcow2 ./*.raw.gz ./*.ova ./*.iso 2>/dev/null > MANIFEST.sha256 || true )
       - name: Final no-secret scan gate (every published artifact)  # MANDATORY
+        # The libguestfs toolchain + runner workarounds are installed above; this
+        # step only runs the fail-closed scan over the assembled release/ set.
         run: |
-          sudo apt-get update && sudo apt-get install -y libguestfs-tools qemu-utils bsdextrautils squashfs-tools fuse3
           shopt -s nullglob
           for a in release/*.qcow2 release/*.raw.gz release/*.ova release/*.iso; do
             ci/no-secret-scan.sh "$a"
