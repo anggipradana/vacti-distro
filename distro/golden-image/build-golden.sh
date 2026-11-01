@@ -28,7 +28,7 @@ OOM_DIR="${HERE}/oom"
 WORK="${WORK:-${DISTRO_DIR}/.build/golden}"
 CACHE="${CACHE:-${DISTRO_DIR}/.build/cache}"
 OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
-GOLDEN="${OUT}/vacti-engine-${VACTI_RELEASE}-golden.qcow2"
+GOLDEN="${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-golden.qcow2"
 
 log() { echo "[golden] $*"; }
 die() { echo "[golden][FATAL] $*" >&2; exit 1; }

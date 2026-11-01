@@ -1,0 +1,307 @@
+# vacti-distro ARM64 image build matrix (TG 7182).
+#
+# Companion to build.yml (which stays AMD64-only and byte-for-byte unchanged). This
+# workflow builds the ARM64 image forms NATIVELY on ubuntu-24.04-arm runners (no
+# QEMU-user cross-build): virt-customize's in-guest apt/postinst and live-build's
+# chroot run target-arch binaries directly, so uname-based hooks (ghidra JDK, caido)
+# auto-select the aarch64 assets.
+#
+# The four ARM64 deliverables (TG 7175): VirtualBox OVA, VMware OVA, ISO headless,
+# ISO GUI. The golden disk is the shared conversion source for the two OVAs. All
+# ARM64 artifacts are "-arm64"-tagged (DEBIAN_ARCH drives VACTI_ARCH_SUFFIX in
+# vacti-appliance.env), so they never collide with the AMD64 names.
+#
+# ARM64 is UEFI-only (no BIOS/isolinux: hardware reality). OVA import is on an
+# arm64-host hypervisor (VirtualBox 7.1+ / VMware Fusion 13 on Apple Silicon); the
+# real-import check stays the dev-box ovftool/VBoxManage lane, same as AMD64.
+#
+# Triggered manually, or by the same engine-deb-published dispatch build.yml uses.
+name: build-images-arm64
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Release version to stamp (e.g. 0.1.0)"
+        required: true
+        default: "0.1.0"
+      full_arsenal:
+        description: "Bake the full arsenal (1) or lean web+infra (0)"
+        required: false
+        default: "0"
+  repository_dispatch:
+    types: [engine-deb-published]
+
+permissions:
+  contents: write   # append ARM64 assets to the PRIVATE release on this repo
+
+concurrency:
+  group: build-images-arm64-${{ github.event.inputs.release || github.event.client_payload.release || '0.1.0' }}
+  cancel-in-progress: false
+
+env:
+  VACTI_RELEASE: ${{ github.event.inputs.release || github.event.client_payload.release || '0.1.0' }}
+  VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '0' }}
+  VACTI_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF || github.event.client_payload.release || '' }}
+  VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
+  VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+  # Every job targets arm64. vacti-appliance.env turns this into the "-arm64"
+  # artifact suffix and the arm64 cloud-image / kernel-flavour / bootloader choices.
+  DEBIAN_ARCH: arm64
+  OUT_DIR: out
+
+jobs:
+  # --- light gate: shellcheck + yaml/xml sanity (arch-agnostic) ----------------
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install linters
+        run: sudo apt-get update && sudo apt-get install -y shellcheck python3-yaml libxml2-utils
+      - name: Auto-revendor arsenal manifest (engine-deb-published only)
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        run: ci/revendor-arsenal.sh
+      - name: Lint build sources
+        run: ci/lint.sh
+
+  # --- the golden disk (arm64): built ONCE, shared by both OVA forms -----------
+  golden:
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+      - uses: actions/checkout@v4
+      - name: Install libguestfs + qemu toolchain (+ runner workarounds)
+        uses: ./.github/actions/libguestfs-runner
+        with:
+          extra-packages: genisoimage xorriso
+      - name: Build golden disk (virt-customize, native arm64, off-prod)
+        run: |
+          export LIBGUESTFS_BACKEND=direct
+          export LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1
+          make golden
+      - name: No-secret scan (golden)
+        run: ci/no-secret-scan.sh out/vacti-engine-${VACTI_RELEASE}-arm64-golden.qcow2
+      - name: Reclaim intermediate build files before upload
+        run: |
+          echo "[disk] before cleanup:"; df -h /
+          rm -rf distro/.build || true
+          echo "[disk] after cleanup:"; df -h /
+      - name: Upload golden as a build artifact (passed to fan-out jobs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-qcow2-arm64
+          path: |
+            out/vacti-engine-${{ env.VACTI_RELEASE }}-arm64-golden.qcow2
+          retention-days: 2
+          if-no-files-found: error
+
+  # --- fan-out: the two OVA forms, each a repackaging of the golden disk -------
+  fanout:
+    needs: golden
+    runs-on: ubuntu-24.04-arm
+    env:
+      LIBGUESTFS_BACKEND: direct
+    strategy:
+      fail-fast: false
+      matrix:
+        # arm64 deliverables from the golden disk: both OVA forms. (cloud/raw is an
+        # AMD64 form; arm64's four TG-7175 deliverables are the two OVAs + two ISOs.)
+        form: [vmware-ova, vbox-ova]
+    steps:
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+      - uses: actions/checkout@v4
+      - name: Install toolchain (+ runner workarounds)
+        uses: ./.github/actions/libguestfs-runner
+        with:
+          extra-packages: fuse3 libxml2-utils
+      - name: Fetch the golden disk
+        uses: actions/download-artifact@v4
+        with:
+          name: golden-qcow2-arm64
+          path: out
+      - name: Convert -> ${{ matrix.form }}
+        run: make ${{ matrix.form }}
+      - name: Validate OVF/OVA structure (member order, schema, sizes, hashes, RAM floor)
+        run: |
+          shopt -s nullglob
+          ovas=(out/*.ova)
+          if [[ ${#ovas[@]} -gt 0 ]]; then
+            ci/validate-ovf.sh "${ovas[@]}"
+          else
+            echo "[validate-ovf] no .ova in this form (${{ matrix.form }}); skipping"
+          fi
+      - name: Reclaim golden disk after conversion
+        run: |
+          echo "[disk] before cleanup:"; df -h /
+          rm -f out/*golden*.qcow2 || true
+          echo "[disk] after cleanup:"; df -h /
+      - name: No-secret scan (${{ matrix.form }})  # MANDATORY, non-negotiable
+        run: |
+          shopt -s nullglob
+          for a in out/*.qcow2 out/*.raw.gz out/*.ova; do
+            case "$a" in *golden*) continue;; esac
+            ci/no-secret-scan.sh "$a"
+          done
+      - name: Upload ${{ matrix.form }} artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: form-${{ matrix.form }}-arm64
+          path: |
+            out/*.ova
+            out/*.sha256
+          retention-days: 2
+
+  # --- the installable ISO (arm64): live-build in a privileged debian:trixie ----
+  iso:
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    container:
+      # debian:trixie is a multi-arch manifest; an arm64 runner pulls the arm64
+      # variant automatically and live-build bootstraps a native arm64 chroot.
+      image: debian:trixie
+      options: --privileged   # loop devices + mount for live-build/squashfs
+      volumes:
+        - /usr:/host/usr
+        - /opt:/host/opt
+    strategy:
+      fail-fast: false
+      matrix:
+        sku: [headless, gui]
+    steps:
+      - name: Free disk space (reclaim from inside the container)
+        run: |
+          echo "[disk] before:"; df -h /
+          rm -rf \
+            /host/usr/local/lib/android \
+            /host/usr/share/dotnet \
+            /host/opt/ghc /host/usr/local/.ghcup \
+            /host/opt/hostedtoolcache \
+            /host/usr/local/share/boost \
+            /host/usr/share/swift \
+            /host/usr/lib/jvm \
+            /host/usr/local/share/powershell \
+            /host/usr/lib/google-cloud-sdk || true
+          echo "[disk] after:"; df -h /
+      - uses: actions/checkout@v4
+      - name: Install live-build toolchain
+        run: |
+          apt-get update
+          apt-get install -y live-build xorriso squashfs-tools ca-certificates curl gnupg make jq python3
+      - name: Auto-revendor arsenal manifest (engine-deb-published only)
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        shell: bash
+        run: ci/revendor-arsenal.sh
+      - name: Build ISO (${{ matrix.sku }}, arm64 UEFI/grub-efi, off-prod)
+        run: VACTI_ISO_SKU=${{ matrix.sku }} make $([ "${{ matrix.sku }}" = gui ] && echo iso-gui || echo iso)
+      - name: Reclaim live-build work tree before scan
+        run: |
+          echo "[disk] before cleanup:"; df -h /
+          cd distro/live-build-config
+          rm -rf --one-file-system chroot binary cache .build || true
+          echo "[disk] after cleanup:"; df -h /
+      - name: No-secret scan (iso)  # MANDATORY
+        shell: bash
+        run: |
+          apt-get install -y libguestfs-tools qemu-utils bsdextrautils
+          shopt -s nullglob
+          for a in distro/live-build-config/*.hybrid.iso; do ci/no-secret-scan.sh "$a"; done
+      - name: Stage ISO to out/
+        run: |
+          mkdir -p out
+          cp distro/live-build-config/*.hybrid.iso out/vacti-engine-${VACTI_RELEASE}-arm64-${{ matrix.sku }}.iso || true
+          ( cd out && sha256sum vacti-engine-${VACTI_RELEASE}-arm64-${{ matrix.sku }}.iso > vacti-engine-${VACTI_RELEASE}-arm64-${{ matrix.sku }}.iso.sha256 ) || true
+      - name: Upload ISO artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: form-iso-${{ matrix.sku }}-arm64
+          path: |
+            out/*.iso
+            out/*.iso.sha256
+          retention-days: 2
+
+  # --- smoke boot (arm64): native qemu-system-aarch64. NON-BLOCKING ------------
+  smoke:
+    needs: [fanout, iso]
+    if: ${{ always() && needs.fanout.result == 'success' && (needs.iso.result == 'success' || needs.iso.result == 'skipped') }}
+    runs-on: ubuntu-24.04-arm
+    # Non-blocking per TG 7182: a slow or flaky TCG boot must not gate the ARM64
+    # artifacts (the mandatory gate is the no-secret scan + OVF structure check).
+    continue-on-error: true
+    steps:
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+      - uses: actions/checkout@v4
+      - name: Install qemu (aarch64) + AAVMF firmware + tools
+        run: |
+          sudo apt-get update
+          # qemu-system-arm provides qemu-system-aarch64; qemu-efi-aarch64 ships
+          # AAVMF (/usr/share/AAVMF/AAVMF_CODE.fd), the UEFI firmware arm64 needs.
+          sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 qemu-utils genisoimage
+      - name: Collect ARM64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-arm64"
+          merge-multiple: true
+          path: out
+      - name: Smoke-boot the ARM64 images (qemu TCG, real boot + health probe)
+        env:
+          STAGING_CP_URL: ${{ vars.STAGING_CP_URL }}
+          STAGING_ENROLL_TOKEN: ${{ secrets.STAGING_ENROLL_TOKEN }}
+          SMOKE_ARCH: arm64
+          BOOT_TIMEOUT: "900"
+          ISO_WATCH: "600"
+        run: ci/smoke-boot.sh out
+
+  # --- publish: APPEND ARM64 assets to the same PRIVATE release ----------------
+  publish:
+    needs: smoke
+    # smoke is continue-on-error (non-blocking), so publish runs whenever the build
+    # stages produced artifacts; it never waits on a green smoke.
+    if: ${{ always() && needs.fanout.result == 'success' && needs.iso.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+      - uses: actions/checkout@v4
+      - name: Collect ARM64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-arm64"
+          merge-multiple: true
+          path: dist
+      - name: Flatten + reproducibility manifest
+        run: |
+          mkdir -p release
+          find dist -type f \( -name '*.qcow2' -o -name '*.raw.gz' -o -name '*.ova' -o -name '*.iso' -o -name '*.sha256' \) \
+            -exec cp -n {} release/ \;
+          ( cd release && sha256sum ./*.ova ./*.iso 2>/dev/null > MANIFEST-arm64.sha256 || true )
+      - name: Final no-secret scan gate (every published artifact)  # MANDATORY
+        run: |
+          sudo apt-get update && sudo apt-get install -y libguestfs-tools qemu-utils bsdextrautils squashfs-tools fuse3
+          shopt -s nullglob
+          for a in release/*.qcow2 release/*.raw.gz release/*.ova release/*.iso; do
+            ci/no-secret-scan.sh "$a"
+          done
+      - name: Enforce the 2GiB Release asset cap (log + continue; does not solve R2)
+        # ARM64 doubles the number of potentially over-cap assets. This moves any
+        # over-limit file out of release/ with a warning so the publish never
+        # hard-fails; the full-fidelity path is 'gh run download' + the operator-
+        # gated R2 mirror. Same graceful behavior as intended for every arch.
+        run: ci/cap-release-assets.sh release 2147483648
+      - name: Append ARM64 assets to the PRIVATE GitHub Release
+        # APPEND only: tag_name + files, no name/body, so this never clobbers the
+        # release notes the AMD64 publish (build.yml) wrote to the same tag. The
+        # four ARM64 forms (VirtualBox OVA, VMware OVA, ISO headless, ISO GUI) are
+        # added alongside the AMD64 assets on images-v<ver>. Over-cap assets were
+        # held back by the cap step; fetch those via 'gh run download' + R2.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: images-v${{ env.VACTI_RELEASE }}
+          prerelease: true
+          files: |
+            release/*.ova
+            release/*.iso
+            release/MANIFEST-arm64.sha256

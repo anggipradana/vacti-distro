@@ -14,11 +14,20 @@ OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
 # subshell where a relative path would point at the (empty) temp dir and fail
 # with "Cannot open: No such file or directory".
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
-GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}-golden.qcow2}"
+GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-golden.qcow2}"
 TMPL="${HERE}/ovf-templates/vmware-vmx13.ovf.tmpl"
 [[ -f "$GOLDEN" ]] || { echo "golden disk not found: $GOLDEN" >&2; exit 1; }
 
-NAME="vacti-engine-${VACTI_RELEASE}-vmware"
+# VMware guest OS identifier, arch-keyed. The disk block-copies regardless of arch;
+# the descriptor advertises the guest so the host selects arm firmware/CPU on
+# import. An arm64 OVA imports on an arm64-host VMware (Fusion 13 on Apple Silicon);
+# the real-import check stays the dev-box ovftool lane.
+case "$DEBIAN_ARCH" in
+  arm64|aarch64) VMW_OSTYPE="arm-debian12-64" ;;
+  *)             VMW_OSTYPE="debian12_64Guest" ;;
+esac
+
+NAME="vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-vmware"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 VMDK="${NAME}-disk1.vmdk"
 
@@ -36,6 +45,7 @@ sed -e "s|@VMDK@|${VMDK}|g" \
     -e "s|@DISK_POPULATED@|${POP_BYTES}|g" \
     -e "s|@PRODUCT@|${VACTI_PRODUCT_PRETTY}|g" \
     -e "s|@VERSION@|${VACTI_RELEASE}|g" \
+    -e "s|@VMW_OSTYPE@|${VMW_OSTYPE}|g" \
     "$TMPL" > "${WORK}/${OVF}"
 
 echo "[vmware] manifest (.mf, SHA256)"
