@@ -1,0 +1,34 @@
+# vacti-console-lockdown.service - TG 7212 getty lockdown.
+#
+# The client must not reach a login shell on ANY console before the box is
+# enrolled. tty1 is owned by the activation wizard (GUI kiosk / text wizard, both
+# Conflicts=getty@tty1). This unit closes every OTHER console login path while the
+# box is unenrolled: the spare virtual terminals (tty2..tty6, reachable via
+# Ctrl+Alt+F2..F6) and the serial-console getty (ttyS0 / ttyAMA0). It masks +
+# stops them, so no getty is ever presented until engine.env exists.
+#
+# After enrollment this unit no-ops (ConditionPathExists below) and the gettys stay
+# masked for the rest of that boot; combined with the baked logind NAutoVTs=0
+# drop-in and the disabled root password, the client never gets an OS login. The
+# operator reaches the engine over tailscale SSH (enabled by vacti-firstboot), not
+# a local console. Reversible: `systemctl unmask` restores a getty for recovery.
+[Unit]
+Description=vacti console lockdown (no getty on any tty/serial until enrolled)
+DefaultDependencies=no
+After=systemd-user-sessions.service
+Before=getty.target serial-getty@ttyS0.service serial-getty@ttyAMA0.service
+# Only while the box is unenrolled.
+ConditionPathExists=!/etc/vacti-engine/engine.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Mask the spare VT gettys and both common serial-console gettys, then stop any
+# that already started. getty@tty1 is masked too for belt-and-suspenders (the
+# activation wizard owns tty1 directly via TTYPath, not via a getty).
+ExecStart=/bin/sh -c 'systemctl mask --runtime --now getty@tty1.service getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service serial-getty@ttyS0.service serial-getty@ttyAMA0.service 2>/dev/null || true; echo "VACTI_CONSOLE_LOCKDOWN=1 (no login shell until enrolled)" > /dev/console 2>/dev/null || true'
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

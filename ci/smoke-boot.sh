@@ -306,17 +306,17 @@ smoke_iso() {
   else bad "${base} (${fw}): no login/boot marker within ${watch}s"; tail -30 "$log" >&2 || true; fi
 }
 
-# --- GUI ISO pre-login gate smoke: verify the activation kiosk + fail-open -----
+# --- GUI ISO pre-login gate smoke: verify the activation kiosk + FAIL-CLOSED ----
 # Boots the GUI ISO with -vga none (no framebuffer/GPU). The vacti-activate
 # kiosk's display pre-flight then fails DETERMINISTICALLY, which FORCES the
-# fail-open path: the kiosk exits, systemd runs vacti-activate-fallback.service,
-# which drops a getty so the box stays reachable. This exercises the REAL
-# fail-open behavior (a display-less / broken-GPU box must never brick) with no
-# contrived crash injection. Serial (console=ttyS0) carries the two gate markers
-# plus the getty login prompt. Asserts (without weakening the boot check):
+# FAIL-CLOSED path (TG 7212): instead of a getty, the kiosk execs the text-mode
+# license wizard (vacti-netsetup --loop), which loops on the license prompt and
+# NEVER offers a login shell. This exercises the REAL display-less behavior with
+# no contrived crash injection. Serial (console=ttyS0) carries the gate markers.
+# Asserts (without weakening the boot check):
 #   - the GUI boot REACHES the vacti-activate kiosk (not a bare login)
-#   - fail-open engages (kiosk unavailable -> fallback getty)
-#   - the box is reachable (a boot/login marker appears)
+#   - it fails CLOSED to the text license wizard (VACTI_ACTIVATE_CONSOLE), NOT a getty
+#   - the box is reachable (a boot marker appears)
 smoke_iso_gate() {
   local art="$1" base; base="$(basename "$art")"
   say "iso GATE smoke (gui, pre-login activation): ${base}"
@@ -337,14 +337,16 @@ smoke_iso_gate() {
   local watch="${ISO_WATCH:-${BOOT_TIMEOUT}}"
   ( timeout "${watch}" "$QEMU" "${args[@]}" < /dev/null > /dev/null 2>&1 || true ) &
   local qpid=$!
-  local waited=0 seen_kiosk=0 seen_fallback=0 seen_login=0
+  local waited=0 seen_kiosk=0 seen_console=0 seen_getty=0 seen_login=0
   while [[ "$waited" -lt "$watch" ]]; do
     if [[ -s "$log" ]]; then
       grep -q 'VACTI_ACTIVATE_KIOSK=start' "$log" 2>/dev/null && seen_kiosk=1
-      grep -q 'VACTI_ACTIVATE_FALLBACK=' "$log" 2>/dev/null && seen_fallback=1
-      grep -qiE 'login:|reached target|Welcome to|systemd\[1\]' "$log" 2>/dev/null && seen_login=1
+      grep -q 'VACTI_ACTIVATE_CONSOLE=' "$log" 2>/dev/null && seen_console=1
+      # A getty login prompt BEFORE enrollment is now a FAILURE (TG 7212 fail-closed).
+      grep -qE '^[A-Za-z0-9_.-]+ login:' "$log" 2>/dev/null && seen_getty=1
+      grep -qiE 'reached target|Welcome to|systemd\[1\]' "$log" 2>/dev/null && seen_login=1
     fi
-    [[ "$seen_kiosk" -eq 1 && "$seen_fallback" -eq 1 && "$seen_login" -eq 1 ]] && break
+    [[ "$seen_kiosk" -eq 1 && "$seen_console" -eq 1 && "$seen_login" -eq 1 ]] && break
     kill -0 "$qpid" 2>/dev/null || break
     sleep 5; waited=$((waited+5))
   done
@@ -352,10 +354,12 @@ smoke_iso_gate() {
   if [[ -s "$log" ]]; then tr -d '\r' < "$log" > "${log}.nocr" && mv -f "${log}.nocr" "$log"; fi
   if [[ "$seen_kiosk" -eq 1 ]]; then ok "${base} (gui): reached the vacti-activate kiosk (pre-login gate, not a bare login)"
   else bad "${base} (gui): never reached the vacti-activate kiosk (no VACTI_ACTIVATE_KIOSK marker)"; tail -40 "$log" >&2 || true; fi
-  if [[ "$seen_fallback" -eq 1 ]]; then ok "${base} (gui): FAIL-OPEN engaged (display-less kiosk -> fallback getty; box reachable)"
-  else bad "${base} (gui): fail-open fallback did not engage (no VACTI_ACTIVATE_FALLBACK marker)"; tail -40 "$log" >&2 || true; fi
-  if [[ "$seen_login" -eq 1 ]]; then ok "${base} (gui): box reachable (boot/login marker present)"
-  else bad "${base} (gui): no boot/login marker within ${watch}s (box may be hung)"; fi
+  if [[ "$seen_console" -eq 1 ]]; then ok "${base} (gui): FAIL-CLOSED engaged (display-less kiosk -> text license wizard; no login shell)"
+  else bad "${base} (gui): fail-closed console wizard did not engage (no VACTI_ACTIVATE_CONSOLE marker)"; tail -40 "$log" >&2 || true; fi
+  if [[ "$seen_getty" -eq 1 ]]; then bad "${base} (gui): a getty 'login:' prompt appeared BEFORE enrollment (TG 7212 violation - the client must not reach a login shell)"; tail -40 "$log" >&2 || true
+  else ok "${base} (gui): no pre-enrollment getty login prompt (fail-closed holds)"; fi
+  if [[ "$seen_login" -eq 1 ]]; then ok "${base} (gui): box reachable (boot marker present)"
+  else bad "${base} (gui): no boot marker within ${watch}s (box may be hung)"; fi
 }
 
 # --- discover + dispatch -----------------------------------------------------

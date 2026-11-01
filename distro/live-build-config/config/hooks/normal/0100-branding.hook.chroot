@@ -4,10 +4,16 @@ set -e
 /usr/share/vacti/branding/apply-branding.sh || true
 # enable the first-run enroll unit so it runs once on the installed/live system
 systemctl enable vacti-firstrun.service 2>/dev/null || true
+# TG 7212 getty lockdown: no login shell on any console until enrolled. Enabled on
+# BOTH SKUs; the enabled symlink travels in the squashfs (Calamares carries it into
+# the installed system). On the headless SKU this + vacti-netsetup is the whole
+# "license entry only, no shell" console experience.
+systemctl enable vacti-console-lockdown.service 2>/dev/null || true
 # GUI SKU only: enable the PRE-LOGIN activation kiosk (network->enroll before the
 # desktop login). On the headless SKU LightDM is absent, so skip it there. The
 # enabled symlink travels in the squashfs, so Calamares carries the gate into the
-# installed system. The fail-open fallback is wired via OnFailure= (not enabled).
+# installed system. The fail-CLOSED console wizard is wired via OnFailure= (not
+# enabled directly); the getty lockdown above is enabled on both SKUs.
 # Also wire the GUI boot path explicitly: enable lightdm + set graphical.target as
 # default. live-build runs apt inside a chroot where systemd isn't PID 1, so the
 # preset/enable triggers that normally fire during a desktop metapackage install
@@ -18,6 +24,11 @@ if [ -d /etc/lightdm ] || command -v lightdm >/dev/null 2>&1; then
   systemctl enable vacti-activate.service 2>/dev/null || true
   systemctl enable lightdm.service 2>/dev/null || true
   systemctl set-default graphical.target 2>/dev/null || true
+else
+  # Headless SKU: the GUI kiosk no-ops (no LightDM), so the fail-closed text
+  # license wizard is the PRIMARY console owner - enable it so a no-seed headless
+  # box shows "license entry" on the console instead of a getty (TG 7212).
+  systemctl enable vacti-activate-console.service 2>/dev/null || true
 fi
 # openssh-server is baked (engine arsenal manifest core) but the package install never enables
 # it, so the ISO would boot with sshd DOWN and be unreachable over tailscale SSH.

@@ -39,11 +39,37 @@ if [[ -z "${VACTI_TOKEN:-}" && -f "$STATE_ENV" ]]; then
   set +a
 fi
 
-[[ -n "${VACTI_URL:-}" ]] || die "set VACTI_URL=https://<control-plane> (or CP_URL)"
-
-# Accept the enroll-token aliases.
-ENROLL_TOKEN="${VACTI_ENROLL_TOKEN:-${ENROLL_TOKEN:-}}"
+# --- interactive FAIL-CLOSED fallback (TG 7212) ------------------------------
+# If we have no way to authenticate - no producer token (persisted/env) AND not
+# both an enroll token AND a URL - start the browser activation UI on
+# VACTI_WEBUI_PORT (default 3100) so the user can point a browser and paste the
+# control-plane URL + the single-use license token, with NO `docker exec` and NO
+# shell. It blocks until enrollment succeeds (writes engine.env, 0600), then this
+# entrypoint continues and exec's the engine. A wrong/expired token just re-shows
+# the form - there is no shell fallback. Set VACTI_WEBUI=0 for scripted /
+# --env-file deployments that prefer a hard fail over the interactive UI.
 ENGINE_ID="${ENGINE_ID:-$(hostname -s 2>/dev/null || echo engine)}"
+ENROLL_TOKEN="${VACTI_ENROLL_TOKEN:-${ENROLL_TOKEN:-}}"
+have_auth() { [[ -n "${VACTI_TOKEN:-}" ]] || { [[ -n "${ENROLL_TOKEN}" && -n "${VACTI_URL:-}" ]]; }; }
+if ! have_auth; then
+  if [[ "${VACTI_WEBUI:-1}" == "1" ]] && command -v node >/dev/null 2>&1 && [[ -f /usr/local/sbin/vacti-enroll-webui.js ]]; then
+    log "no enrollment token supplied - starting the browser activation UI on :${VACTI_WEBUI_PORT:-3100} (open it and paste your license; no docker exec needed)"
+    ENGINE_ID="$ENGINE_ID" STATE_ENV="$STATE_ENV" VACTI_URL="${VACTI_URL:-}" \
+      VACTI_WEBUI_PORT="${VACTI_WEBUI_PORT:-3100}" \
+      node /usr/local/sbin/vacti-enroll-webui.js   # blocks until enrolled
+    if [[ -f "$STATE_ENV" ]]; then
+      set -a; # shellcheck source=/dev/null
+      . "$STATE_ENV"; set +a
+    fi
+  else
+    die "no engine token available: supply VACTI_ENROLL_TOKEN (single-use mint) or VACTI_TOKEN (producer) plus VACTI_URL, or leave VACTI_WEBUI unset to use the browser activation UI on :${VACTI_WEBUI_PORT:-3100}"
+  fi
+fi
+
+[[ -n "${VACTI_URL:-}" ]] || die "set VACTI_URL=https://<control-plane> (or CP_URL), or use the browser activation UI (leave VACTI_WEBUI unset)"
+
+# Accept the enroll-token aliases (re-read in case the web UI / state env set them).
+ENROLL_TOKEN="${VACTI_ENROLL_TOKEN:-${ENROLL_TOKEN:-}}"
 BASE="${VACTI_URL%/}"
 
 # Exchange a single-use enroll token for the scoped tokens, mirroring the
@@ -83,7 +109,7 @@ if [[ -z "${VACTI_TOKEN:-}" && -n "${ENROLL_TOKEN}" ]]; then
 fi
 
 export VACTI_URL="${BASE}"
-[[ -n "${VACTI_TOKEN:-}" ]] || die "no engine token available: supply VACTI_TOKEN (producer) or VACTI_ENROLL_TOKEN (single-use mint)"
+[[ -n "${VACTI_TOKEN:-}" ]] || die "no engine token available: supply VACTI_TOKEN (producer) or VACTI_ENROLL_TOKEN (single-use mint), or use the browser activation UI (leave VACTI_WEBUI unset)"
 export VACTI_TOKEN
 [[ -n "${VACTI_VERIFIER_TOKEN:-}" ]] && export VACTI_VERIFIER_TOKEN
 [[ -n "${VACTI_GATEKEEPER_TOKEN:-}" ]] && export VACTI_GATEKEEPER_TOKEN

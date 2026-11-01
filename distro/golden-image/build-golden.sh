@@ -97,6 +97,7 @@ rm -rf "$STAGE"; mkdir -p \
   "${STAGE}/usr/local/sbin" \
   "${STAGE}/etc/systemd/system" \
   "${STAGE}/etc/systemd/system/lightdm.service.d" \
+  "${STAGE}/etc/systemd/logind.conf.d" \
   "${STAGE}/etc/polkit-1/rules.d" \
   "${STAGE}/etc/sysctl.d" \
   "${STAGE}/etc/tmpfiles.d" \
@@ -115,17 +116,20 @@ cp -a "${ENROLL_DIR}/firstboot/vacti-firstboot.service"  "${STAGE}/etc/systemd/s
 # first-boot swapfile sizing (RAM known only at deploy) + its oneshot unit
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot"         "${STAGE}/usr/local/sbin/vacti-swap-firstboot"
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot.service" "${STAGE}/etc/systemd/system/vacti-swap-firstboot.service"
-# PRE-LOGIN activation: the GUI kiosk (network->enroll before the DM) + its
-# fail-open fallback + the narrow polkit rule, and the headless netsetup TUI.
-# Staged UNCONDITIONALLY (harmless on the headless golden: vacti-activate's
-# ConditionPathExists=/etc/lightdm is false with no LightDM, and the lightdm
-# drop-in has no lightdm.service to affect). The LightDM gate drop-in itself is
-# installed by apply-branding.sh (GUI-only). vacti-netsetup is the headless
-# operator command surfaced in the MOTD while unenrolled.
+# PRE-LOGIN activation (TG 7212, FAIL-CLOSED): the GUI kiosk (network->enroll
+# before the DM) + its fail-CLOSED console wizard (text license entry, never a
+# getty) + the getty lockdown + the narrow polkit rule, and the headless netsetup
+# TUI. Staged UNCONDITIONALLY (harmless on the headless golden: vacti-activate's
+# ConditionPathExists=/etc/lightdm is false with no LightDM; the console wizard +
+# lockdown are the headless enrollment + no-login-shell path). The LightDM gate
+# drop-in itself is installed by apply-branding.sh (GUI-only). vacti-netsetup
+# doubles as the headless operator command surfaced in the MOTD while unenrolled.
 cp -a "${ENROLL_DIR}/activate/vacti-activate"                 "${STAGE}/usr/local/sbin/vacti-activate"
 cp -a "${ENROLL_DIR}/activate/vacti-activate.service"         "${STAGE}/etc/systemd/system/vacti-activate.service"
-cp -a "${ENROLL_DIR}/activate/vacti-activate-fallback.service" "${STAGE}/etc/systemd/system/vacti-activate-fallback.service"
+cp -a "${ENROLL_DIR}/activate/vacti-activate-console.service" "${STAGE}/etc/systemd/system/vacti-activate-console.service"
+cp -a "${ENROLL_DIR}/activate/vacti-console-lockdown.service" "${STAGE}/etc/systemd/system/vacti-console-lockdown.service"
 cp -a "${ENROLL_DIR}/activate/vacti-activate-polkit.rules"    "${STAGE}/etc/polkit-1/rules.d/49-vacti-activate.rules"
+cp -a "${ENROLL_DIR}/activate/logind-10-vacti-no-autovt.conf" "${STAGE}/etc/systemd/logind.conf.d/10-vacti-no-autovt.conf"
 cp -a "${ENROLL_DIR}/netsetup/vacti-netsetup"                 "${STAGE}/usr/local/sbin/vacti-netsetup"
 # anti-OOM drop-ins (sysctl / zram / THP / earlyoom) baked into the golden image
 cp -a "${OOM_DIR}/sysctl-90-vacti.conf"    "${STAGE}/etc/sysctl.d/90-vacti.conf"
@@ -396,6 +400,16 @@ echo "[prov] branding"
 
 # enable the first-boot enroll unit (no token baked; it fails loudly without one)
 systemctl enable vacti-firstboot.service 2>/dev/null || true
+
+# TG 7212 getty lockdown: no login shell on any console until the box is enrolled.
+# On the headless golden this + the console license wizard turns the console into
+# "license entry only, no shell".
+systemctl enable vacti-console-lockdown.service 2>/dev/null || true
+# The golden image is headless (no LightDM), so the fail-closed text license wizard
+# is the primary console owner. Enable it so the console shows license entry (not a
+# getty) when there is no cloud-init/OVF seed; once a seed enrolls the box, its
+# ConditionPathExists=!engine.env stops it cleanly.
+systemctl enable vacti-activate-console.service 2>/dev/null || true
 
 # ---- anti-OOM: enable the backstops shipped via copy-in --------------------
 echo "[prov] enabling anti-OOM backstops (zram / earlyoom / swapfile firstboot)"

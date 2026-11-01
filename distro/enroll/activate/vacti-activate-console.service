@@ -1,0 +1,43 @@
+# vacti-activate-console.service - the FAIL-CLOSED console activation wizard.
+#
+# TWO roles, one unit:
+#   - GUI SKU: the OnFailure= target of vacti-activate.service (GUI kiosk
+#     crash-loop or a display-less / broken-GPU box). NOT enabled there; systemd
+#     starts it only when the kiosk fails. It is ordered After= the kiosk and
+#     Conflicts=getty@tty1 so the two never fight over tty1.
+#   - Headless SKU: ENABLED as the PRIMARY console owner (the GUI kiosk no-ops on
+#     headless via its ConditionPathExists=/etc/lightdm), so a no-seed headless box
+#     still shows "license entry" on the console instead of a getty.
+#
+# Either way it runs the TEXT-MODE license-entry wizard (vacti-netsetup --loop) on
+# tty1 - the first thing the operator sees is the license prompt, NOT a login
+# shell. It loops until the box is enrolled (engine.env appears) and NEVER drops to
+# a getty, so the TG 7212 guarantee ("client must not access the OS; first screen
+# is license entry") holds. The engine stays inert without engine.env regardless,
+# and operator recovery is via tailscale SSH / a seed, not a local console login.
+[Unit]
+Description=vacti fail-closed console activation wizard (license entry, never a login shell)
+After=vacti-activate.service systemd-user-sessions.service
+Conflicts=getty@tty1.service
+# Only while the box is unenrolled.
+ConditionPathExists=!/etc/vacti-engine/engine.env
+
+[Service]
+Type=simple
+# Console marker for the boot smoke test: the fail-closed wizard owns the console
+# (not a getty login). vacti-netsetup --loop emits the detailed marker too.
+ExecStartPre=/bin/sh -c 'echo "VACTI_ACTIVATE_CONSOLE=start (fail-closed license wizard; no login shell)" > /dev/console 2>/dev/null || true'
+ExecStart=/usr/local/sbin/vacti-netsetup --loop
+# Never give up to a shell: if the wizard somehow exits while still unenrolled,
+# restart it. The ConditionPathExists above stops it cleanly once enrolled.
+Restart=always
+RestartSec=2
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+# Enabled only on the HEADLESS SKU (the hook/build enable it there). On the GUI SKU
+# it is left disabled and started solely via the kiosk's OnFailure=.
+WantedBy=multi-user.target

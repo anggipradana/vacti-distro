@@ -4,10 +4,19 @@
 # seed: set networking, (optional) proxy / host VPN, then supply the control-plane
 # URL + enrollment token and drive the EXISTING first-boot enroll chain.
 #
-# It does NOT reimplement enroll and NEVER auto-seizes a TTY: the headless default
-# stays cloud-init + systemd-networkd (zero-touch via a cidata.iso seed). This is
-# an interactive, operator-invoked command, surfaced in the MOTD while the box is
-# unenrolled. Run it as root (sudo vacti-netsetup).
+# It does NOT reimplement enroll and NEVER auto-seizes a TTY on the happy path: the
+# headless default stays cloud-init + systemd-networkd (zero-touch via a cidata.iso
+# seed). As an interactive, operator-invoked command it is surfaced in the MOTD
+# while the box is unenrolled. Run it as root (sudo vacti-netsetup).
+#
+# --loop (FAIL-CLOSED console enrollment wizard): when invoked with --loop (or
+# VACTI_NETSETUP_LOOP=1) it becomes the console activation wizard that OWNS the
+# console before enrollment - the GUI kiosk's no-display fallback and the
+# vacti-activate-console.service OnFailure target both exec this. In loop mode it
+# NEVER returns to a login shell and NEVER calls die(): it offers one network pass
+# then retries the license prompt forever until engine.env appears. This is the
+# TG 7212 "no OS access + first screen is license entry" guarantee on text consoles
+# (headless / display-less / broken-GPU), the text-mode twin of the GUI kiosk.
 set -euo pipefail
 
 CFG_DIR="/etc/vacti-engine"
@@ -15,6 +24,13 @@ CFG_ENV="${CFG_DIR}/engine.env"
 TOKEN_FILE="${CFG_DIR}/enroll.token"
 PROXY_ENV="${CFG_DIR}/proxy.env"
 NETWORKD_DIR="/etc/systemd/network"
+
+# Mode: normal (operator command, fails loud) vs loop (fail-closed console wizard).
+LOOP_MODE=0
+case "${1:-}" in
+  --loop) LOOP_MODE=1 ;;
+esac
+[[ "${VACTI_NETSETUP_LOOP:-0}" == "1" ]] && LOOP_MODE=1
 
 log() { echo "[vacti-netsetup] $*"; }
 die() { echo "[vacti-netsetup][ERROR] $*" >&2; exit 1; }
@@ -26,13 +42,29 @@ if [[ -f "$CFG_ENV" ]]; then
   exit 0
 fi
 
+# FAIL-CLOSED console wizard: emit the boot-smoke / operator marker up front, BEFORE
+# any (possibly blocking) prompt, so the console unmistakably shows "license entry",
+# never a login shell - even if a later network dialog waits on input.
+if [[ "$LOOP_MODE" == "1" ]]; then
+  echo "VACTI_ACTIVATE_CONSOLE=enroll-tui (first screen is license entry; no login shell; box reachable via tailscale SSH)" > /dev/console 2>/dev/null || true
+  log "fail-closed console enrollment wizard: the box offers NO login shell until it is enrolled."
+fi
+
+# Brand the text wizard to match the GUI kiosk's one visual identity. The brand
+# tokens ship on the branding branch at /etc/vacti/brand.env; consume them
+# DEFENSIVELY (source only if present - this branch does not ship the file, so the
+# wizard looks plain but works when branding is absent). '|| true' keeps set -e safe.
+[ -f /etc/vacti/brand.env ] && . /etc/vacti/brand.env || true
+export NEWT_COLORS="${VACTI_BRAND_NEWT_COLORS:-${NEWT_COLORS:-}}"
+WT_BACKTITLE="${VACTI_BRAND_BACKTITLE:-VACTI - Vulnerability Assessment - AI Pentest - Threat Intelligence}"
+
 HAVE_WHIPTAIL=0
 if command -v whiptail >/dev/null 2>&1; then HAVE_WHIPTAIL=1; fi
 
 ask() { # prompt default -> echoes value (whiptail if present, else read)
   local prompt="$1" def="${2:-}"
   if [[ "$HAVE_WHIPTAIL" == "1" ]]; then
-    whiptail --inputbox "$prompt" 10 70 "$def" 3>&1 1>&2 2>&3 || echo "$def"
+    whiptail --backtitle "$WT_BACKTITLE" --inputbox "$prompt" 10 70 "$def" 3>&1 1>&2 2>&3 || echo "$def"
   else
     local v
     read -r -p "${prompt} [${def}]: " v || true
@@ -43,7 +75,7 @@ ask() { # prompt default -> echoes value (whiptail if present, else read)
 ask_secret() { # prompt -> echoes value (no echo to screen)
   local prompt="$1"
   if [[ "$HAVE_WHIPTAIL" == "1" ]]; then
-    whiptail --passwordbox "$prompt" 10 70 3>&1 1>&2 2>&3 || true
+    whiptail --backtitle "$WT_BACKTITLE" --passwordbox "$prompt" 10 70 3>&1 1>&2 2>&3 || true
   else
     local v
     read -r -s -p "${prompt}: " v || true
@@ -54,7 +86,7 @@ ask_secret() { # prompt -> echoes value (no echo to screen)
 
 confirm() { # prompt -> 0 yes / 1 no
   if [[ "$HAVE_WHIPTAIL" == "1" ]]; then
-    whiptail --yesno "$1" 10 70 3>&1 1>&2 2>&3
+    whiptail --backtitle "$WT_BACKTITLE" --yesno "$1" 10 70 3>&1 1>&2 2>&3
   else
     local v
     read -r -p "$1 [y/N]: " v || true
@@ -116,29 +148,57 @@ if confirm "Bring up a host VPN now (wg-quick / openconnect)?"; then
 fi
 
 # --- 4. enroll via the EXISTING first-boot chain ----------------------------
-url="$(ask "Control-plane URL (e.g. https://cp.example)" "")"
-token="$(ask_secret "Enrollment token (license; single-use, valid 3h)")"
-[[ -n "$url" && -n "$token" ]] || die "both the control-plane URL and the enrollment token are required"
+# One enrollment attempt: prompt for URL + token, stage the token file in the
+# EXACT format vacti-firstboot parses, drive the existing first-boot unit, and
+# wait for engine.env. Returns 0 once engine.env exists, else non-zero. It never
+# calls die() so the loop-mode caller can retry; the normal-mode caller turns a
+# non-zero return into a die() itself.
+enroll_once() {
+  local url token _
+  url="$(ask "Control-plane URL (e.g. https://cp.example)" "")"
+  token="$(ask_secret "Enrollment token (license; single-use, valid 3h)")"
+  if [[ -z "$url" || -z "$token" ]]; then
+    log "both the control-plane URL and the enrollment token are required"
+    return 1
+  fi
 
-install -d -m0755 "$CFG_DIR"
-umask 077
-{ printf '%s\n' "$token"; printf '%s\n' "$url"; } > "$TOKEN_FILE"
-chmod 0600 "$TOKEN_FILE"
-umask 022
-log "token staged (not logged); starting enrollment via vacti-firstboot"
+  install -d -m0755 "$CFG_DIR"
+  umask 077
+  { printf '%s\n' "$token"; printf '%s\n' "$url"; } > "$TOKEN_FILE"
+  chmod 0600 "$TOKEN_FILE"
+  umask 022
+  log "token staged (not logged); starting enrollment via vacti-firstboot"
 
-if systemctl cat vacti-firstrun.service >/dev/null 2>&1; then
-  systemctl start vacti-firstrun.service 2>/dev/null || true
-else
-  systemctl start vacti-firstboot.service 2>/dev/null || true
+  if systemctl cat vacti-firstrun.service >/dev/null 2>&1; then
+    systemctl start vacti-firstrun.service 2>/dev/null || true
+  else
+    systemctl start vacti-firstboot.service 2>/dev/null || true
+  fi
+
+  for _ in $(seq 1 45); do
+    [[ -f "$CFG_ENV" ]] && break
+    sleep 2
+  done
+  [[ -f "$CFG_ENV" ]]
+}
+
+if [[ "$LOOP_MODE" == "1" ]]; then
+  # FAIL-CLOSED console activation wizard: retry the license prompt forever (the
+  # VACTI_ACTIVATE_CONSOLE marker was already emitted up front). This is the
+  # text-mode twin of the GUI kiosk; it never returns to a login shell.
+  while [[ ! -f "$CFG_ENV" ]]; do
+    if enroll_once; then break; fi
+    log "enrollment not complete yet (token may be expired/used - single-use, valid 3h). Re-prompting. See: journalctl -u vacti-firstboot.service"
+    # Bounded pause so a non-interactive console (EOF stdin) cannot busy-spin, and
+    # so a human has time to read the message before the prompt returns.
+    sleep 10
+  done
+  log "SUCCESS: engine.env written - the engine will start. Enrollment complete."
+  exit 0
 fi
 
-for _ in $(seq 1 45); do
-  [[ -f "$CFG_ENV" ]] && break
-  sleep 2
-done
-
-if [[ -f "$CFG_ENV" ]]; then
+# Normal (operator command) mode: one attempt, fail loud.
+if enroll_once; then
   log "SUCCESS: engine.env written - the engine will start. Enrollment complete."
   exit 0
 fi

@@ -29,6 +29,31 @@
       <Info>The kind of installed guest operating system</Info>
       <Description>@VBOX_OSTYPE@</Description>
     </OperatingSystemSection>
+    <!-- vApp properties (TG 7212): the import dialog presents these so the operator
+         can inject the single-use enrollment token + control-plane URL (and an
+         OPTIONAL bootstrap Tailscale authkey) at deploy time for a silent first-boot
+         enroll. NONE is baked into the OVA. On VirtualBox the guest reads injected
+         values via `VBoxControl guestproperty get /VirtualBox/GuestInfo/vacti/*`
+         (vacti-firstboot does this); where that is unavailable, use the NoCloud
+         cidata.iso seed (distro/enroll/nocloud) - the lingua-franca path. -->
+    <ProductSection ovf:required="false">
+      <Info>vacti engine enrollment</Info>
+      <Product>@PRODUCT@</Product>
+      <Version>@VERSION@</Version>
+      <Category>vacti enrollment</Category>
+      <Property ovf:key="vacti.url" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Control-plane URL</Label>
+        <Description>e.g. https://cp.example - where this engine enrolls</Description>
+      </Property>
+      <Property ovf:key="vacti.enroll_token" ovf:type="string" ovf:password="true" ovf:userConfigurable="true">
+        <Label>Enrollment token (license)</Label>
+        <Description>Single-use token (valid 3h), minted once in the dashboard</Description>
+      </Property>
+      <Property ovf:key="vacti.tailscale_authkey" ovf:type="string" ovf:password="true" ovf:userConfigurable="true">
+        <Label>Tailscale authkey (optional bootstrap)</Label>
+        <Description>Optional. Used only for the FIRST tailnet join; the engine rotates it from the control plane afterwards</Description>
+      </Property>
+    </ProductSection>
     <VirtualHardwareSection>
       <Info>Virtual hardware requirements for a virtual machine</Info>
       <System>

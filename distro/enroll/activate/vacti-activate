@@ -18,11 +18,14 @@
 # and the normal desktop login is now allowed. The token VALUE is never logged;
 # all crypto/token parsing is deferred to vacti-firstboot (single source of truth).
 #
-# FAIL-OPEN: if no usable graphical display is available (headless/broken GPU) or
-# the kiosk cannot complete, it exits NON-ZERO. systemd then runs
-# vacti-activate-fallback.service (OnFailure=) which drops a plain getty so the box
-# is NEVER bricked by a kiosk bug. The engine stays inert without engine.env
-# regardless, so failing open costs no security (the moat is server-side).
+# FAIL-CLOSED (TG 7212): the client must NEVER reach a login shell before the box
+# is enrolled. If no usable graphical display is available (headless/broken GPU),
+# this script execs the TEXT-MODE activation wizard (vacti-netsetup --loop) in
+# place - a license-entry prompt that loops forever, NOT a getty. If the GUI kiosk
+# crash-loops, systemd's OnFailure= starts vacti-activate-console.service, which is
+# that same fail-closed text wizard - again NOT a getty. There is no path from an
+# unenrolled box to a shell. (The engine is also inert without engine.env, and the
+# real moat stays server-side: engine.env + the revocable scoped tokens.)
 set -euo pipefail
 
 CFG_DIR="/etc/vacti-engine"
@@ -59,8 +62,9 @@ pick_firstboot_unit() {
 }
 FB_UNIT="$(pick_firstboot_unit)"
 
-# A usable graphical display must exist, or we fail OPEN to the fallback getty.
-# (-vga none / a headless VM / a broken GPU all land here deterministically.)
+# A usable graphical display must exist, or we fail CLOSED to the text-mode
+# license wizard (vacti-netsetup --loop) - never a getty. (-vga none / a headless
+# VM / a broken GPU all land there deterministically.)
 graphical_possible() {
   command -v Xorg >/dev/null 2>&1 || command -v X >/dev/null 2>&1 || return 1
   local f
@@ -191,12 +195,22 @@ fi
 
 # ---------------------------------------------------------------------------
 # Top level: bring up a bare Xorg on vt1 and run the wizard inside it. If no
-# usable display exists, fail OPEN (exit non-zero -> fallback getty).
+# usable display exists, fail CLOSED - exec the text-mode license wizard in
+# place (it loops until enrolled and never returns to a shell).
 # ---------------------------------------------------------------------------
 if ! graphical_possible; then
-  log "no usable graphical display (headless/no-GPU) - failing open to the console"
+  log "no usable graphical display (headless/no-GPU) - failing CLOSED to the text-mode license wizard"
   echo "VACTI_ACTIVATE_NODISPLAY=1" > /dev/console 2>/dev/null || true
-  exit 1
+  echo "VACTI_ACTIVATE_CONSOLE=start (fail-closed license wizard; no login shell)" > /dev/console 2>/dev/null || true
+  if [[ -x /usr/local/sbin/vacti-netsetup ]]; then
+    exec /usr/local/sbin/vacti-netsetup --loop
+  fi
+  # Last-resort fail-closed guard: with no text wizard present, HANG on the console
+  # (never exit to a getty). systemd keeps the unit active; the box stays reachable
+  # over tailscale SSH and no local login shell is ever offered.
+  log "vacti-netsetup not found - holding the console closed (no login shell) until enrolled"
+  while [[ ! -f "$CFG_ENV" ]]; do sleep 30; done
+  exit 0
 fi
 
 if command -v xinit >/dev/null 2>&1; then
@@ -217,7 +231,8 @@ if [[ -f "$CFG_ENV" ]]; then
   exit 0
 fi
 
-# Did not enroll and the X session ended: exit non-zero so systemd restarts us
-# (and ultimately fails open to the console) rather than leaving a blank screen.
-log "kiosk ended without enrollment - exiting non-zero (systemd will retry / fail open)"
+# Did not enroll and the X session ended: exit non-zero so systemd restarts the
+# GUI kiosk; once StartLimitBurst is exhausted systemd's OnFailure= starts the
+# fail-CLOSED text wizard (vacti-activate-console.service), never a getty.
+log "kiosk ended without enrollment - exiting non-zero (systemd retries the GUI kiosk, then fails CLOSED to the text wizard)"
 exit 1

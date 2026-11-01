@@ -29,7 +29,35 @@
       <Info>The kind of installed guest operating system</Info>
       <Description>Debian GNU/Linux (64-bit) derivative</Description>
     </OperatingSystemSection>
-    <VirtualHardwareSection>
+    <!-- vApp properties (TG 7212): the import dialog presents these fields so the
+         operator can inject the single-use enrollment token + control-plane URL
+         (and an OPTIONAL bootstrap Tailscale authkey) at deploy time, for a silent
+         first-boot enroll with no pre-login wizard. NONE is baked into the OVA; the
+         values travel in the per-deployment OVF environment, delivered to the guest
+         via the com.vmware.guestInfo transport and read by vacti-firstboot. The
+         Tailscale authkey is BOOTSTRAP-ONLY: after first join the engine rotates it
+         from the control plane (see vacti-firstboot / the engine refresh timer). -->
+    <ProductSection ovf:required="false">
+      <Info>vacti engine enrollment</Info>
+      <Product>@PRODUCT@</Product>
+      <Version>@VERSION@</Version>
+      <Category>vacti enrollment</Category>
+      <Property ovf:key="vacti.url" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Control-plane URL</Label>
+        <Description>e.g. https://cp.example - where this engine enrolls</Description>
+      </Property>
+      <Property ovf:key="vacti.enroll_token" ovf:type="string" ovf:password="true" ovf:userConfigurable="true">
+        <Label>Enrollment token (license)</Label>
+        <Description>Single-use token (valid 3h), minted once in the dashboard</Description>
+      </Property>
+      <Property ovf:key="vacti.tailscale_authkey" ovf:type="string" ovf:password="true" ovf:userConfigurable="true">
+        <Label>Tailscale authkey (optional bootstrap)</Label>
+        <Description>Optional. Used only for the FIRST tailnet join; the engine rotates it from the control plane afterwards</Description>
+      </Property>
+    </ProductSection>
+    <!-- com.vmware.guestInfo transport delivers the OVF environment (with the
+         properties above) to the guest, where vmware-rpctool / cloud-init reads it. -->
+    <VirtualHardwareSection ovf:transport="com.vmware.guestInfo">
       <Info>Virtual hardware requirements</Info>
       <System>
         <vssd:ElementName>Virtual Hardware Family</vssd:ElementName>

@@ -32,6 +32,7 @@ systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/nul
 # accept a plain file-drop and the kernel cmdline. NONE of these ship in the image.
 ENROLL_TOKEN=""
 VACTI_URL=""
+VACTI_TS_AUTHKEY=""   # optional BOOTSTRAP tailscale authkey (OVF/guestinfo); never baked
 ENGINE_ID="$(hostname -s 2>/dev/null || echo engine)"
 
 # (a) a well-known file drop (console / preseed late_command / GUI dialog write)
@@ -58,6 +59,47 @@ done
 if [[ -z "$ENROLL_TOKEN" ]] && grep -q 'vacti.enroll_token=' /proc/cmdline 2>/dev/null; then
   ENROLL_TOKEN="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^vacti.enroll_token=//p')"
   VACTI_URL="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^vacti.url=//p')"
+fi
+
+# (d) OVF vApp properties / hypervisor guest-info (TG 7212 pre-boot injection).
+#     Lets an operator inject the token at OVA IMPORT time via the OVF
+#     ProductSection fields (control-plane URL + enroll token + an OPTIONAL
+#     bootstrap tailscale authkey) for a SILENT first-boot enroll with no pre-login
+#     wizard. Best-effort + guarded; NONE of this is baked - values arrive per
+#     deployment (VMware guestinfo/ovfEnv via vmware-rpctool, VirtualBox guest
+#     properties via VBoxControl). The cidata.iso NoCloud seed (channel b) remains
+#     the cross-hypervisor lingua franca; this is the import-dialog convenience.
+ovf_prop() { # ovfEnv-xml key -> value (prefix-agnostic key="K" ... value="V")
+  printf '%s' "$1" | tr '<' '\n' | sed -n "s/.*[Kk]ey=\"$2\".*[Vv]alue=\"\([^\"]*\)\".*/\1/p" | head -1
+}
+rpc_get() { # guestinfo-subkey -> value (empty if unset)
+  local out; out="$(vmware-rpctool "info-get guestinfo.$1" 2>/dev/null | tr -d '\r' || true)"
+  case "$out" in ""|*"No value"*) return 0 ;; esac
+  printf '%s' "$out"
+}
+vbox_get() { # guest-property-path -> value (empty if unset)
+  VBoxControl --nologo guestproperty get "$1" 2>/dev/null | sed -n 's/^Value: //p' || true
+}
+if [[ -z "$ENROLL_TOKEN" ]]; then
+  if command -v vmware-rpctool >/dev/null 2>&1; then
+    [[ -n "$ENROLL_TOKEN" ]]   || ENROLL_TOKEN="$(rpc_get vacti.enroll_token)"
+    [[ -n "$VACTI_URL" ]]      || VACTI_URL="$(rpc_get vacti.url)"
+    [[ -n "$VACTI_TS_AUTHKEY" ]] || VACTI_TS_AUTHKEY="$(rpc_get vacti.tailscale_authkey)"
+    if [[ -z "$ENROLL_TOKEN" ]]; then
+      env_xml="$(vmware-rpctool 'info-get guestinfo.ovfEnv' 2>/dev/null || true)"
+      case "$env_xml" in *"No value"*) env_xml="" ;; esac
+      if [[ -n "$env_xml" ]]; then
+        [[ -n "$ENROLL_TOKEN" ]]     || ENROLL_TOKEN="$(ovf_prop "$env_xml" vacti.enroll_token)"
+        [[ -n "$VACTI_URL" ]]        || VACTI_URL="$(ovf_prop "$env_xml" vacti.url)"
+        [[ -n "$VACTI_TS_AUTHKEY" ]] || VACTI_TS_AUTHKEY="$(ovf_prop "$env_xml" vacti.tailscale_authkey)"
+      fi
+    fi
+  fi
+  if [[ -z "$ENROLL_TOKEN" ]] && command -v VBoxControl >/dev/null 2>&1; then
+    [[ -n "$ENROLL_TOKEN" ]]     || ENROLL_TOKEN="$(vbox_get /VirtualBox/GuestInfo/vacti/enroll_token)"
+    [[ -n "$VACTI_URL" ]]        || VACTI_URL="$(vbox_get /VirtualBox/GuestInfo/vacti/url)"
+    [[ -n "$VACTI_TS_AUTHKEY" ]] || VACTI_TS_AUTHKEY="$(vbox_get /VirtualBox/GuestInfo/vacti/tailscale_authkey)"
+  fi
 fi
 
 [[ -n "$ENROLL_TOKEN" ]] || die "no per-boot enroll token found (file/NoCloud/guestinfo/cmdline all empty). \
@@ -109,6 +151,21 @@ rm -f /run/vacti-enroll.out
 
 # Wipe the consumed one-time token from disk if it was file-dropped.
 [[ -f "$TOKEN_FILE" ]] && shred -u "$TOKEN_FILE" 2>/dev/null || rm -f "$TOKEN_FILE" 2>/dev/null || true
+
+# --- 3b. tailscale BOOTSTRAP join (TG 7220) ---------------------------------
+# Only when an authkey was INJECTED at deploy time (OVF property / guestinfo). This
+# is a one-time convenience so an OVA-import deployment is reachable on the tailnet
+# from the very first boot. No key is EVER baked, and after this first join the
+# control plane rotates the key: the engine runner re-joins from the CP-served key
+# on every startup, and the engine-side vacti-tailscale-refresh.timer renews it on
+# a schedule (see vacti-pentest-engine). If no bootstrap key was injected, we do
+# NOTHING here - the runner performs the join from the CP; we never duplicate it.
+if [[ -n "${VACTI_TS_AUTHKEY:-}" ]] && command -v tailscale >/dev/null 2>&1; then
+  log "tailscale bootstrap join (authkey not logged) hostname=${ENGINE_ID}"
+  tailscale up --authkey="${VACTI_TS_AUTHKEY}" --hostname="${ENGINE_ID}" --accept-dns=false --reset 2>/dev/null \
+    || log "tailscale bootstrap join deferred to the engine runner (CP-served key)"
+fi
+VACTI_TS_AUTHKEY=""
 
 # --- 4. start the engine + disable this unit ---
 log "engine.env written; starting vacti-engine and disabling ${SELF_UNIT}"

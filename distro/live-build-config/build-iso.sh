@@ -86,8 +86,15 @@ install -D -m0755 "${DISTRO_DIR}/enroll/activate/vacti-activate" \
   "${HERE}/config/includes.chroot/usr/local/sbin/vacti-activate"
 install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate.service" \
   "${HERE}/config/includes.chroot/etc/systemd/system/vacti-activate.service"
-install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate-fallback.service" \
-  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-activate-fallback.service"
+# FAIL-CLOSED (TG 7212): the text-mode license wizard (OnFailure target + headless
+# console) instead of the old fail-open getty, plus the getty lockdown + the
+# NAutoVTs=0 logind drop-in so no login shell is offered until enrolled.
+install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate-console.service" \
+  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-activate-console.service"
+install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-console-lockdown.service" \
+  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-console-lockdown.service"
+install -D -m0644 "${DISTRO_DIR}/enroll/activate/logind-10-vacti-no-autovt.conf" \
+  "${HERE}/config/includes.chroot/etc/systemd/logind.conf.d/10-vacti-no-autovt.conf"
 install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate-polkit.rules" \
   "${HERE}/config/includes.chroot/etc/polkit-1/rules.d/49-vacti-activate.rules"
 install -D -m0755 "${DISTRO_DIR}/enroll/netsetup/vacti-netsetup" \

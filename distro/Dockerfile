@@ -48,6 +48,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # removes, so no methodology or package manifest ships on the image.
 COPY distro/packages/ /opt/vacti-build/packages/
 COPY distro/golden-image/docker-entrypoint.sh /usr/local/sbin/vacti-docker-entrypoint
+# TG 7212: the fail-closed browser activation UI the entrypoint runs when no
+# enrollment token is supplied (user pastes the license at :3100; no docker exec).
+COPY distro/golden-image/vacti-enroll-webui.js /usr/local/sbin/vacti-enroll-webui.js
 
 # --- base deps + public package sources (Kali pinned prio 100, NodeSource 22) --
 # No credential here, so this layer is cacheable and public. policy-rc.d blocks
@@ -71,6 +74,7 @@ RUN set -eu; \
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -; \
     chmod 0755 /opt/vacti-build/packages/gen-live-build-list.sh; \
     chmod 0755 /usr/local/sbin/vacti-docker-entrypoint; \
+    chmod 0755 /usr/local/sbin/vacti-enroll-webui.js; \
     rm -rf /var/lib/apt/lists/*
 
 # --- vacti-engine + arsenal from the PRIVATE apt repo (credential is a secret) -
@@ -140,6 +144,11 @@ RUN set -eu; \
 
 VOLUME ["/var/lib/vacti-engine"]
 WORKDIR /usr/lib/vacti-engine
+
+# TG 7212: the browser activation UI the entrypoint serves when `docker run` is
+# given no enrollment token. Publish it with `-p 3100:3100` to paste the license
+# from a browser (no docker exec). Override the port with -e VACTI_WEBUI_PORT.
+EXPOSE 3100
 
 # The engine traps SIGTERM for a graceful finish-the-tick shutdown (matches the
 # systemd unit KillSignal=SIGTERM); there is no systemd watchdog in a container,
