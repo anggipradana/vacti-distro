@@ -71,6 +71,13 @@ done
 # GRUB boot-menu splash (binary overlay), if the operator provided one
 [[ -f "${DISTRO_DIR}/branding/grub/splash.png" ]] && \
   install -D -m0644 "${DISTRO_DIR}/branding/grub/splash.png" "${HERE}/config/includes.binary/boot/grub/splash.png"
+# GRUB boot-menu THEME (shield + wordmark + brand menu) for the ISO live menu.
+# Staged into the binary (ISO) /boot/grub tree; 0410-grub-brand.hook.binary wires
+# `set theme=` + the brand menu-entry titles into the generated grub.cfg.
+if [[ -d "${DISTRO_DIR}/branding/grub/theme" ]]; then
+  install -d "${HERE}/config/includes.binary/boot/grub/themes/vacti"
+  cp -a "${DISTRO_DIR}/branding/grub/theme/." "${HERE}/config/includes.binary/boot/grub/themes/vacti/"
+fi
 
 # 3. enroll: firstboot script + the ISO firstrun unit
 install -D -m0755 "${DISTRO_DIR}/enroll/firstboot/vacti-firstboot" \

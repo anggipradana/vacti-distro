@@ -1,0 +1,44 @@
+#!/bin/sh
+# 0410-grub-brand.hook.binary - brand the ISO boot menu: replace residual Debian
+# marks in the GRUB (UEFI) + isolinux (BIOS) menu entry TITLES with "Vacti OS",
+# and point GRUB at the vacti boot-menu theme (shield + wordmark; staged by
+# build-iso.sh into /boot/grub/themes/vacti).
+#
+# Runs in the BINARY stage AFTER live-build assembles the bootloader configs and
+# AFTER 0400-serial-boot. It is deliberately NARROW: it rewrites TITLE TEXT and
+# appends a `set theme` line only. It does NOT touch terminal_output / serial /
+# timeout - 0400-serial-boot owns the headless serial auto-boot, and this hook
+# must never undo it (the theme is simply inert on a serial/text terminal and
+# renders on a graphical gfxterm boot). Best-effort + non-fatal: a missing config
+# is skipped. The full themed graphical menu + "Vacti OS" + "Advanced options for
+# Vacti OS" entries ship on the INSTALLED system via apply-branding.sh
+# (GRUB_THEME + GRUB_DISTRIBUTOR).
+set -e
+
+ROOT=binary
+[ -d "$ROOT" ] || ROOT=.
+
+# --- GRUB (UEFI) menu entry titles + theme ----------------------------------
+find "$ROOT" -type f -name 'grub.cfg' ! -path '*/chroot/*' 2>/dev/null \
+| while IFS= read -r g; do
+  # De-Debian the visible menu titles (trademark + brand consistency). The
+  # product name only appears in the quoted title text of menuentry/submenu.
+  sed -i \
+    -e 's#Debian GNU/Linux#Vacti OS#g' \
+    -e 's#Debian Live#Vacti OS live#g' \
+    "$g" 2>/dev/null || true
+  # Point at the brand theme (idempotent). Inert on a serial/text terminal;
+  # renders on a graphical gfxterm boot.
+  grep -q 'themes/vacti/theme.txt' "$g" 2>/dev/null \
+    || printf 'set theme=/boot/grub/themes/vacti/theme.txt\n' >> "$g"
+  echo "[0410-grub-brand] branded grub cfg: $g"
+done
+
+# --- isolinux / syslinux (BIOS) menu labels ---------------------------------
+find "$ROOT" -type f -path '*isolinux*' -name '*.cfg' ! -path '*/chroot/*' 2>/dev/null \
+| while IFS= read -r cfg; do
+  sed -i -e 's#Debian GNU/Linux#Vacti OS#g' "$cfg" 2>/dev/null || true
+  echo "[0410-grub-brand] branded isolinux cfg: $cfg"
+done
+
+exit 0

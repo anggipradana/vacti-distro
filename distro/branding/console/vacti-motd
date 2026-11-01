@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # vacti-motd - render the dynamic Vacti OS message-of-the-day to stdout.
 #
-# Installed to /usr/local/sbin/vacti-motd and run at boot by vacti-motd.service,
-# which writes the result to /etc/motd; pam_motd then prints it on every console
-# and SSH login (Debian pam_motd uses 'noupdate', so /etc/motd is the banner).
+# Installed by apply-branding.sh BOTH as /etc/update-motd.d/00-vacti (Debian's
+# native dynamic-MOTD hook: pam_motd regenerates /run/motd.dynamic from the
+# executable fragments in /etc/update-motd.d on every console and SSH login) and
+# as /usr/local/sbin/vacti-motd (a manual-run helper). The stock Debian fragments
+# (e.g. 10-uname) are chmod -x'd and /etc/motd is emptied by apply-branding.sh, so
+# the banner is PURELY vacti with no mixed Debian kernel line.
 #
 # Output is 16-colour ANSI + the U+2580/2584/2588 half-block glyphs that exist in
 # the Linux VT font and every UTF-8 terminal, so it renders the same on a bare
@@ -31,9 +34,8 @@ else
   printf '  %svacti%s\n' "$C_CY" "$C_RST"
 fi
 
-# 2. tagline + capability line (full-platform scope, not pentest-only)
-printf '\n  %sThe complete offensive security platform%s\n' "$C_DIM" "$C_RST"
-printf '  %sVA  -  AI Pentest  -  Bug Bounty  -  CTF  -  Threat Intel%s\n' "$C_CY" "$C_RST"
+# 2. tagline (brand three-pillar line; hyphen separators, no em-dash)
+printf '\n  %sVulnerability Assessment  -  AI Pentest  -  Threat Intelligence%s\n' "$C_CY" "$C_RST"
 
 # 3. host + enrolment status (the dynamic part)
 host="$(hostname -s 2>/dev/null || echo vacti)"

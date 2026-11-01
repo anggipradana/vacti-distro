@@ -33,6 +33,19 @@ XLOG="/var/log/vacti-activate.xorg.log"
 
 log() { echo "[vacti-activate] $*"; }
 
+# --- brand identity (TG 7215-7219): shield + wordmark lockup, three-pillar
+# tagline and navy GTK palette, sourced from the shared token file when present
+# so the activation screen matches GRUB / Plymouth / MOTD / fastfetch. Falls
+# back to inline defaults on an image that predates the token file. Hyphen
+# separators only (no em-dash/en-dash).
+[[ -r /etc/vacti/brand.env ]] && . /etc/vacti/brand.env 2>/dev/null || true
+BRAND_IMG="${VACTI_BRAND_LOCKUP:-/usr/share/vacti/branding/logo/png/vacti-lockup-stacked-light.png}"
+BRAND_ICON="${VACTI_BRAND_ICON:-/usr/share/pixmaps/vacti.svg}"
+BRAND_TAGLINE="${VACTI_BRAND_TAGLINE:-Vulnerability Assessment  -  AI Pentest  -  Threat Intelligence}"
+[[ -r "$BRAND_IMG" ]] || BRAND_IMG="$BRAND_ICON"
+# Dark GTK theme so yad/zenity render on brand navy, not the default light.
+export GTK_THEME="${VACTI_BRAND_GTK_THEME:-Adwaita:dark}"
+
 # Marker for the boot smoke test + operator console: the activation kiosk is the
 # boot destination (not a bare login). Harmless in production.
 echo "VACTI_ACTIVATE_KIOSK=start" > /dev/console 2>/dev/null || true
@@ -85,7 +98,7 @@ pick_dialog() {
 
 msg() { # title text
   case "$DIALOG" in
-    yad)    yad --title="$1" --text="$2" --button=OK:0 --width=460 2>/dev/null || true ;;
+    yad)    yad --title="$1" --image="$BRAND_IMG" --image-on-top --window-icon="$BRAND_ICON" --text="$2" --button=OK:0 --width=460 2>/dev/null || true ;;
     zenity) zenity --info --title="$1" --text="$2" 2>/dev/null || true ;;
     *)      log "$1: $2" ;;
   esac
@@ -94,8 +107,8 @@ msg() { # title text
 ask_two() { # url_var token_var -> echoes "URL\nTOKEN"
   case "$DIALOG" in
     yad)
-      yad --title="vacti activation" --form --width=520 \
-        --text="Enter the control-plane URL and your enrollment token (license)." \
+      yad --title="Vacti OS activation" --image="$BRAND_IMG" --image-on-top --window-icon="$BRAND_ICON" --form --width=520 \
+        --text="${BRAND_TAGLINE}\n\nEnter the control-plane URL and your enrollment token (license)." \
         --field="Control-plane URL":TEXT "" \
         --field="Enrollment token":H "" 2>/dev/null
       ;;

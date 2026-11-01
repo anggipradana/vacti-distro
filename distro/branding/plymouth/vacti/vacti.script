@@ -45,6 +45,14 @@ fun progress_callback(duration, progress) {
 }
 Plymouth.SetBootProgressFunction(progress_callback);
 
+// --- persistent boot status line ("Starting Vacti OS ..." under the bar) ------
+// Drawn once at init so the splash reads the same from the first frame; the
+// password/message sprite below sits lower and overlays only during an unlock.
+status.image = Image.Text("Starting Vacti OS ...", 0.62, 0.69, 0.80);
+status.sprite = Sprite(status.image);
+status.sprite.SetPosition(screen_w / 2 - status.image.GetWidth() / 2,
+                          box.y + screen_h / 22, 2);
+
 // --- status / password messages ----------------------------------------------
 message.sprite = Sprite();
 message.y = box.y + screen_h / 18;

@@ -22,6 +22,19 @@ terminal-font: "Unifont Regular 16"
   icon_height = 0
 }
 
++ progress_bar {
+  id = "__timeout__"
+  top = 85%
+  left = 25%
+  width = 50%
+  height = 14
+  fg_color = "#2563EB"
+  bg_color = "#101B30"
+  border_color = "#20406E"
+  text_color = "#9FB0C6"
+  text = "Booting in @TIMEOUT_NOTIFICATION_SHORT@"
+}
+
 + label {
   top = 90%
   left = 0
@@ -29,18 +42,5 @@ terminal-font: "Unifont Regular 16"
   align = "center"
   color = "#6E829E"
   font = "Unifont Regular 16"
-  text = "Vacti OS  -  the complete offensive security platform"
-}
-
-+ progress_bar {
-  id = "__timeout__"
-  top = 85%
-  left = 25%
-  width = 50%
-  height = 14
-  fg_color = "#1E66E3"
-  bg_color = "#101B30"
-  border_color = "#20406E"
-  text_color = "#9FB0C6"
-  text = "@TIMEOUT_NOTIFICATION_MIDDLE@"
+  text = "Vacti OS  -  trixie-based pentest appliance"
 }

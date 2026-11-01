@@ -38,16 +38,28 @@ if [[ -f "${SRC}/logo/svg/vacti-icon.svg" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. dynamic console MOTD (generator + boot service) + static populate
+# 3. dynamic console MOTD via Debian's native update-motd.d hook
 # ---------------------------------------------------------------------------
+# pam_motd regenerates /run/motd.dynamic from the EXECUTABLE fragments in
+# /etc/update-motd.d on every console + SSH login, so the host/IP/enrollment
+# banner is always current with no boot service. Install the generator as
+# 00-vacti (first fragment), chmod -x the stock Debian fragments (10-uname etc.)
+# and empty /etc/motd so the banner is PURELY vacti - no mixed Debian line.
 if [[ -f "${SRC}/console/vacti-motd" ]]; then
   install -D -m0755 "${SRC}/console/vacti-motd" /usr/local/sbin/vacti-motd
-  [[ -f "${SRC}/console/vacti-motd.service" ]] && install -D -m0644 "${SRC}/console/vacti-motd.service" /etc/systemd/system/vacti-motd.service
-  systemctl enable vacti-motd.service 2>/dev/null || true
-  # Populate /etc/motd now so the first login already shows the brand banner
-  # (host/IP/enrollment fill in once the box boots and the service re-runs).
-  /usr/local/sbin/vacti-motd > /etc/motd 2>/dev/null || true
-  log "dynamic MOTD installed (vacti-motd + service)"
+  install -D -m0755 "${SRC}/console/vacti-motd" /etc/update-motd.d/00-vacti
+  if [[ -d /etc/update-motd.d ]]; then
+    for f in /etc/update-motd.d/*; do
+      [[ -f "$f" ]] || continue
+      [[ "$(basename "$f")" == "00-vacti" ]] && continue
+      chmod -x "$f" 2>/dev/null || true
+    done
+  fi
+  : > /etc/motd 2>/dev/null || true
+  # Retire the superseded oneshot-service approach if a previous build wired it.
+  systemctl disable vacti-motd.service 2>/dev/null || true
+  rm -f /etc/systemd/system/vacti-motd.service 2>/dev/null || true
+  log "dynamic MOTD installed via update-motd.d/00-vacti (stock fragments disabled)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -115,6 +127,11 @@ if [[ -f "${SRC}/grub/splash.png" ]]; then
       fi
     }
     set_grub GRUB_THEME "/boot/grub/themes/vacti/theme.txt"
+    # Menu entries read "Vacti OS ..." + "Advanced options for Vacti OS" (GRUB
+    # builds them from GRUB_DISTRIBUTOR), and the brand countdown shows "Booting
+    # in 3s" to match the boot-menu mockup. Quote the distributor (it has a space).
+    set_grub GRUB_DISTRIBUTOR '"Vacti OS"'
+    set_grub GRUB_TIMEOUT "3"
     grep -q '^GRUB_GFXMODE=' /etc/default/grub 2>/dev/null || echo 'GRUB_GFXMODE=auto' >> /etc/default/grub
     grep -q '^GRUB_TIMEOUT_STYLE=' /etc/default/grub 2>/dev/null || echo 'GRUB_TIMEOUT_STYLE=menu' >> /etc/default/grub
   fi
