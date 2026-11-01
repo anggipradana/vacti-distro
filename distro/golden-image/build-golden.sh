@@ -45,6 +45,32 @@ command -v qemu-img       >/dev/null 2>&1 || die "qemu-img not found (apt-get in
 
 mkdir -p "$WORK" "$CACHE" "$OUT"
 
+# --- 0. preflight: the vacti private apt repo must actually serve apt metadata -
+# WHY: the heavy virt-customize provisioning (below) runs an in-guest `apt-get
+# update` against ${VACTI_APT_URL}/apt. If that host is wrong or decommissioned
+# (e.g. the control plane moved and the VACTI_APT_URL repo variable was left
+# stale), the endpoint can answer every path with a 200 HTML placeholder page.
+# apt then downloads that HTML as the repo's Release/Release.gpg, gpgv reports
+# "got 'NODATA'", and the build dies minutes deep inside the libguestfs appliance
+# with an opaque "OpenPGP signature verification failed" error. Fail FAST and
+# LOUD right here instead, naming the exact variable to fix, so a host migration
+# can never again burn a full CI run on a cryptic in-guest failure. This uses the
+# SAME HTTP Basic transport apt uses (login vacti, password = producer token).
+APT_PREFLIGHT_URL="${VACTI_APT_URL%/}/apt/InRelease"
+log "preflight: verifying the vacti apt repo serves real metadata (${APT_PREFLIGHT_URL})"
+PF_TMP="$(mktemp)"
+PF_CODE="$(curl -sS -m 30 -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" \
+  -o "$PF_TMP" -w '%{http_code}' "$APT_PREFLIGHT_URL" 2>/dev/null || echo 000)"
+PF_FIRST="$(head -c 1 "$PF_TMP" 2>/dev/null || true)"
+rm -f "$PF_TMP"
+if [[ "$PF_CODE" != "200" ]]; then
+  die "vacti apt repo preflight FAILED: ${APT_PREFLIGHT_URL} returned HTTP ${PF_CODE} (expected 200). Fix the VACTI_APT_URL repo variable (did the control plane host move?) and/or the VACTI_APT_PRODUCER_TOKEN secret before rebuilding."
+fi
+if [[ "$PF_FIRST" == "<" ]]; then
+  die "vacti apt repo preflight FAILED: ${APT_PREFLIGHT_URL} returned an HTML page, not apt metadata. VACTI_APT_URL (${VACTI_APT_URL}) is pointing at a decommissioned or wrong host; update the repo variable to the live apt producer."
+fi
+log "preflight OK: the vacti apt repo is serving metadata"
+
 # --- 1. fetch + verify the official Debian cloud image ------------------------
 BASE_IMG="${CACHE}/${DEBIAN_CLOUD_IMAGE}"
 SUMS="${CACHE}/${DEBIAN_CLOUD_SHA512SUMS}"
