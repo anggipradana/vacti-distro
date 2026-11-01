@@ -407,10 +407,12 @@ jobs:
         # as UNSCANNED. This mirrors the fan-out job, whose identical guestmount
         # scan passes with exactly this setup. extra-packages are the non-base
         # tools the scan needs: bsdextrautils (raw.gz path), squashfs-tools
-        # (unsquashfs for the ISO), fuse3 (guestmount).
+        # (unsquashfs for the ISO rootfs), xorriso (extract the ISO tree; the scan
+        # needs bsdtar OR xorriso, and the iso job already uses xorriso), fuse3
+        # (guestmount).
         uses: ./.github/actions/libguestfs-runner
         with:
-          extra-packages: bsdextrautils squashfs-tools fuse3
+          extra-packages: bsdextrautils squashfs-tools xorriso fuse3
       - name: Collect all artifacts
         uses: actions/download-artifact@v4
         with:
