@@ -1,0 +1,157 @@
+# Publish vacti-distro images to Hugging Face Datasets.
+#
+# WHY: GitHub Releases cap each asset at 2GiB, which blocks the OVA / ISO /
+# qcow2 images. Hugging Face Datasets allow up to 50GiB per LFS file, free,
+# with stable public resolve URLs. This workflow is the permanent home for the
+# large images. It runs AFTER a successful image build and uploads the large
+# forms to the dataset anggipradana/vacti-distro-images.
+#
+# DIVISION OF LABOUR (the ">2GiB skip"): build-images / build-images-arm64
+# still attach the SMALL assets (.deb, fingerprint JSON, MANIFEST.sha256 - all
+# well under 2GiB) to the PRIVATE GitHub Release, which stays their canonical
+# home next to the apt repo. The large OVA/ISO/qcow2 images (> 2GiB) are NOT
+# attached to the Release - they are routed here to HF instead. This workflow
+# touches neither build-images.yml nor build-images-arm64.yml.
+#
+# SECRET REQUIRED: this workflow reads HF_PUBLISH_TOKEN from the repo secrets.
+# The operator must add it (the hf_... write token used for the dataset).
+name: publish-images-hf
+
+on:
+  workflow_run:
+    workflows: ["build-images", "build-images-arm64"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "build-images / build-images-arm64 run id to publish"
+        required: true
+      version:
+        description: "Release version X.Y.Z, or 'auto' to derive from artifact filenames"
+        required: false
+        default: "auto"
+      arch:
+        description: "Which arch set the run produced"
+        required: false
+        type: choice
+        default: "both"
+        options:
+          - "both"
+          - "amd64"
+          - "arm64"
+
+# Least privilege: read the triggering run's artifacts, nothing else. The HF
+# upload authenticates with HF_PUBLISH_TOKEN, not the GitHub token.
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: publish-images-hf-${{ github.event.workflow_run.id || github.event.inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Never publish from a red build. workflow_dispatch is always allowed
+    # (manual re-publish of a known-good run).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install huggingface_hub CLI (minor-pinned)
+        run: pip install "huggingface_hub[cli]~=0.35.0"
+
+      - name: Resolve run id, version, and arch
+        id: resolve
+        env:
+          # workflow_run context (empty on a manual dispatch).
+          WR_ID: ${{ github.event.workflow_run.id }}
+          WR_NAME: ${{ github.event.workflow_run.name }}
+          WR_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          # workflow_dispatch inputs (empty on an automatic run).
+          IN_RUN_ID: ${{ github.event.inputs.run_id }}
+          IN_VERSION: ${{ github.event.inputs.version }}
+          IN_ARCH: ${{ github.event.inputs.arch }}
+        run: |
+          set -euo pipefail
+
+          RUN_ID="${IN_RUN_ID:-$WR_ID}"
+          [ -n "$RUN_ID" ] || { echo "no run id resolved"; exit 1; }
+
+          # Arch: manual input wins; otherwise derive from the workflow name.
+          if [ -n "${IN_ARCH:-}" ]; then
+            ARCH="$IN_ARCH"
+          elif [ "$WR_NAME" = "build-images-arm64" ]; then
+            ARCH="arm64"
+          elif [ "$WR_NAME" = "build-images" ]; then
+            ARCH="amd64"
+          else
+            ARCH="both"
+          fi
+
+          # Version: manual input wins; otherwise try the tag the run was built
+          # from (images-v* / engine-v* / v*). If that is not a clean semver,
+          # fall back to 'auto' (the script derives it from artifact filenames).
+          VERSION="${IN_VERSION:-}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "auto" ]; then
+            cand="${WR_BRANCH#images-v}"
+            cand="${cand#engine-v}"
+            cand="${cand#v}"
+            if echo "$cand" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              VERSION="$cand"
+            else
+              VERSION="auto"
+            fi
+          fi
+
+          echo "run_id=$RUN_ID"   >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH"       >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "[resolve] run_id=$RUN_ID arch=$ARCH version=$VERSION"
+
+      - name: Detect image artifacts on the run
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.resolve.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          # A bare tag push builds ONLY the Docker image (no VM/ISO matrix), so
+          # such a run has no form-* artifacts. Skip cleanly instead of failing.
+          names="$(gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
+            --jq '.artifacts[].name' 2>/dev/null || true)"
+          echo "[detect] artifacts:"; echo "${names:-<none>}"
+          if echo "$names" | grep -Eq '^form-'; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "[detect] no form-* image artifacts; nothing to publish to HF"
+          fi
+
+      - name: Publish images to Hugging Face
+        if: steps.detect.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "HF_PUBLISH_TOKEN secret is not set on this repo; cannot publish." >&2
+            echo "Add it in Settings > Secrets and variables > Actions (the hf_... write token)." >&2
+            exit 1
+          fi
+          chmod +x scripts/publish-images-to-hf.sh
+          scripts/publish-images-to-hf.sh \
+            --run-id "${{ steps.resolve.outputs.run_id }}" \
+            --version "${{ steps.resolve.outputs.version }}" \
+            --arch "${{ steps.resolve.outputs.arch }}"
