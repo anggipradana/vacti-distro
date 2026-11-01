@@ -18,7 +18,14 @@ cleanup() {
   for m in "${TMPROOT}"/mnt.*; do
     [[ -d "$m" ]] && { fusermount -u "$m" 2>/dev/null || guestunmount "$m" 2>/dev/null || umount "$m" 2>/dev/null || true; }
   done
-  rm -rf "$TMPROOT"
+  # xorriso -osirrox extracts an ISO tree with its original READ-ONLY perms (grub
+  # modules, the squashfs, udebs), so a non-root caller (e.g. the publish job on a
+  # GH-hosted runner, as opposed to the root-in-container iso job) cannot rm it and
+  # `rm -rf` would exit non-zero. Under `set -e` that teardown failure would fail
+  # the whole scan EVEN ON A PASS verdict (the verdict is already decided above).
+  # Restore write perms first, and never let cleanup change the exit status.
+  chmod -R u+w "$TMPROOT" 2>/dev/null || true
+  rm -rf "$TMPROOT" 2>/dev/null || true
 }
 trap cleanup EXIT
 
