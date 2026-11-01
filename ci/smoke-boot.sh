@@ -31,7 +31,43 @@ set -euo pipefail
 
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"
 SMOKE_MEM_MB="${SMOKE_MEM_MB:-2048}"
-QEMU="${QEMU:-qemu-system-x86_64}"
+
+# Architecture of the images under test. Defaults to the host arch (each CI smoke
+# leg runs on a native-arch runner), overridable with SMOKE_ARCH. amd64 keeps the
+# TCG -cpu qemu64 x86 boot (no KVM, works on any runner). arm64 uses
+# qemu-system-aarch64 -machine virt and is UEFI-MANDATORY (AAVMF firmware required
+# for every boot, disk and ISO; there is no BIOS leg on arm64).
+SMOKE_ARCH="${SMOKE_ARCH:-$(uname -m)}"
+case "$SMOKE_ARCH" in
+  aarch64|arm64) SMOKE_ARCH="arm64" ;;
+  *)             SMOKE_ARCH="amd64" ;;
+esac
+if [ "$SMOKE_ARCH" = "arm64" ]; then
+  QEMU="${QEMU:-qemu-system-aarch64}"
+  QEMU_CPU="${QEMU_CPU:-cortex-a72}"
+  MACHINE_ARGS=( -machine virt -cpu "$QEMU_CPU" )
+else
+  QEMU="${QEMU:-qemu-system-x86_64}"
+  QEMU_CPU="${QEMU_CPU:-qemu64}"
+  MACHINE_ARGS=( -cpu "$QEMU_CPU" )
+fi
+
+# Locate a UEFI firmware blob for the current arch (AAVMF for arm64, OVMF for
+# amd64). Echoes the path, or nothing if none is installed.
+find_uefi_fw() {
+  local c
+  if [ "$SMOKE_ARCH" = "arm64" ]; then
+    for c in /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+             /usr/share/qemu/edk2-aarch64-code.fd; do
+      [ -f "$c" ] && { echo "$c"; return 0; }
+    done
+  else
+    for c in /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd /usr/share/qemu/OVMF.fd; do
+      [ -f "$c" ] && { echo "$c"; return 0; }
+    done
+  fi
+  return 0
+}
 
 FAIL=0
 TMPROOT="$(mktemp -d)"
@@ -40,7 +76,8 @@ say()  { echo "[smoke] $*"; }
 ok()   { echo "[smoke][ok]   $*"; }
 bad()  { echo "[smoke][FAIL] $*" >&2; FAIL=1; }
 
-command -v "$QEMU"  >/dev/null 2>&1 || { echo "[smoke] $QEMU required (apt-get install qemu-system-x86)" >&2; exit 2; }
+say "arch=${SMOKE_ARCH} qemu=${QEMU}"
+command -v "$QEMU"  >/dev/null 2>&1 || { echo "[smoke] $QEMU required (amd64: qemu-system-x86 ovmf; arm64: qemu-system-arm qemu-efi-aarch64)" >&2; exit 2; }
 command -v qemu-img >/dev/null 2>&1 || { echo "[smoke] qemu-img required" >&2; exit 2; }
 
 # --- build the throwaway NoCloud health-probe seed (once) --------------------
@@ -168,9 +205,16 @@ smoke_disk() {
   if ! to_qcow2 "$art" "$disk"; then bad "${base}: could not prepare a bootable disk"; return; fi
   local seed; seed="$(build_seed)"
   say "${base}: booting in qemu (TCG, timeout ${BOOT_TIMEOUT}s)"
-  # qemu64 CPU => no host virt needed. virtio disk/net to match genericcloud.
+  # TCG CPU => no host virt needed. virtio disk/net to match genericcloud. arm64
+  # is UEFI-mandatory, so attach AAVMF firmware even for this disk boot.
+  local fwargs=()
+  if [ "$SMOKE_ARCH" = "arm64" ]; then
+    local fw; fw="$(find_uefi_fw)"
+    [[ -n "$fw" ]] || { bad "${base}: no AAVMF UEFI firmware found (install qemu-efi-aarch64); arm64 disk boot requires it"; return; }
+    fwargs=( -bios "$fw" )
+  fi
   timeout "${BOOT_TIMEOUT}" "$QEMU" \
-      -cpu qemu64 -smp 2 -m "${SMOKE_MEM_MB}" \
+      "${MACHINE_ARGS[@]}" "${fwargs[@]}" -smp 2 -m "${SMOKE_MEM_MB}" \
       -drive file="${disk}",format=qcow2,if=virtio,snapshot=on \
       -drive file="${seed}",format=raw,if=virtio,readonly=on \
       -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
@@ -226,22 +270,24 @@ smoke_disk() {
 # --- ISO smoke: boot-only, assert a login/live prompt appears ----------------
 smoke_iso() {
   local art="$1" fw="${2:-bios}" base; base="$(basename "$art")"
+  # arm64 ISOs are UEFI-only; there is no BIOS leg.
+  [[ "$SMOKE_ARCH" == "arm64" ]] && fw="uefi"
   say "iso smoke (${fw}): ${base}"
   local log="${TMPROOT}/iso-${fw}.log"; : > "$log"
-  local ovmf=""
+  local uefi=""
   if [[ "$fw" == "uefi" ]]; then
-    for c in /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd /usr/share/qemu/OVMF.fd; do
-      [[ -f "$c" ]] && { ovmf="$c"; break; }
-    done
-    [[ -n "$ovmf" ]] || { say "${base}: no OVMF firmware found; skipping UEFI leg"; return; }
+    uefi="$(find_uefi_fw)"
+    [[ -n "$uefi" ]] || { say "${base}: no UEFI firmware found; skipping UEFI leg"; return; }
   fi
   # commas in `user,id=n0` are qemu option syntax, not array separators.
   # shellcheck disable=SC2054
-  local args=( -cpu qemu64 -smp 2 -m "${SMOKE_MEM_MB}"
-      -cdrom "$art" -boot d
+  local args=( "${MACHINE_ARGS[@]}" -smp 2 -m "${SMOKE_MEM_MB}"
+      -cdrom "$art"
       -netdev user,id=n0 -device virtio-net-pci,netdev=n0
       -nographic -serial "file:${log}" -monitor none -display none -no-reboot )
-  [[ -n "$ovmf" ]] && args=( -bios "$ovmf" "${args[@]}" )
+  # BIOS CD-boot ordering (-boot d) is x86-only; arm64/UEFI boots via firmware entries.
+  [[ "$SMOKE_ARCH" == "amd64" ]] && args+=( -boot d )
+  [[ -n "$uefi" ]] && args=( -bios "$uefi" "${args[@]}" )
   # ISO boot never powers itself off; rely on a bounded watch for a prompt
   # marker. TCG boots a live-build squashfs slowly, so inherit the generous disk
   # budget unless ISO_WATCH overrides; the loop still breaks the instant a marker
@@ -275,12 +321,19 @@ smoke_iso_gate() {
   local art="$1" base; base="$(basename "$art")"
   say "iso GATE smoke (gui, pre-login activation): ${base}"
   local log="${TMPROOT}/iso-gate.log"; : > "$log"
+  local uefi=""
+  if [[ "$SMOKE_ARCH" == "arm64" ]]; then
+    uefi="$(find_uefi_fw)"
+    [[ -n "$uefi" ]] || { say "${base}: no UEFI firmware found; skipping GUI gate leg"; return; }
+  fi
   # commas in `user,id=n0` are qemu option syntax, not array separators.
   # shellcheck disable=SC2054
-  local args=( -cpu qemu64 -smp 2 -m "${SMOKE_MEM_MB}"
-      -cdrom "$art" -boot d -vga none
+  local args=( "${MACHINE_ARGS[@]}" -smp 2 -m "${SMOKE_MEM_MB}"
+      -cdrom "$art" -vga none
       -netdev user,id=n0 -device virtio-net-pci,netdev=n0
       -nographic -serial "file:${log}" -monitor none -display none -no-reboot )
+  [[ "$SMOKE_ARCH" == "amd64" ]] && args+=( -boot d )
+  [[ -n "$uefi" ]] && args=( -bios "$uefi" "${args[@]}" )
   local watch="${ISO_WATCH:-${BOOT_TIMEOUT}}"
   ( timeout "${watch}" "$QEMU" "${args[@]}" < /dev/null > /dev/null 2>&1 || true ) &
   local qpid=$!
@@ -314,16 +367,32 @@ for arg in "$@"; do
     TARGETS+=("$arg")
   fi
 done
-[[ "${#TARGETS[@]}" -ge 1 ]] || { echo "[smoke] no bootable artifacts found in: $*" >&2; exit 2; }
+
+# Boot only THIS leg's arch. arm64 artifacts carry a "-arm64" tag in the filename;
+# amd64 artifacts (historical, untagged) carry neither "-arm64" nor "-aarch64". A
+# shared download dir can hold both arches, so filter by filename to the current
+# SMOKE_ARCH and never cross-emulate (qemu-system-x86_64 cannot boot an arm64 image).
+declare -a ARCH_TARGETS=()
+for t in "${TARGETS[@]}"; do
+  bn="$(basename "$t")"
+  if [[ "$SMOKE_ARCH" == "arm64" ]]; then
+    case "$bn" in *-arm64*|*-aarch64*) ARCH_TARGETS+=("$t") ;; esac
+  else
+    case "$bn" in *-arm64*|*-aarch64*) : ;; *) ARCH_TARGETS+=("$t") ;; esac
+  fi
+done
+TARGETS=("${ARCH_TARGETS[@]}")
+[[ "${#TARGETS[@]}" -ge 1 ]] || { echo "[smoke] no ${SMOKE_ARCH} bootable artifacts found in: $*" >&2; exit 2; }
 
 for t in "${TARGETS[@]}"; do
   case "$t" in
     *.iso)
       # The GUI ISO additionally runs the pre-login activation GATE leg (kiosk +
-      # fail-open); the headless ISO has no GUI kiosk, so it keeps bios+uefi boot.
+      # fail-open). The headless ISO is boot-asserted. arm64 is UEFI-only (no BIOS
+      # leg); amd64 keeps both bios + uefi legs.
       case "$(basename "$t")" in
         *gui*) smoke_iso_gate "$t"; smoke_iso "$t" uefi ;;
-        *)     smoke_iso "$t" bios; smoke_iso "$t" uefi ;;
+        *)     if [[ "$SMOKE_ARCH" == "arm64" ]]; then smoke_iso "$t" uefi; else smoke_iso "$t" bios; smoke_iso "$t" uefi; fi ;;
       esac
       ;;
     *.qcow2|*.ova|*.raw|*.raw.gz|*.img) smoke_disk "$t" ;;
