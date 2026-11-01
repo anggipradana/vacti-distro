@@ -69,8 +69,19 @@ jobs:
     needs: lint
     runs-on: ubuntu-24.04-arm
     steps:
-      - name: Free disk space
-        uses: ./.github/actions/free-disk-space
+      - name: Free disk space (reclaim >30GB on the runner)
+        run: |
+          echo "[disk] before:"; df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
       - name: Install libguestfs + qemu toolchain (+ runner workarounds)
         uses: ./.github/actions/libguestfs-runner
@@ -110,8 +121,19 @@ jobs:
         # AMD64 form; arm64's four TG-7175 deliverables are the two OVAs + two ISOs.)
         form: [vmware-ova, vbox-ova]
     steps:
-      - name: Free disk space
-        uses: ./.github/actions/free-disk-space
+      - name: Free disk space (reclaim >30GB on the runner)
+        run: |
+          echo "[disk] before:"; df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
       - name: Install toolchain (+ runner workarounds)
         uses: ./.github/actions/libguestfs-runner
@@ -231,8 +253,19 @@ jobs:
     # artifacts (the mandatory gate is the no-secret scan + OVF structure check).
     continue-on-error: true
     steps:
-      - name: Free disk space
-        uses: ./.github/actions/free-disk-space
+      - name: Free disk space (reclaim >30GB on the runner)
+        run: |
+          echo "[disk] before:"; df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
       - name: Install qemu (aarch64) + AAVMF firmware + tools
         run: |
@@ -263,8 +296,19 @@ jobs:
     if: ${{ always() && needs.fanout.result == 'success' && needs.iso.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Free disk space
-        uses: ./.github/actions/free-disk-space
+      - name: Free disk space (reclaim >30GB on the runner)
+        run: |
+          echo "[disk] before:"; df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
       - name: Collect ARM64 artifacts
         uses: actions/download-artifact@v4

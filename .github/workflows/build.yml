@@ -360,6 +360,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: out
+          pattern: "{form-*,golden-qcow2}"
       - name: Smoke-boot every built image (qemu TCG, real boot + health probe)
         # Boots each disk image (cloud qcow2 + both OVAs) in qemu with a throwaway
         # NoCloud health-probe seed and asserts a healthy multi-user boot with the
