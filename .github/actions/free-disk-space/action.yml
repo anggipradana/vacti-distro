@@ -1,0 +1,24 @@
+name: "free disk space"
+description: >
+  Reclaim >30GB on a hosted runner by dropping pre-installed toolchains the image
+  build never uses, plus the Docker image cache and the apt cache. Hosted runners
+  ship only ~14GB free, which the golden qcow2 / converted forms / downloaded base
+  image exhaust. Host-side variant (run before checkout); the ISO container job
+  does the equivalent reclaim from inside its container against bound /host trees.
+runs:
+  using: "composite"
+  steps:
+    - name: Free disk space (reclaim >30GB on the runner)
+      shell: bash
+      run: |
+        echo "[disk] before:"; df -h /
+        sudo rm -rf \
+          /usr/local/lib/android \
+          /usr/share/dotnet \
+          /opt/ghc /usr/local/.ghcup \
+          /opt/hostedtoolcache \
+          /usr/local/share/boost \
+          /usr/share/swift || true
+        sudo docker image prune --all --force || true
+        sudo apt-get clean || true
+        echo "[disk] after:"; df -h /
