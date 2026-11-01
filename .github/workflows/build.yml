@@ -31,6 +31,14 @@ on:
           - "all"            # full matrix: golden + cloud/vmware-ova/vbox-ova + iso(headless,gui)
   repository_dispatch:
     types: [engine-deb-published]
+  # Tag push: builds ONLY the universal Docker image (the docker-publish-ghcr job
+  # gates itself on this event). The heavy VM/ISO matrix skips on a bare tag push
+  # via the event guard on the lint job, which the rest of the matrix depends on.
+  push:
+    tags:
+      - "images-v*"
+      - "engine-v*"
+      - "v*"
 
 permissions:
   contents: write   # create/attach PRIVATE release assets on this private repo
@@ -57,6 +65,9 @@ env:
 jobs:
   # --- light gate: shellcheck + yaml/xml sanity (fast, no image build) --------
   lint:
+    # A bare tag push builds only the Docker image; skip the whole VM/ISO matrix
+    # (golden, fanout, iso, smoke, publish all chain off this job) on that event.
+    if: ${{ github.event_name != 'push' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -448,3 +459,123 @@ jobs:
             release/*.ova
             release/*.iso
             release/MANIFEST.sha256
+
+  # --- universal multi-arch Docker image -> GHCR (TG 7182) --------------------
+  # The container form of the appliance: debian:trixie-slim + the pinned Kali apt
+  # source + the vacti-engine .deb from the private apt repo + the lean arsenal,
+  # reproducing the golden disk's capability in a container (ephemeral
+  # "docker run" pentest sessions, no VM/ISO). Published as a single multi-arch
+  # manifest list (linux/amd64 + linux/arm64) to GHCR. It is INDEPENDENT of the
+  # VM/ISO matrix above (it installs the engine from apt rather than guestmounting
+  # a disk), so it does not need the golden disk and runs in parallel.
+  #
+  # The "depend on the engine .deb being published" requirement is satisfied by
+  # the apt repo: an engine-deb-published dispatch fires only AFTER the upstream
+  # engine release-deb pipeline has published the .deb, and the pre-build resolve
+  # step below confirms the engine version is present for both arches before the
+  # buildx legs pull it. No baked secret: the apt producer token is a BuildKit
+  # secret mount, and the enrollment token is supplied per-run at "docker run".
+  docker-publish-ghcr:
+    # workflow_dispatch and the engine-deb-published dispatch always build; a bare
+    # tag push builds ONLY this job (the VM/ISO matrix is skipped at lint).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch' || github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io/anggipradana/vacti-distro
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image version + tags
+        id: ver
+        run: |
+          V="${VACTI_ENGINE_REF}"
+          [ -z "$V" ] && V="${VACTI_RELEASE}"
+          [ -z "$V" ] && V="0.2.411"
+          V="${V#v}"
+          IMAGE="ghcr.io/anggipradana/vacti-distro"
+          {
+            echo "version=${V}"
+            echo "image=${IMAGE}"
+            echo "tags=${IMAGE}:latest,${IMAGE}:${V}"
+          } >> "$GITHUB_OUTPUT"
+          echo "[docker] image tags: ${IMAGE}:latest, ${IMAGE}:${V}"
+
+      - name: Pre-build resolve (confirm the engine version is in the apt repo for both arches)
+        # Soft gate: the flat vacti apt repo serves one index for all arches. This
+        # confirms the engine .deb is published (TG 7182 dependency) and reports
+        # which arches are resolvable before the buildx legs pull it. Non-blocking:
+        # the buildx apt install is the hard gate (it fails the build if the arch
+        # .deb is truly absent); this step just surfaces a clear early signal.
+        continue-on-error: true
+        env:
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+          ENGINE_VER: ${{ steps.ver.outputs.version }}
+        run: |
+          base="${VACTI_APT_URL:-https://repo.example.com}"
+          base="${base%/}/apt"
+          idx="$(curl -fsSL -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages" 2>/dev/null \
+                 || curl -fsSL -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages.gz" 2>/dev/null | gunzip -c 2>/dev/null \
+                 || true)"
+          if [ -z "$idx" ]; then
+            echo "[docker][warn] could not read the apt index (token/path); the buildx apt install remains the hard gate"
+            exit 0
+          fi
+          echo "[docker] vacti-engine entries matching ${ENGINE_VER} in the apt index:"
+          echo "$idx" | awk 'BEGIN{RS="";FS="\n"} /Package: vacti-engine/ {print}' \
+            | grep -E "Architecture:|Version:" | grep -E "${ENGINE_VER}|Architecture" || true
+          for a in amd64 arm64; do
+            if echo "$idx" | awk 'BEGIN{RS="";FS="\n"} /Package: vacti-engine/' | grep -q "Architecture: ${a}"; then
+              echo "[docker] OK: vacti-engine present for ${a}"
+            else
+              echo "[docker][warn] vacti-engine NOT found for ${a} in the apt index (buildx ${a} leg may fail)"
+            fi
+          done
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push multi-arch image (linux/amd64 + linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: distro/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false   # keep a clean 2-arch manifest list
+          tags: ${{ steps.ver.outputs.tags }}
+          build-args: |
+            VACTI_APT_URL=${{ env.VACTI_APT_URL }}
+            VACTI_ENGINE_PKG=vacti-engine
+            VACTI_ENGINE_REF=${{ steps.ver.outputs.version }}
+            VACTI_FULL_ARSENAL=${{ env.VACTI_FULL_ARSENAL }}
+          secrets: |
+            vacti_apt_token=${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (pull the published tag + assert the engine version)
+        # Non-blocking: pulls the just-pushed manifest (docker auto-selects the
+        # runner's amd64 child) and asserts the baked vacti-engine .deb version.
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.ver.outputs.image }}
+          ENGINE_VER: ${{ steps.ver.outputs.version }}
+        run: |
+          docker pull "${IMAGE}:${ENGINE_VER}"
+          got="$(docker run --rm --entrypoint dpkg-query "${IMAGE}:${ENGINE_VER}" \
+                   -W -f='${Version}' vacti-engine 2>/dev/null || true)"
+          echo "[smoke] baked vacti-engine version: ${got:-<unknown>} (expected to start with ${ENGINE_VER})"
+          case "$got" in
+            "${ENGINE_VER}"*) echo "[smoke] OK: version matches" ;;
+            *) echo "[smoke][warn] version did not match ${ENGINE_VER}" ;;
+          esac
+          echo "[smoke] asserting .claude methodology is ABSENT from the image"
+          docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
+            -c 'test ! -e /usr/lib/vacti-engine/.claude' \
+            && echo "[smoke] OK: no .claude baked" || echo "[smoke][warn] .claude present (IP-strip regression)"
