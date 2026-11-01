@@ -1,0 +1,5 @@
+{
+  // Prose docs wrap naturally; line-length (MD013) is not enforced.
+  // All other markdownlint rules stay on.
+  "MD013": false
+}
