@@ -14,11 +14,24 @@ set -euo pipefail
 FAIL=0
 TMPROOT="$(mktemp -d)"
 cleanup() {
+  # Preserve the scan's real exit status: this trap runs on EVERY exit (PASS or
+  # FAIL), and its own last command would otherwise BECOME the script's exit
+  # status - which is exactly the bug below.
+  local rc=$?
   # unmount anything we guestmounted, then remove temp
   for m in "${TMPROOT}"/mnt.*; do
     [[ -d "$m" ]] && { fusermount -u "$m" 2>/dev/null || guestunmount "$m" 2>/dev/null || umount "$m" 2>/dev/null || true; }
   done
-  rm -rf "$TMPROOT"
+  # xorriso -osirrox extracts ISO entries READ-ONLY (0444 files / 0555 dirs), so
+  # a plain `rm -rf "$TMPROOT"` hits "Permission denied" on the baked EFI/boot/
+  # firmware tree and returns non-zero - which, as the last command of this EXIT
+  # trap, flipped a clean RESULT: PASS into a gate FAIL (no secret involved).
+  # Make the temp tree writable first, and never let cleanup's own status change
+  # the gate: a genuine secret FAIL already set rc=1 via `exit 1` above and is
+  # returned unchanged here (fail-closed preserved).
+  chmod -R u+w "$TMPROOT" 2>/dev/null || true
+  rm -rf "$TMPROOT" 2>/dev/null || true
+  return "$rc"
 }
 trap cleanup EXIT
 
