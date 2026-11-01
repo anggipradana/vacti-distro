@@ -16,11 +16,20 @@ OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
 # subshell where a relative path would point at the (empty) temp dir and fail
 # with "Cannot open: No such file or directory".
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
-GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}-golden.qcow2}"
+GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-golden.qcow2}"
 TMPL="${HERE}/ovf-templates/virtualbox-2.2.ovf.tmpl"
 [[ -f "$GOLDEN" ]] || { echo "golden disk not found: $GOLDEN" >&2; exit 1; }
 
-NAME="vacti-engine-${VACTI_RELEASE}-virtualbox"
+# VirtualBox guest OS type, arch-keyed. The disk block-copies regardless of arch;
+# the descriptor advertises the guest so the host picks the right firmware/CPU on
+# import. An arm64 OVA imports on an arm64-host VirtualBox (7.1+ on Apple Silicon
+# / Linux arm64); the real-import check stays the dev-box VBoxManage lane.
+case "$DEBIAN_ARCH" in
+  arm64|aarch64) VBOX_OSTYPE="Debian_arm64" ;;
+  *)             VBOX_OSTYPE="Debian_64" ;;
+esac
+
+NAME="vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-virtualbox"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 VMDK="${NAME}-disk1.vmdk"
 
@@ -36,6 +45,7 @@ sed -e "s|@VMDK@|${VMDK}|g" \
     -e "s|@DISK_POPULATED@|${POP_BYTES}|g" \
     -e "s|@PRODUCT@|${VACTI_PRODUCT_PRETTY}|g" \
     -e "s|@VERSION@|${VACTI_RELEASE}|g" \
+    -e "s|@VBOX_OSTYPE@|${VBOX_OSTYPE}|g" \
     "$TMPL" > "${WORK}/${OVF}"
 
 echo "[vbox] manifest (.mf, SHA256)"

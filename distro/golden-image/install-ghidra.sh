@@ -48,8 +48,19 @@ warn() { echo "[ghidra][warn] $*" >&2; }
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Temurin tarball is x86_64-only; Ghidra itself is pure-Java (arch-agnostic).
+# Ghidra itself is pure-Java (arch-agnostic); the Temurin JDK is per-arch. This
+# runs native-arch (virt-customize in-guest on a native runner), so uname -m is
+# the target arch. amd64 keeps the x64 pin above; arm64 picks the aarch64 tarball
+# (both extract to the same jdk-21.0.12.1+1 dir, so JDK_DIR is unchanged). The
+# aarch64 SHA256 is the official Adoptium .sha256.txt sidecar for this release.
 ARCH="$(uname -m 2>/dev/null || echo unknown)"
+case "$ARCH" in
+  aarch64|arm64)
+    JDK_TARBALL="${VACTI_JDK_TARBALL:-OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.12.1_1.tar.gz}"
+    JDK_SHA256="${VACTI_JDK_SHA256:-23e37e026f12f3e706f18938ff611db3032d075b09d0879a25d06718c773e223}"
+    JDK_URL="${VACTI_JDK_URL:-https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/${JDK_TARBALL}}"
+    ;;
+esac
 
 need() { command -v "$1" >/dev/null 2>&1; }
 need curl  || { apt-get install -y --no-install-recommends curl  >/dev/null 2>&1 || warn "curl install failed"; }
@@ -61,8 +72,8 @@ verify() { echo "$1  $2" | sha256sum -c - >/dev/null 2>&1; }
 # --- 1. FULL Temurin 21 JDK (REA rejects a runtime-only JRE) -------------------
 if [ -x "${JDK_DIR}/bin/javac" ]; then
   log "full JDK present: ${JDK_DIR}"
-elif [ "$ARCH" != "x86_64" ]; then
-  warn "arch ${ARCH} != x86_64; the pinned Temurin x64 JDK tarball does not apply here (arm64 handled separately). Skipping JDK."
+elif [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "aarch64" ] && [ "$ARCH" != "arm64" ]; then
+  warn "arch ${ARCH} unsupported for the pinned Temurin JDK (only x86_64 + aarch64). Skipping JDK."
 elif need curl; then
   log "downloading Temurin 21 JDK -> /opt/${JDK_TARBALL}"
   if curl -fsSL --retry 4 --retry-delay 3 -m 600 -o "/opt/${JDK_TARBALL}" "$JDK_URL"; then
