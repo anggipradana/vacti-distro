@@ -112,13 +112,21 @@ echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "version is not X.
 # Sidecars (*.sha256, *.mf, MANIFEST.sha256) and the golden disk are skipped;
 # SHA256SUMS is generated fresh below.
 map_name() {
-  local base="$1" a="$2" out=""
+  local base="$1" a="$2" out="" fl="headless"
+  # Flavor tag read from the filename. The VM/cloud forms now ALWAYS carry a
+  # -headless/-gui tag (vacti-engine-<rel>[-arch]-<flavor>-<form>.*); default to
+  # headless so a re-publish of a pre-flavor run (headless-only) still maps
+  # cleanly. The ISO path carries its own -headless/-gui tag and is unaffected.
+  case "$base" in
+    *-gui-*|*-gui.*)           fl="gui" ;;
+    *-headless-*|*-headless.*) fl="headless" ;;
+  esac
   case "$base" in
     *-golden.qcow2)   return 1 ;;
-    *-cloud.qcow2)    out="vacti-distro-${VERSION}-${a}.qcow2" ;;
-    *.raw.gz)         out="vacti-distro-${VERSION}-${a}.raw.gz" ;;
-    *-vmware.ova)     out="vacti-distro-${VERSION}-${a}.vmware.ova" ;;
-    *-virtualbox.ova) out="vacti-distro-${VERSION}-${a}.vbox.ova" ;;
+    *-cloud.qcow2)    out="vacti-distro-${VERSION}-${a}-${fl}.qcow2" ;;
+    *.raw.gz)         out="vacti-distro-${VERSION}-${a}-${fl}.raw.gz" ;;
+    *-vmware.ova)     out="vacti-distro-${VERSION}-${a}-${fl}.vmware.ova" ;;
+    *-virtualbox.ova) out="vacti-distro-${VERSION}-${a}-${fl}.vbox.ova" ;;
     *-headless.iso)   out="vacti-distro-${VERSION}-${a}-headless.iso" ;;
     *-gui.iso)        out="vacti-distro-${VERSION}-${a}-gui.iso" ;;
     *) return 1 ;;

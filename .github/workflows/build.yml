@@ -27,8 +27,8 @@ on:
         type: choice
         default: "golden+cloud"
         options:
-          - "golden+cloud"   # cheap first run: lint -> golden -> cloud -> smoke -> publish
-          - "all"            # full matrix: golden + cloud/vmware-ova/vbox-ova + iso(headless,gui)
+          - "golden+cloud"   # cheap first run: lint -> golden(headless) -> cloud -> smoke -> publish
+          - "all"            # full matrix: golden(headless,gui) x cloud/vmware-ova/vbox-ova + iso(headless,gui)
   repository_dispatch:
     types: [engine-deb-published]
   # Tag push: builds ONLY the universal Docker image (the docker-publish-ghcr job
@@ -92,6 +92,13 @@ jobs:
   golden:
     needs: lint
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dual-flavor VM/cloud build (matches how the ISO already splits):
+        # forms=all -> both flavors; the cheap golden+cloud first run stays
+        # headless-only. env is unavailable in matrix, so read the input directly.
+        flavor: ${{ fromJSON((github.event.inputs.forms || 'all') == 'all' && '["headless","gui"]' || '["headless"]') }}
     steps:
       # Hosted Ubuntu runners ship ~14GB free; the golden qcow2 (~2GB raw, grown
       # to give the appliance room) plus the downloaded Debian base image exhaust
@@ -116,6 +123,8 @@ jobs:
         with:
           extra-packages: genisoimage xorriso
       - name: Build golden disk (virt-customize, off-prod)
+        env:
+          VACTI_FLAVOR: ${{ matrix.flavor }}
         run: |
           export LIBGUESTFS_BACKEND=direct
           # TEMP: full libguestfs trace so the exact passt invocation (guest
@@ -123,7 +132,7 @@ jobs:
           export LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1
           make golden
       - name: No-secret scan (golden)
-        run: ci/no-secret-scan.sh out/vacti-engine-${VACTI_RELEASE}-golden.qcow2
+        run: ci/no-secret-scan.sh out/vacti-engine-${VACTI_RELEASE}-${{ matrix.flavor }}-golden.qcow2
       - name: Reclaim intermediate build files before upload
         # Only out/vacti-engine-<ver>-golden.qcow2 is needed downstream. The
         # downloaded Debian base image + virt-customize work tree under
@@ -136,9 +145,9 @@ jobs:
       - name: Upload golden as a build artifact (passed to fan-out jobs)
         uses: actions/upload-artifact@v4
         with:
-          name: golden-qcow2
+          name: golden-qcow2-${{ matrix.flavor }}
           path: |
-            out/vacti-engine-${{ env.VACTI_RELEASE }}-golden.qcow2
+            out/vacti-engine-${{ env.VACTI_RELEASE }}-${{ matrix.flavor }}-golden.qcow2
           retention-days: 2
           if-no-files-found: error
 
@@ -157,6 +166,9 @@ jobs:
         # forms=all -> cloud + both OVA forms; forms=golden+cloud -> cloud only
         # (OVA conversions skipped). env is unavailable here, so read the input.
         form: ${{ fromJSON((github.event.inputs.forms || 'all') == 'all' && '["cloud","vmware-ova","vbox-ova"]' || '["cloud"]') }}
+        # Cross-product with the flavor: all -> both flavors; golden+cloud ->
+        # headless only (so each cell converts the matching golden-qcow2-<flavor>).
+        flavor: ${{ fromJSON((github.event.inputs.forms || 'all') == 'all' && '["headless","gui"]' || '["headless"]') }}
     steps:
       # Same squeeze as golden: the fetched golden qcow2 (~2GB) plus the
       # converted form (raw.gz / streamOptimized VMDK / .ova) blow past the
@@ -180,12 +192,14 @@ jobs:
         with:
           # fuse3 for guestmount; libxml2-utils (xmllint) for the OVF gate.
           extra-packages: fuse3 libxml2-utils
-      - name: Fetch the golden disk
+      - name: Fetch the golden disk (${{ matrix.flavor }})
         uses: actions/download-artifact@v4
         with:
-          name: golden-qcow2
+          name: golden-qcow2-${{ matrix.flavor }}
           path: out
-      - name: Convert -> ${{ matrix.form }}
+      - name: Convert -> ${{ matrix.form }} (${{ matrix.flavor }})
+        env:
+          VACTI_FLAVOR: ${{ matrix.flavor }}
         run: make ${{ matrix.form }}
       - name: Validate OVF/OVA structure (member order, schema, sizes, hashes, RAM floor)
         # FOSS, offline structural gate for the hand-authored OVFs. No-op for the
@@ -218,10 +232,10 @@ jobs:
             case "$a" in *golden*) continue;; esac
             ci/no-secret-scan.sh "$a"
           done
-      - name: Upload ${{ matrix.form }} artifacts
+      - name: Upload ${{ matrix.form }} (${{ matrix.flavor }}) artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: form-${{ matrix.form }}
+          name: form-${{ matrix.form }}-${{ matrix.flavor }}
           path: |
             out/*.qcow2
             out/*.raw.gz
@@ -360,7 +374,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: out
-          pattern: "{form-*,golden-qcow2}"
+          pattern: "{form-*,golden-qcow2-*}"
       - name: Smoke-boot every built image (qemu TCG, real boot + health probe)
         # Boots each disk image (cloud qcow2 + both OVAs) in qemu with a throwaway
         # NoCloud health-probe seed and asserts a healthy multi-user boot with the

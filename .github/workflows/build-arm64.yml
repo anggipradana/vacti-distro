@@ -68,6 +68,12 @@ jobs:
   golden:
     needs: lint
     runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dual-flavor ARM64 VM build (matches the ISO + amd64 split). The arm64
+        # pipeline has no cheap golden+cloud path, so it always builds both flavors.
+        flavor: [headless, gui]
     steps:
       - name: Free disk space (reclaim >30GB on the runner)
         run: |
@@ -88,12 +94,14 @@ jobs:
         with:
           extra-packages: genisoimage xorriso
       - name: Build golden disk (virt-customize, native arm64, off-prod)
+        env:
+          VACTI_FLAVOR: ${{ matrix.flavor }}
         run: |
           export LIBGUESTFS_BACKEND=direct
           export LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1
           make golden
       - name: No-secret scan (golden)
-        run: ci/no-secret-scan.sh out/vacti-engine-${VACTI_RELEASE}-arm64-golden.qcow2
+        run: ci/no-secret-scan.sh out/vacti-engine-${VACTI_RELEASE}-arm64-${{ matrix.flavor }}-golden.qcow2
       - name: Reclaim intermediate build files before upload
         run: |
           echo "[disk] before cleanup:"; df -h /
@@ -102,9 +110,9 @@ jobs:
       - name: Upload golden as a build artifact (passed to fan-out jobs)
         uses: actions/upload-artifact@v4
         with:
-          name: golden-qcow2-arm64
+          name: golden-qcow2-${{ matrix.flavor }}-arm64
           path: |
-            out/vacti-engine-${{ env.VACTI_RELEASE }}-arm64-golden.qcow2
+            out/vacti-engine-${{ env.VACTI_RELEASE }}-arm64-${{ matrix.flavor }}-golden.qcow2
           retention-days: 2
           if-no-files-found: error
 
@@ -118,8 +126,11 @@ jobs:
       fail-fast: false
       matrix:
         # arm64 deliverables from the golden disk: both OVA forms. (cloud/raw is an
-        # AMD64 form; arm64's four TG-7175 deliverables are the two OVAs + two ISOs.)
+        # AMD64 form; arm64's TG-7175 deliverables are the two OVAs + two ISOs.)
         form: [vmware-ova, vbox-ova]
+        # Cross-product with flavor: each (form,flavor) cell converts the matching
+        # golden-qcow2-<flavor>-arm64 -> both OVAs now come in headless + gui.
+        flavor: [headless, gui]
     steps:
       - name: Free disk space (reclaim >30GB on the runner)
         run: |
@@ -139,12 +150,14 @@ jobs:
         uses: ./.github/actions/libguestfs-runner
         with:
           extra-packages: fuse3 libxml2-utils
-      - name: Fetch the golden disk
+      - name: Fetch the golden disk (${{ matrix.flavor }})
         uses: actions/download-artifact@v4
         with:
-          name: golden-qcow2-arm64
+          name: golden-qcow2-${{ matrix.flavor }}-arm64
           path: out
-      - name: Convert -> ${{ matrix.form }}
+      - name: Convert -> ${{ matrix.form }} (${{ matrix.flavor }})
+        env:
+          VACTI_FLAVOR: ${{ matrix.flavor }}
         run: make ${{ matrix.form }}
       - name: Validate OVF/OVA structure (member order, schema, sizes, hashes, RAM floor)
         run: |
@@ -167,10 +180,10 @@ jobs:
             case "$a" in *golden*) continue;; esac
             ci/no-secret-scan.sh "$a"
           done
-      - name: Upload ${{ matrix.form }} artifacts
+      - name: Upload ${{ matrix.form }} (${{ matrix.flavor }}) artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: form-${{ matrix.form }}-arm64
+          name: form-${{ matrix.form }}-${{ matrix.flavor }}-arm64
           path: |
             out/*.ova
             out/*.sha256
