@@ -29,6 +29,14 @@ on:
         description: "Bake the full arsenal (1) or lean web+infra (0)"
         required: false
         default: "0"
+      forms:
+        description: "Which ARM64 image forms to build"
+        required: false
+        type: choice
+        default: "all"
+        options:
+          - "all"        # both OVAs (headless+gui) + both ISOs (headless+gui)
+          - "vbox-ova"   # VirtualBox OVA only (headless+gui) -> golden -> fanout -> smoke -> publish; vmware-ova + iso skipped
   repository_dispatch:
     types: [engine-deb-published]
 
@@ -125,9 +133,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # arm64 deliverables from the golden disk: both OVA forms. (cloud/raw is an
-        # AMD64 form; arm64's TG-7175 deliverables are the two OVAs + two ISOs.)
-        form: [vmware-ova, vbox-ova]
+        # arm64 deliverables from the golden disk: both OVA forms (cloud/raw is an
+        # AMD64 form; arm64's TG-7175 deliverables are the two OVAs + two ISOs).
+        # forms=vbox-ova narrows this to the VirtualBox OVA only. env is unavailable
+        # in a matrix, so read the input directly (default null -> both OVAs).
+        form: ${{ fromJSON(github.event.inputs.forms == 'vbox-ova' && '["vbox-ova"]' || '["vmware-ova","vbox-ova"]') }}
         # Cross-product with flavor: each (form,flavor) cell converts the matching
         # golden-qcow2-<flavor>-arm64 -> both OVAs now come in headless + gui.
         flavor: [headless, gui]
@@ -192,6 +202,9 @@ jobs:
   # --- the installable ISO (arm64): live-build in a privileged debian:trixie ----
   iso:
     needs: lint
+    # ISO (live-build, both SKUs) is skipped on the vbox-ova-only path; it builds
+    # on the default/full path and the engine-deb-published dispatch (forms null).
+    if: ${{ github.event.inputs.forms != 'vbox-ova' }}
     runs-on: ubuntu-24.04-arm
     container:
       # debian:trixie is a multi-arch manifest; an arm64 runner pulls the arm64
@@ -305,8 +318,9 @@ jobs:
   publish:
     needs: smoke
     # smoke is continue-on-error (non-blocking), so publish runs whenever the build
-    # stages produced artifacts; it never waits on a green smoke.
-    if: ${{ always() && needs.fanout.result == 'success' && needs.iso.result == 'success' }}
+    # stages produced artifacts; it never waits on a green smoke. iso is skipped on
+    # the vbox-ova-only path, so accept skipped-iso as well as success.
+    if: ${{ always() && needs.fanout.result == 'success' && (needs.iso.result == 'success' || needs.iso.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space (reclaim >30GB on the runner)

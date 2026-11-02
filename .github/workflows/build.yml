@@ -29,6 +29,7 @@ on:
         options:
           - "golden+cloud"   # cheap first run: lint -> golden(headless) -> cloud -> smoke -> publish
           - "all"            # full matrix: golden(headless,gui) x cloud/vmware-ova/vbox-ova + iso(headless,gui)
+          - "vbox-ova"       # VirtualBox OVA only: golden(headless,gui) -> vbox-ova fanout -> smoke -> publish (+ docker); iso skipped
   repository_dispatch:
     types: [engine-deb-published]
   # Tag push: builds ONLY the universal Docker image (the docker-publish-ghcr job
@@ -96,9 +97,10 @@ jobs:
       fail-fast: false
       matrix:
         # Dual-flavor VM/cloud build (matches how the ISO already splits):
-        # forms=all -> both flavors; the cheap golden+cloud first run stays
-        # headless-only. env is unavailable in matrix, so read the input directly.
-        flavor: ${{ fromJSON((github.event.inputs.forms || 'all') == 'all' && '["headless","gui"]' || '["headless"]') }}
+        # forms=all OR forms=vbox-ova -> both flavors; the cheap golden+cloud
+        # first run stays headless-only. env is unavailable in matrix, so read
+        # the input directly.
+        flavor: ${{ fromJSON(((github.event.inputs.forms || 'all') == 'all' || github.event.inputs.forms == 'vbox-ova') && '["headless","gui"]' || '["headless"]') }}
     steps:
       # Hosted Ubuntu runners ship ~14GB free; the golden qcow2 (~2GB raw, grown
       # to give the appliance room) plus the downloaded Debian base image exhaust
@@ -163,12 +165,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # forms=all -> cloud + both OVA forms; forms=golden+cloud -> cloud only
-        # (OVA conversions skipped). env is unavailable here, so read the input.
-        form: ${{ fromJSON((github.event.inputs.forms || 'all') == 'all' && '["cloud","vmware-ova","vbox-ova"]' || '["cloud"]') }}
-        # Cross-product with the flavor: all -> both flavors; golden+cloud ->
-        # headless only (so each cell converts the matching golden-qcow2-<flavor>).
-        flavor: ${{ fromJSON((github.event.inputs.forms || 'all') == 'all' && '["headless","gui"]' || '["headless"]') }}
+        # forms=all -> cloud + both OVA forms; forms=vbox-ova -> vbox-ova only;
+        # forms=golden+cloud -> cloud only. env is unavailable here, so read the input.
+        form: ${{ fromJSON(github.event.inputs.forms == 'vbox-ova' && '["vbox-ova"]' || (github.event.inputs.forms || 'all') == 'all' && '["cloud","vmware-ova","vbox-ova"]' || '["cloud"]') }}
+        # Cross-product with the flavor: all OR vbox-ova -> both flavors;
+        # golden+cloud -> headless only (so each cell converts the matching golden-qcow2-<flavor>).
+        flavor: ${{ fromJSON(((github.event.inputs.forms || 'all') == 'all' || github.event.inputs.forms == 'vbox-ova') && '["headless","gui"]' || '["headless"]') }}
     steps:
       # Same squeeze as golden: the fetched golden qcow2 (~2GB) plus the
       # converted form (raw.gz / streamOptimized VMDK / .ova) blow past the
