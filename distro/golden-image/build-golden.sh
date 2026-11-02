@@ -110,6 +110,11 @@ cp -a "${ENROLL_DIR}/activate/vacti-activate"                 "${STAGE}/usr/loca
 cp -a "${ENROLL_DIR}/activate/vacti-activate.service"         "${STAGE}/etc/systemd/system/vacti-activate.service"
 cp -a "${ENROLL_DIR}/activate/vacti-activate-fallback.service" "${STAGE}/etc/systemd/system/vacti-activate-fallback.service"
 cp -a "${ENROLL_DIR}/activate/vacti-activate-polkit.rules"    "${STAGE}/etc/polkit-1/rules.d/49-vacti-activate.rules"
+# Headless pre-login activation TUI unit: owns tty1 before getty on the headless
+# SKU (no LightDM). Gated !engine.env + !/etc/lightdm, so it stays inert on the
+# GUI SKU (LightDM present) and after enrollment. Staged UNCONDITIONALLY; the
+# headless branch of provision.sh enables it, the GUI branch leaves it disabled.
+cp -a "${ENROLL_DIR}/activate/vacti-headless-activate.service" "${STAGE}/etc/systemd/system/vacti-headless-activate.service"
 cp -a "${ENROLL_DIR}/netsetup/vacti-netsetup"                 "${STAGE}/usr/local/sbin/vacti-netsetup"
 # anti-OOM drop-ins (sysctl / zram / THP / earlyoom) baked into the golden image
 cp -a "${OOM_DIR}/sysctl-90-vacti.conf"    "${STAGE}/etc/sysctl.d/90-vacti.conf"
@@ -392,6 +397,18 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
         apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] GUI pkg \$p not installable here (runtime self-heal covers it)"
       done
     }
+  # Replace the minimal cloud kernel with the full desktop kernel so Xorg,
+  # vboxvideo, i915/nouveau/radeon, framebuffer console and SATA/AHCI modules
+  # are available on the GUI SKU. firmware-linux brings proprietary blobs some
+  # Intel/AMD GPUs need. Keep purge non-fatal (|| true) in case the base image
+  # ever ships without the cloud kernel. VACTI_ARCH_SUFFIX is host-expanded
+  # (literal "" | "-arm64"); KERNEL_PKG/CLOUD_PKG are guest-runtime (\$-escaped).
+  KERNEL_PKG="linux-image-amd64"
+  [[ "${VACTI_ARCH_SUFFIX}" == "-arm64" ]] && KERNEL_PKG="linux-image-arm64"
+  CLOUD_PKG="\${KERNEL_PKG/linux-image-/linux-image-cloud-}"
+  apt-get install -y --no-install-recommends "\$KERNEL_PKG" firmware-linux firmware-linux-nonfree firmware-misc-nonfree
+  apt-get purge -y "\$CLOUD_PKG" || true
+  update-grub || true
   # Boot to the display-manager target (LightDM), not the text console.
   systemctl set-default graphical.target 2>/dev/null || true
   # LightDM is the desktop login. The pre-login GATE drop-in
@@ -415,6 +432,11 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
   printf 'system_info:\n  network:\n    renderers: [NetworkManager]\n' > /etc/cloud/cloud.cfg.d/99-vacti-nm.cfg
   systemctl daemon-reload 2>/dev/null || true
 else
+  # Headless SKU: own tty1 with the vacti-netsetup TUI BEFORE getty, so an OVA
+  # import (no cloud-init seed) still gets a zero-touch network->enroll prompt
+  # instead of a bare login. Gated !engine.env + !/etc/lightdm; OnFailure= hands
+  # back to getty@tty1 so a TUI bug can never brick the box (fail-open).
+  systemctl enable vacti-headless-activate.service 2>/dev/null || true
   echo "[prov] headless flavor: text console boot (vacti-netsetup TUI + firstboot token channels); no graphical stack"
 fi
 
