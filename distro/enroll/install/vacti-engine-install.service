@@ -1,0 +1,33 @@
+# vacti-engine-install.service - FIRST-BOOT thin-bootstrap engine install.
+#
+# Pulls the vacti-engine .deb from the private apt repo at first boot, using the
+# per-boot enrollment token. The public ISO/OVA images ship WITHOUT the engine
+# package (no /usr/lib/vacti-engine, no prompt-bundle, no skill-bundle), so this
+# unit is what provisions the engine before enrollment completes.
+#
+# It is pulled by (Wants= + After=) the first-boot enroll unit
+# (vacti-firstboot.service on VM/cloud, vacti-firstrun.service on the ISO): when
+# that unit starts - whether from multi-user.target (headless/seed) or from the
+# GUI kiosk's `systemctl start` (after the operator types the token) - this unit
+# runs FIRST, so the engine package is on disk when the enroll POST writes
+# engine.env and starts vacti-engine.service. No [Install] section: it is never
+# enabled on its own, only ever activated as a dependency of the enroll unit.
+[Unit]
+Description=vacti first-boot engine install (pull engine .deb from private apt)
+After=network-online.target
+Wants=network-online.target
+# Must finish before the enroll unit POSTs and before the engine service starts.
+Before=vacti-firstboot.service vacti-firstrun.service vacti-engine.service
+# Only before enrollment has completed.
+ConditionPathExists=!/etc/vacti-engine/engine.env
+
+[Service]
+Type=oneshot
+# RemainAfterExit=no so a boot-time run that found no token (GUI SKU, before the
+# kiosk captures it) does not latch 'active' and block a re-run when the kiosk
+# re-triggers the enroll unit. The wrapper is idempotent (already-installed and
+# no-token both exit 0).
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/vacti-engine-install
+StandardOutput=journal+console
+StandardError=journal+console
