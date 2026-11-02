@@ -23,6 +23,11 @@ wget
 # python3-full: full CPython stdlib metapackage; general scripting substrate the
 # appliance relies on beyond the engine's own python3-venv. Jev: distro_infra.
 python3-full
+# sudo: the default login user (vacti) is a non-root sudo-capable account; root
+# login stays disabled. The Debian genericcloud base already carries sudo, but we
+# list it explicitly so the `sudo` group is guaranteed present when provisioning
+# adds the user to it. Pure distro infra, not an engine tool. Jev: distro_infra.
+sudo
 
 # --- Networking helper ---
 # netcat-openbsd (nc): the engine manifest carries nc only under its CTF set, so
