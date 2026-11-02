@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # build-golden.sh - build the GOLDEN disk: the single source of truth for the
-# cloud and VM forms. Fetches + verifies the official Debian 13 genericcloud
-# qcow2, then applies the shared appliance layer with virt-customize and emits
+# cloud and VM forms. Fetches + verifies the official Debian 13 generic cloud
+# qcow2 (full linux-image-amd64 kernel + broad driver set), then applies the
+# shared appliance layer with virt-customize and emits
 # vacti-engine-<ver>-golden.qcow2. convert-*.sh / fanout.sh repackage this one
 # disk into every target format so cloud / VMware OVA / VBox OVA are the same
 # engine bit-for-bit.
@@ -65,7 +66,7 @@ log "verifying SHA512 of the base image"
 # --- 2. working copy ----------------------------------------------------------
 log "copying base -> working golden disk"
 cp -f "$BASE_IMG" "$GOLDEN"
-# Give the appliance room (engine + arsenal). genericcloud is ~2GB sparse.
+# Give the appliance room (engine + arsenal). The generic base is ~2GB sparse.
 qemu-img resize "$GOLDEN" 20G >/dev/null
 
 # --- 3. stage the shared appliance inputs into a copy-in root -----------------
@@ -180,8 +181,8 @@ export DEBIAN_FRONTEND=noninteractive
 
 # Build-time networking for the in-guest apt pulls. virt-customize runs this
 # script in the libguestfs appliance with the guest chrooted, but the appliance
-# leaves eth0 administratively DOWN with no address (the genericcloud guest's
-# own DHCP client / systemd-networkd does not run here), so the guest has no
+# leaves eth0 administratively DOWN with no address (the guest's own DHCP
+# client / systemd-networkd does not run here), so the guest has no
 # route and every apt pull dies with "Temporary failure resolving". libguestfs'
 # user-mode net backend is qemu SLIRP (passt is removed in CI), whose lease is
 # the stable, well-known 10.0.2.0/24: host/gateway 10.0.2.2, DNS 10.0.2.3,
@@ -231,7 +232,7 @@ apt-get install -y --no-install-recommends ca-certificates curl gnupg jq
 
 # --- grow the root filesystem to fill the resized (20G) virtual disk ----------
 # build-golden.sh ran 'qemu-img resize 20G', which enlarges the BLOCK DEVICE but
-# NOT the partition/filesystem inside it: the Debian genericcloud root (GPT p1,
+# NOT the partition/filesystem inside it: the Debian generic root (GPT p1,
 # ext4) stays ~2GB, so the arsenal install below dies with
 # "No space left on device". cloud-init grows the root on first boot, but that is
 # far too late for this build-time apt install, so grow it now - before any heavy
@@ -397,29 +398,13 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
         apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] GUI pkg \$p not installable here (runtime self-heal covers it)"
       done
     }
-  # Replace the minimal cloud kernel with the full desktop kernel so Xorg,
-  # vboxvideo, i915/nouveau/radeon, framebuffer console and SATA/AHCI modules
-  # are available on the GUI SKU. firmware-linux brings proprietary blobs some
-  # Intel/AMD GPUs need. Keep purge non-fatal (|| true) in case the base image
-  # ever ships without the cloud kernel. VACTI_ARCH_SUFFIX is host-expanded
-  # (literal "" | "-arm64"); KERNEL_PKG/CLOUD_PKG are guest-runtime (\$-escaped).
-  KERNEL_PKG="linux-image-amd64"
-  [[ "${VACTI_ARCH_SUFFIX}" == "-arm64" ]] && KERNEL_PKG="linux-image-arm64"
-  CLOUD_PKG="\${KERNEL_PKG/linux-image-/linux-image-cloud-}"
-  # The kernel/firmware install cascades a dpkg trigger that re-configures
-  # conffiles shipped by already-installed packages (e.g. earlyoom's
-  # /etc/default/earlyoom). There is no stdin inside virt-customize, so an
-  # interactive conffile prompt aborts dpkg. Force noninteractive + keep the
-  # existing conffile on both the install and the purge. The dpkg option
-  # strings are single-quoted with no \$, so they stay literal in this heredoc.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    -o Dpkg::Options::='--force-confold' -o Dpkg::Options::='--force-confdef' \
-    --no-install-recommends \
-    "\$KERNEL_PKG" firmware-linux firmware-linux-nonfree firmware-misc-nonfree
-  DEBIAN_FRONTEND=noninteractive apt-get purge -y \
-    -o Dpkg::Options::='--force-confold' -o Dpkg::Options::='--force-confdef' \
-    "\$CLOUD_PKG" || true
-  update-grub || true
+  # No kernel swap: the generic cloud base already ships the full
+  # linux-image-amd64/-arm64 kernel, so Xorg, vboxvideo, i915/nouveau/radeon,
+  # the framebuffer console and SATA/AHCI modules are all present out of the
+  # box on the GUI SKU. Nothing to install or purge - which also removes the
+  # dpkg conffile-reconfigure cascade (e.g. earlyoom's /etc/default/earlyoom)
+  # that had no stdin to answer inside virt-customize and aborted the build.
+  # Its own firmware set covers VBox/VMware guest video; grub stays as shipped.
   # Boot to the display-manager target (LightDM), not the text console.
   systemctl set-default graphical.target 2>/dev/null || true
   # LightDM is the desktop login. The pre-login GATE drop-in
