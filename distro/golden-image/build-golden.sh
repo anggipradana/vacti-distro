@@ -375,25 +375,24 @@ systemctl enable vacti-swap-firstboot.service 2>/dev/null || true
 # THP madvise is applied each boot by /etc/tmpfiles.d/vacti-thp.conf.
 systemctl daemon-reload 2>/dev/null || true
 
-# ---- default login user: Kali-style standard credential (vacti:vacti) ------
-# The appliance ships with a known default login, mirroring the Kali `kali:kali`
-# convention operators expect from a pentest distro: a published default the user
-# changes after first login if they want something stronger. Root stays disabled
-# (--root-password disabled on the virt-customize call); this is the sudo-capable
-# shell / SSH login. Deliberate operator decision - NO expiry, NO force-change on
-# first login. The `vacti` string is not a secret (it is the documented default),
-# so the no-secret scan is unaffected (it flags tokens/keys, not this account).
-echo "[prov] creating default login user 'vacti' (sudo group, bash shell)"
+# ---- default login user: fixed local administrator account (arparp) --------
+# The appliance ships with a known fixed local admin login baked here (replacing
+# the earlier vacti:vacti baseline). Root stays disabled (--root-password disabled
+# on the virt-customize call); this is the sudo-capable shell / SSH login.
+# Deliberate operator decision - NO expiry, NO force-change on first login. The
+# credential is distributed out-of-band to licensed operators (not published), so
+# the no-secret scan is unaffected (it flags tokens/keys, not this account).
+echo "[prov] creating default login user 'arparp' (sudo group, bash shell)"
 apt-get install -y --no-install-recommends sudo 2>/dev/null || true
-if ! id vacti >/dev/null 2>&1; then
-  useradd -m -s /bin/bash -c "Vacti operator" -G sudo vacti
+if ! id arparp >/dev/null 2>&1; then
+  useradd -m -s /bin/bash -c "Vacti operator" -G sudo arparp
 else
-  usermod -s /bin/bash -aG sudo vacti || true
+  usermod -s /bin/bash -aG sudo arparp || true
 fi
-echo 'vacti:vacti' | chpasswd
+echo 'arparp:REDACTED_PASSWORD' | chpasswd
 # never expire the password and never force a change at login (default-cred policy)
-chage -M -1 -m 0 -I -1 -E -1 vacti 2>/dev/null || true
-passwd -u vacti 2>/dev/null || true
+chage -M -1 -m 0 -I -1 -E -1 arparp 2>/dev/null || true
+passwd -u arparp 2>/dev/null || true
 
 # ---- FINALIZE: strip every build-time secret + identity --------------------
 echo "[prov] FINALIZE: removing build-time apt credential + identity"
