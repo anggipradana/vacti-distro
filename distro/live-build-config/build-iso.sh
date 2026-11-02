@@ -7,9 +7,10 @@
 # HEAVY BUILD - RUNS IN CI (a debian:trixie --privileged container, for loop
 # devices + mount), NOT on the prod control plane. Do NOT run on the prod box.
 #
-# Build-time secret (NEVER baked): VACTI_APT_PRODUCER_TOKEN is injected into the
-# build chroot's auth.conf by a config hook and removed by a late hook
-# (0900-remove-build-auth) before the squashfs is made.
+# THIN-BOOTSTRAP: the vacti-engine package is NOT baked into the ISO. The arsenal
+# comes from public sources only (Debian + the pinned Kali repo), so no private apt
+# repo and no build-time secret are used here; the engine .deb is pulled at first
+# boot (vacti-engine-install.service) using the enrollment token.
 #
 # Usage: VACTI_ISO_SKU=headless|gui ./build-iso.sh
 set -euo pipefail
@@ -39,6 +40,14 @@ echo "[iso] materializing the shared distro/ tree into config/ (SKU=${SKU})"
 CORE_LIST="${HERE}/config/package-lists/vacti-core.list.chroot"
 BE_SRC="${DISTRO_DIR}/packages/best-effort.list"
 "${DISTRO_DIR}/packages/gen-live-build-list.sh" "${CORE_LIST}"
+# THIN-BOOTSTRAP: never bake the engine package into the ISO. The generated list
+# is arsenal-only, but strip any vacti-engine* line defensively so a future
+# manifest change can never pull the engine (and its plain-text IP) into the
+# squashfs. The engine .deb is pulled at first boot by vacti-engine-install.service.
+if [[ -f "$CORE_LIST" ]]; then
+  grep -vE '^[[:space:]]*vacti-engine([[:space:]]|$)' "$CORE_LIST" > "${CORE_LIST}.tmp" || true
+  mv -f "${CORE_LIST}.tmp" "$CORE_LIST"
+fi
 if [[ -f "$BE_SRC" ]]; then
   # stripped best-effort package names (drop comments + blank lines)
   BE_NAMES="$(sed -e 's/#.*$//' -e 's/[[:space:]]\+$//' "$BE_SRC" | grep -vE '^[[:space:]]*$' || true)"
@@ -77,6 +86,15 @@ install -D -m0755 "${DISTRO_DIR}/enroll/firstboot/vacti-firstboot" \
   "${HERE}/config/includes.chroot/usr/local/sbin/vacti-firstboot"
 install -D -m0644 "${HERE}/config/includes.chroot/etc/systemd/system/vacti-firstrun.service" \
   "${HERE}/config/includes.chroot/etc/systemd/system/vacti-firstrun.service" 2>/dev/null || true
+
+# 3a. THIN-BOOTSTRAP first-boot engine install: the unit + wrapper that pull the
+#     vacti-engine .deb from the private apt repo at first boot (no engine baked).
+#     Pulled by Wants=/After= from vacti-firstrun.service, so present-on-disk is
+#     enough - no explicit enable.
+install -D -m0755 "${DISTRO_DIR}/enroll/install/vacti-engine-install" \
+  "${HERE}/config/includes.chroot/usr/local/sbin/vacti-engine-install"
+install -D -m0644 "${DISTRO_DIR}/enroll/install/vacti-engine-install.service" \
+  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-engine-install.service"
 
 # 3b. PRE-LOGIN activation (both SKUs ship the files; the GUI gate is wired by
 #     the GUI package list + 0100-branding.hook.chroot + apply-branding.sh). On
@@ -119,71 +137,16 @@ else
   rm -f "${HERE}/config/package-lists/vacti-nm.list.chroot" 2>/dev/null || true
 fi
 
-# 5. BUILD-TIME vacti apt wiring (source + credential + TLS-off): staged so it is
-#    present BEFORE the chroot package-install apt-get update, yet absent from the
-#    EARLY archives update - and never shipped.
-#
-#    Why not config/archives + config/includes.chroot (the old layout): live-build
-#    runs the archives apt-get update very early (chroot_prep mode-archives-chroot),
-#    whereas config/includes.chroot only lands at the LATE chroot_includes stage.
-#    So a vacti source in config/archives got apt-updated with neither the
-#    credential nor the TLS-off conf present -> "certificate verify failed" then
-#    "401 Unauthorized", which is fatal (headless ISO) and also poisons the chroot
-#    apt state (which is what pushed the GUI d-i onto the broken libfuse3-3 path).
-#
-#    Fix: stage ALL vacti apt files into config/includes.chroot_before_packages,
-#    which live-build copies in right before package installation. The early
-#    archives update then sees NO vacti source (Debian + Kali only -> clean), and
-#    the package-install apt-get update sees the vacti source WITH its credential +
-#    TLS-off already in place. 0900-remove-build-auth (a late chroot hook) strips
-#    all three before the squashfs, so nothing vacti-private ships and the binary/
-#    installer stage never hits an unauthenticated vacti source.
-[[ -n "${VACTI_APT_PRODUCER_TOKEN:-}" ]] || { echo "VACTI_APT_PRODUCER_TOKEN unset (needed at build to pull vacti-engine; never baked)" >&2; exit 1; }
-BP="${HERE}/config/includes.chroot_before_packages"
-
-# 5a. the build-time apt credential (NEVER baked). auth.conf `machine` must match
-#     the sources.list path by host+path-PREFIX, so derive it from the FULL repo
-#     URL (scheme stripped, /apt appended) - NOT host only - or apt never sends the
-#     credential (401 on the engine .deb pull).
-install -d "${BP}/etc/apt/auth.conf.d"
-APT_MACHINE="$(printf '%s/apt' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://##')"
-umask 077
-printf 'machine %s login vacti password %s\n' "$APT_MACHINE" "$VACTI_APT_PRODUCER_TOKEN" \
-  > "${BP}/etc/apt/auth.conf.d/vacti-engine.conf"
-umask 022
-echo "[iso] NOTE: auth.conf staged into the BUILD chroot only (before_packages); 0900-remove-build-auth deletes it before squashfs."
-
-# 5b. BUILD-TIME TLS: the vacti source is [trusted=yes] (full build-time trust)
-#     and HTTPS. A minimal debootstrap chroot does not reliably regenerate its CA
-#     bundle before the first package-list apt update, so the vacti InRelease fetch
-#     can fail "certificate verify failed" even though the cert is valid
-#     (golden/virt-customize pulls the same URL fine). Scope-disable TLS verify for
-#     the vacti HOST ONLY (Debian/Kali verification untouched). Build-chroot only,
-#     stripped by 0900-remove-build-auth before squashfs - no weakened-TLS ships.
-APT_HOST="$(printf '%s' "${VACTI_APT_URL#*://}" | cut -d/ -f1)"
-if [[ -n "$APT_HOST" ]]; then
-  install -d "${BP}/etc/apt/apt.conf.d"
-  cat > "${BP}/etc/apt/apt.conf.d/99vacti-build-notls.conf" <<EOF
-// BUILD-TIME ONLY - removed by 0900-remove-build-auth before squashfs. Scoped
-// to the vacti apt host (${APT_HOST}); the source is [trusted=yes]. Does NOT
-// relax verification for Debian/Kali or ship on the image.
-Acquire::https::${APT_HOST}::Verify-Peer "false";
-Acquire::https::${APT_HOST}::Verify-Host "false";
-EOF
-  echo "[iso] staged build-only TLS-verify-off for ${APT_HOST} (stripped pre-squashfs)"
-fi
-
-# 6. the vacti private apt SOURCE line, materialized from VACTI_APT_URL into the
-#    SAME before_packages overlay (NOT config/archives, so the early archives
-#    update never touches it). Mirrors build-golden.sh's line exactly:
-#      deb [trusted=yes] <VACTI_APT_URL>/apt ./
-#    No credential here (public source line; the token lives only in auth.conf
-#    above). 0900-remove-build-auth drops this source pre-squashfs too.
-APT_SCHEME_HOST="${VACTI_APT_URL%/}"
-install -d "${BP}/etc/apt/sources.list.d"
-printf '# Generated by build-iso.sh from VACTI_APT_URL (public source line; no creds).\n# The Basic-auth credential is in the build-chroot auth.conf and is removed by\n# 0900-remove-build-auth before squashfs. Mirrors build-golden.sh.\ndeb [trusted=yes] %s/apt ./\n' \
-  "$APT_SCHEME_HOST" > "${BP}/etc/apt/sources.list.d/vacti-engine.list"
-echo "[iso] staged vacti apt source (before_packages) -> ${APT_SCHEME_HOST}/apt"
+# 5. THIN-BOOTSTRAP: no vacti private apt wiring at build time. The ISO never bakes
+#    the vacti-engine package (no /usr/lib/vacti-engine, no prompt-bundle, no
+#    skill-bundle - that plain-text methodology is the real IP and must not ride a
+#    public download). The arsenal is installed from PUBLIC sources only (Debian +
+#    the pinned Kali repo); the engine .deb is pulled at first boot by
+#    vacti-engine-install.service using the enrollment token. So there is no
+#    producer-token requirement, no build-chroot auth.conf, no [trusted=yes] private
+#    source line, and no host-scoped TLS-verify-off to stage or strip here.
+#    0900-remove-build-auth still runs as defense-in-depth (its removals are no-ops
+#    now, since none of those files are created).
 
 # 7. Kali package source key (Option A). The checked-in kali.list.chroot adds
 #    the pinned Kali repo; live-build needs its signing key installed into the
@@ -217,13 +180,13 @@ cd "$HERE"
 echo "[iso] lb config"
 VACTI_ISO_SKU="$SKU" lb config
 
-# Ensure ca-certificates (+ its openssl dep) is in the FIRST-stage debootstrap,
-# so the chroot can TLS-verify the vacti private apt source (itsai.sbs behind
-# Cloudflare) on the very first apt update - a minimal debootstrap has no CA
-# store, and without it the HTTPS InRelease fetch fails and vacti-engine can
-# never be indexed ("held broken packages"). The `--bootstrap-include` CLI flag
-# was dropped in this live-build, but the underlying LB_BOOTSTRAP_INCLUDE config
-# variable (consumed by `lb bootstrap` -> debootstrap --include) is stable.
+# Ensure ca-certificates (+ its openssl dep) is in the FIRST-stage debootstrap, so
+# the chroot can TLS-verify any HTTPS apt source (the Debian mirror, and the
+# first-boot vacti source the installed system wires later) - a minimal debootstrap
+# has no CA store, and without it an HTTPS InRelease fetch fails. The
+# `--bootstrap-include` CLI flag was dropped in this live-build, but the underlying
+# LB_BOOTSTRAP_INCLUDE config variable (consumed by `lb bootstrap` ->
+# debootstrap --include) is stable.
 if [[ -f config/bootstrap ]]; then
   if grep -q '^LB_BOOTSTRAP_INCLUDE=' config/bootstrap; then
     sed -i 's/^LB_BOOTSTRAP_INCLUDE=.*/LB_BOOTSTRAP_INCLUDE="ca-certificates"/' config/bootstrap

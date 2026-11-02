@@ -560,23 +560,28 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test (pull the published tag + assert the engine version)
+      - name: Smoke test (pull the published tag + assert the engine is NOT baked)
         # Non-blocking: pulls the just-pushed manifest (docker auto-selects the
-        # runner's amd64 child) and asserts the baked vacti-engine .deb version.
+        # runner's amd64 child). THIN-BOOTSTRAP: the engine .deb is pulled at
+        # container start, never baked, so the published image must contain NO
+        # vacti-engine package and NO /usr/lib/vacti-engine, while the arsenal is
+        # present.
         continue-on-error: true
         env:
           IMAGE: ${{ steps.ver.outputs.image }}
           ENGINE_VER: ${{ steps.ver.outputs.version }}
         run: |
           docker pull "${IMAGE}:${ENGINE_VER}"
+          echo "[smoke] asserting the vacti-engine package is ABSENT (thin-bootstrap)"
           got="$(docker run --rm --entrypoint dpkg-query "${IMAGE}:${ENGINE_VER}" \
                    -W -f='${Version}' vacti-engine 2>/dev/null || true)"
-          echo "[smoke] baked vacti-engine version: ${got:-<unknown>} (expected to start with ${ENGINE_VER})"
-          case "$got" in
-            "${ENGINE_VER}"*) echo "[smoke] OK: version matches" ;;
-            *) echo "[smoke][warn] version did not match ${ENGINE_VER}" ;;
-          esac
-          echo "[smoke] asserting .claude methodology is ABSENT from the image"
+          if [ -z "$got" ]; then echo "[smoke] OK: no vacti-engine package baked"; \
+            else echo "[smoke][warn] vacti-engine ${got} is baked (IP-strip regression)"; fi
+          echo "[smoke] asserting /usr/lib/vacti-engine is ABSENT from the image"
           docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
-            -c 'test ! -e /usr/lib/vacti-engine/.claude' \
-            && echo "[smoke] OK: no .claude baked" || echo "[smoke][warn] .claude present (IP-strip regression)"
+            -c 'test ! -e /usr/lib/vacti-engine' \
+            && echo "[smoke] OK: no engine tree baked" || echo "[smoke][warn] /usr/lib/vacti-engine present (IP-strip regression)"
+          echo "[smoke] asserting the arsenal is present (e.g. nuclei/sqlmap/nmap)"
+          docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
+            -c 'command -v nuclei >/dev/null || command -v sqlmap >/dev/null || command -v nmap >/dev/null' \
+            && echo "[smoke] OK: arsenal present" || echo "[smoke][warn] arsenal missing (build regression)"

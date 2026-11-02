@@ -41,35 +41,13 @@ fi
 
 command -v virt-customize >/dev/null 2>&1 || die "virt-customize not found (apt-get install libguestfs-tools)"
 command -v qemu-img       >/dev/null 2>&1 || die "qemu-img not found (apt-get install qemu-utils)"
-[[ -n "${VACTI_APT_PRODUCER_TOKEN:-}" ]] || die "VACTI_APT_PRODUCER_TOKEN unset - the build-time private-repo credential is required (it is NOT baked into the image)"
+# THIN-BOOTSTRAP: the vacti-engine package is NOT installed at build time (it is
+# pulled at first boot by vacti-engine-install.service). The arsenal comes entirely
+# from public sources (Debian + the pinned Kali repo + NodeSource), so no private
+# apt repo and no VACTI_APT_PRODUCER_TOKEN are needed here, and there is no private
+# repo to preflight.
 
 mkdir -p "$WORK" "$CACHE" "$OUT"
-
-# --- 0. preflight: the vacti private apt repo must actually serve apt metadata -
-# WHY: the heavy virt-customize provisioning (below) runs an in-guest `apt-get
-# update` against ${VACTI_APT_URL}/apt. If that host is wrong or decommissioned
-# (e.g. the control plane moved and the VACTI_APT_URL repo variable was left
-# stale), the endpoint can answer every path with a 200 HTML placeholder page.
-# apt then downloads that HTML as the repo's Release/Release.gpg, gpgv reports
-# "got 'NODATA'", and the build dies minutes deep inside the libguestfs appliance
-# with an opaque "OpenPGP signature verification failed" error. Fail FAST and
-# LOUD right here instead, naming the exact variable to fix, so a host migration
-# can never again burn a full CI run on a cryptic in-guest failure. This uses the
-# SAME HTTP Basic transport apt uses (login vacti, password = producer token).
-APT_PREFLIGHT_URL="${VACTI_APT_URL%/}/apt/InRelease"
-log "preflight: verifying the vacti apt repo serves real metadata (${APT_PREFLIGHT_URL})"
-PF_TMP="$(mktemp)"
-PF_CODE="$(curl -sS -m 30 -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" \
-  -o "$PF_TMP" -w '%{http_code}' "$APT_PREFLIGHT_URL" 2>/dev/null || echo 000)"
-PF_FIRST="$(head -c 1 "$PF_TMP" 2>/dev/null || true)"
-rm -f "$PF_TMP"
-if [[ "$PF_CODE" != "200" ]]; then
-  die "vacti apt repo preflight FAILED: ${APT_PREFLIGHT_URL} returned HTTP ${PF_CODE} (expected 200). Fix the VACTI_APT_URL repo variable (did the control plane host move?) and/or the VACTI_APT_PRODUCER_TOKEN secret before rebuilding."
-fi
-if [[ "$PF_FIRST" == "<" ]]; then
-  die "vacti apt repo preflight FAILED: ${APT_PREFLIGHT_URL} returned an HTML page, not apt metadata. VACTI_APT_URL (${VACTI_APT_URL}) is pointing at a decommissioned or wrong host; update the repo variable to the live apt producer."
-fi
-log "preflight OK: the vacti apt repo is serving metadata"
 
 # --- 1. fetch + verify the official Debian cloud image ------------------------
 BASE_IMG="${CACHE}/${DEBIAN_CLOUD_IMAGE}"
@@ -112,6 +90,12 @@ cp -a "${BRAND_DIR}/apply-branding.sh" "${STAGE}/opt/vacti-build/apply-branding.
 # firstboot unit + script
 cp -a "${ENROLL_DIR}/firstboot/vacti-firstboot"          "${STAGE}/usr/local/sbin/vacti-firstboot"
 cp -a "${ENROLL_DIR}/firstboot/vacti-firstboot.service"  "${STAGE}/etc/systemd/system/vacti-firstboot.service"
+# THIN-BOOTSTRAP first-boot engine install: the unit + wrapper that pull the
+# vacti-engine .deb from the private apt repo at first boot (no engine is baked).
+# The unit is pulled by Wants=/After= from vacti-firstboot.service, so it needs no
+# separate enable - only to be present on disk.
+cp -a "${ENROLL_DIR}/install/vacti-engine-install"          "${STAGE}/usr/local/sbin/vacti-engine-install"
+cp -a "${ENROLL_DIR}/install/vacti-engine-install.service"  "${STAGE}/etc/systemd/system/vacti-engine-install.service"
 # first-boot swapfile sizing (RAM known only at deploy) + its oneshot unit
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot"         "${STAGE}/usr/local/sbin/vacti-swap-firstboot"
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot.service" "${STAGE}/etc/systemd/system/vacti-swap-firstboot.service"
@@ -133,10 +117,10 @@ cp -a "${OOM_DIR}/zram-generator.conf"     "${STAGE}/etc/systemd/zram-generator.
 cp -a "${OOM_DIR}/tmpfiles-vacti-thp.conf" "${STAGE}/etc/tmpfiles.d/vacti-thp.conf"
 cp -a "${OOM_DIR}/earlyoom.default"        "${STAGE}/etc/default/earlyoom"
 # arsenal derivation: stage the manifest-driven generator + its inputs so
-# provision.sh can derive the arsenal list INSIDE the guest from the manifest the
-# installed vacti-engine .deb ships (/usr/lib/vacti-engine/packaging/arsenal-manifest.json).
-# The vendored snapshot travels too as an offline fallback. No forked package list
-# is pre-generated on the host anymore - the engine manifest is the single source.
+# provision.sh can derive the arsenal list INSIDE the guest. Thin-bootstrap: the
+# engine .deb is NOT installed at build, so the generator reads the VENDORED
+# snapshot (arsenal-manifest.json) staged here - kept 1:1 with the engine by
+# ci/arsenal-sync-check.sh. No forked package list is pre-generated on the host.
 install -d "${STAGE}/opt/vacti-build/packages"
 cp -a "${PKG_DIR}/gen-live-build-list.sh" "${PKG_DIR}/manifest-lib.sh" \
       "${PKG_DIR}/distro-owned.list"      "${PKG_DIR}/arsenal-manifest.json" \
@@ -176,20 +160,14 @@ if [[ "${VACTI_CTF_ARSENAL}" =~ ^(1|true|yes|on)$ ]]; then
 fi
 chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/vacti-swap-firstboot" \
            "${STAGE}/usr/local/sbin/vacti-activate" "${STAGE}/usr/local/sbin/vacti-netsetup" \
+           "${STAGE}/usr/local/sbin/vacti-engine-install" \
            "${STAGE}/opt/vacti-build/apply-branding.sh"
 
 # --- 4. the provisioning script that runs INSIDE the guest --------------------
-# Build-time apt wiring (source + auth.conf) is written here and REMOVED before
-# finalize. Mirrors the engine bootstrap-apt.sh configure_apt exactly.
-# auth.conf `machine` must match the sources.list path by host+path-PREFIX, so
-# derive it from the FULL repo URL (scheme stripped, /apt appended) - NOT host
-# only. VACTI_APT_URL=https://itsai.sbs/api/pentest -> itsai.sbs/api/pentest/apt
-# which is a prefix of the sources path itsai.sbs/api/pentest/apt (match).
-APT_MACHINE="$(printf '%s/apt' "${VACTI_APT_URL%/}" | sed -E 's#^[a-z]+://##')"
-APT_SCHEME_HOST="${VACTI_APT_URL%/}"
-# Engine install spec: pin to VACTI_ENGINE_REF when set, else floating latest.
-ENGINE_INSTALL_SPEC="${VACTI_ENGINE_PKG}"
-[[ -n "${VACTI_ENGINE_REF:-}" ]] && ENGINE_INSTALL_SPEC="${VACTI_ENGINE_PKG}=${VACTI_ENGINE_REF}"
+# THIN-BOOTSTRAP: no private apt repo is wired here and the vacti-engine package is
+# NOT installed. The arsenal is installed from public sources only (Debian + the
+# pinned Kali repo + NodeSource); the engine .deb is pulled at first boot by
+# vacti-engine-install.service using the enrollment token.
 cat > "${WORK}/provision.sh" <<PROV
 #!/usr/bin/env bash
 set -euo pipefail
@@ -268,18 +246,9 @@ if [[ -d /opt/vacti-build/kali-repo ]]; then
   install -m0644 /opt/vacti-build/kali-repo/kali-pin.pref /etc/apt/preferences.d/kali-pin
 fi
 
-# vacti private apt source + BUILD-TIME auth.conf (removed before finalize)
-echo "[prov] wiring vacti apt source (build-time credential, not baked)"
-install -d -m0755 /etc/apt/auth.conf.d
-umask 077
-# NOTE: the token is expanded by the HOST into this build-only script (which
-# lives under .build/, is gitignored, and is shredded by build-golden.sh when
-# virt-customize returns). It is written to auth.conf INSIDE the guest only for
-# the apt pull and removed by FINALIZE below; the no-secret scan re-verifies.
-printf 'machine %s login vacti password %s\n' "${APT_MACHINE}" "${VACTI_APT_PRODUCER_TOKEN}" > /etc/apt/auth.conf.d/vacti-engine.conf
-chmod 0600 /etc/apt/auth.conf.d/vacti-engine.conf
-umask 022
-printf 'deb [trusted=yes] %s/apt ./\n' "${APT_SCHEME_HOST}" > /etc/apt/sources.list.d/vacti-engine.list
+# THIN-BOOTSTRAP: no vacti private apt source / credential is wired at build time.
+# The engine .deb is pulled at first boot (vacti-engine-install.service) from the
+# private repo using the enrollment token. Only public sources are used below.
 
 # Node.js 22 from NodeSource (Debian trixie ships 20, engine requires >= 22)
 echo "[prov] adding NodeSource Node.js 22.x repo"
@@ -287,19 +256,14 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 
 apt-get update -y
 
-# --- (phase 1) the engine .deb -----------------------------------------------
-# Install the engine FIRST so its shipped arsenal manifest
-# (/usr/lib/vacti-engine/packaging/arsenal-manifest.json) is on disk to derive the
-# arsenal from. ENGINE_INSTALL_SPEC is host-expanded (pinned to VACTI_ENGINE_REF
-# when set, else floating latest).
-echo "[prov] installing ${ENGINE_INSTALL_SPEC}"
-apt-get install -y --no-install-recommends ${ENGINE_INSTALL_SPEC}
-
-# --- (phase 2) derive the arsenal from the INSTALLED .deb manifest, then install
-# gen-live-build-list.sh resolves the manifest from the installed .deb path first,
-# falling back to the vendored snapshot staged beside it. This replaces the old
-# hand-forked web-lean/full/ctf lists: the baked arsenal is now 1:1 with the engine.
-echo "[prov] deriving the arsenal list from the installed engine manifest"
+# --- derive the arsenal from the VENDORED manifest snapshot, then install -------
+# THIN-BOOTSTRAP: the engine .deb is NOT installed at build time, so
+# gen-live-build-list.sh resolves the manifest from the vendored snapshot staged
+# beside it (/opt/vacti-build/packages/arsenal-manifest.json) rather than the
+# installed .deb. ci/arsenal-sync-check.sh keeps that snapshot 1:1 with the engine
+# at the pinned ref, so the baked arsenal still matches the engine exactly. The
+# engine itself (and its bundled Chromium) arrives at first boot.
+echo "[prov] deriving the arsenal list from the vendored engine manifest snapshot"
 VACTI_FULL_ARSENAL="${VACTI_FULL_ARSENAL}" VACTI_CTF_ARSENAL="${VACTI_CTF_ARSENAL}" \
   /opt/vacti-build/packages/gen-live-build-list.sh /opt/vacti-build/arsenal.list \
   || echo "[prov][warn] arsenal list generation reported an issue"
@@ -340,7 +304,10 @@ fi
 
 # Engine MANDATORY-by-default non-apt extras (web3 slither+Foundry, interactsh-client,
 # gau, jwt_tool, Caido): baked on every image (BASE bake, not VACTI_FULL_ARSENAL-gated).
-# Runs after the engine+arsenal install so go/pipx/git/curl + the vacti-engine user exist.
+# Runs after the arsenal install so go/pipx/git/curl exist. Thin-bootstrap: the
+# vacti-engine USER is not present yet (the engine .deb is first-boot), so the
+# installer falls back to /opt/vacti-engine for Caido; the engine relocates/self-heals
+# Caido after enrollment. The other extras land in /usr/local/bin + /opt regardless.
 if [[ -x /opt/vacti-build/install-engine-extras.sh ]]; then
   echo "[prov] installing engine mandatory extras (web3 + interactsh/gau + jwt_tool + Caido)"
   VACTI_INTERACTSH_VERSION="${VACTI_INTERACTSH_VERSION}" VACTI_GAU_VERSION="${VACTI_GAU_VERSION}" \

@@ -11,6 +11,12 @@ Documentation=https://vacti.example/docs/enroll
 After=network-online.target
 Wants=network-online.target
 After=cloud-init.service
+# Thin-bootstrap: the engine package is NOT baked into the public image. Pull it
+# (vacti-engine-install.service) BEFORE this unit does the enroll POST + starts
+# the engine. Wants= (not Requires=) so a transient install issue surfaces loudly
+# via this unit rather than leaving the enroll unit un-startable.
+Wants=vacti-engine-install.service
+After=vacti-engine-install.service
 # Do not start the engine until enrollment has written engine.env.
 Before=vacti-engine.service
 # Only run while enrollment has not completed.

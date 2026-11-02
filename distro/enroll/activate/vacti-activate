@@ -159,9 +159,12 @@ enroll_stage() { # loops until engine.env appears or the kiosk exits
     umask 022
     log "token staged; starting ${FB_UNIT} (token not logged)"
     systemctl start "$FB_UNIT" 2>/dev/null || true
-    # Wait up to 90s for the enroll chain to produce engine.env.
+    # Wait up to 300s for the enroll chain to produce engine.env. The window is
+    # wider than before because the enroll unit now first pulls the engine .deb
+    # (vacti-engine-install.service) from the private apt repo - a one-time
+    # download on this boot - before the enroll POST writes engine.env.
     local _
-    for _ in $(seq 1 45); do
+    for _ in $(seq 1 150); do
       [[ -f "$CFG_ENV" ]] && break
       sleep 2
     done
