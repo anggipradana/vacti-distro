@@ -28,7 +28,7 @@ OOM_DIR="${HERE}/oom"
 WORK="${WORK:-${DISTRO_DIR}/.build/golden}"
 CACHE="${CACHE:-${DISTRO_DIR}/.build/cache}"
 OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
-GOLDEN="${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-golden.qcow2"
+GOLDEN="${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}${VACTI_FLAVOR_SUFFIX}-golden.qcow2"
 
 log() { echo "[golden] $*"; }
 die() { echo "[golden][FATAL] $*" >&2; exit 1; }
@@ -355,6 +355,67 @@ if [[ "${VACTI_HEADLESS_NM}" =~ ^(1|true|yes|on)\$ ]]; then
   systemctl enable NetworkManager.service 2>/dev/null || true
   install -d -m0755 /etc/cloud/cloud.cfg.d
   printf 'system_info:\n  network:\n    renderers: [NetworkManager]\n' > /etc/cloud/cloud.cfg.d/99-vacti-nm.cfg
+fi
+
+# --- GUI flavor: graphical pre-login activation kiosk + XFCE desktop --------
+# VACTI_FLAVOR is host-expanded into this build-only script (literal gui|headless).
+# The GUI SKU installs the SAME graphical stack the ISO GUI SKU pulls
+# (vacti-gui.list.chroot.in), MINUS calamares (the install-to-disk installer is an
+# ISO-only concern; the OVA/qcow2 are already an installed system). It then makes
+# graphical.target the default and enables LightDM + the pre-login activation
+# kiosk. The kiosk itself (vacti-activate), its fail-open fallback, the polkit rule
+# and the LightDM gate drop-in + greeter were ALL staged above (copy-in) exactly as
+# the headless golden stages them; on the headless SKU they stay inert
+# (ConditionPathExists=/etc/lightdm is false). apply-branding.sh (run just below)
+# installs the gate drop-in + greeter theme because LightDM is now present. This
+# MUST run BEFORE apply-branding so the gate/greeter/plymouth bits are wired.
+# THIN-BOOTSTRAP is untouched: no engine .deb is baked; the kiosk reuses the
+# existing firstboot enroll chain (writes /etc/vacti-engine/enroll.token, line 1 =
+# token, line 2 = url - the exact format vacti-firstboot already parses).
+if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
+  echo "[prov] GUI flavor: installing the graphical stack (XFCE + LightDM + pre-login kiosk)"
+  apt-get install -y --no-install-recommends \
+    xfce4 xfce4-terminal xfce4-whiskermenu-plugin \
+    lightdm lightdm-gtk-greeter \
+    plymouth plymouth-themes \
+    xserver-xorg xinit openbox \
+    network-manager network-manager-gnome \
+    network-manager-openvpn-gnome network-manager-openconnect-gnome \
+    wireguard-tools openconnect \
+    yad zenity \
+    || {
+      echo "[prov][warn] GUI stack bulk install hit a snag; retrying best-effort per-package"
+      for p in xfce4 xfce4-terminal xfce4-whiskermenu-plugin lightdm lightdm-gtk-greeter \
+               plymouth plymouth-themes xserver-xorg xinit openbox \
+               network-manager network-manager-gnome network-manager-openvpn-gnome \
+               network-manager-openconnect-gnome wireguard-tools openconnect yad zenity; do
+        apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] GUI pkg \$p not installable here (runtime self-heal covers it)"
+      done
+    }
+  # Boot to the display-manager target (LightDM), not the text console.
+  systemctl set-default graphical.target 2>/dev/null || true
+  # LightDM is the desktop login. The pre-login GATE drop-in
+  # (apply-branding.sh installs it below, keyed on engine.env) keeps LightDM
+  # WITHHELD until the box is enrolled, so enabling it here is safe: on an
+  # unenrolled box the gate's ConditionPathExists=/etc/vacti-engine/engine.env is
+  # false and LightDM does not start; the activation kiosk owns tty1 first.
+  systemctl enable lightdm.service 2>/dev/null || true
+  # Pre-login activation kiosk (staged above). Its unit is WantedBy=graphical.target
+  # and gated on /etc/lightdm (now present) + !engine.env, so enable it to own tty1
+  # and run network->enroll before LightDM. Its OnFailure= fallback getty means a
+  # kiosk bug can never brick the box (fail-open).
+  systemctl enable vacti-activate.service 2>/dev/null || true
+  # The GUI SKU always uses NetworkManager (the kiosk drives nm-connection-editor /
+  # nmtui). MASK systemd-networkd so the two renderers never fight over the links,
+  # and point cloud-init at the NetworkManager renderer. (Mirrors the headless
+  # VACTI_HEADLESS_NM path and the ISO GUI SKU, which ships network-manager-gnome.)
+  systemctl mask systemd-networkd.service systemd-networkd.socket 2>/dev/null || true
+  systemctl enable NetworkManager.service 2>/dev/null || true
+  install -d -m0755 /etc/cloud/cloud.cfg.d
+  printf 'system_info:\n  network:\n    renderers: [NetworkManager]\n' > /etc/cloud/cloud.cfg.d/99-vacti-nm.cfg
+  systemctl daemon-reload 2>/dev/null || true
+else
+  echo "[prov] headless flavor: text console boot (vacti-netsetup TUI + firstboot token channels); no graphical stack"
 fi
 
 # branding

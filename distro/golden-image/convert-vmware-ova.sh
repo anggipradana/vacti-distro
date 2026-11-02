@@ -14,7 +14,7 @@ OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
 # subshell where a relative path would point at the (empty) temp dir and fail
 # with "Cannot open: No such file or directory".
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
-GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-golden.qcow2}"
+GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}${VACTI_FLAVOR_SUFFIX}-golden.qcow2}"
 TMPL="${HERE}/ovf-templates/vmware-vmx13.ovf.tmpl"
 [[ -f "$GOLDEN" ]] || { echo "golden disk not found: $GOLDEN" >&2; exit 1; }
 
@@ -27,7 +27,7 @@ case "$DEBIAN_ARCH" in
   *)             VMW_OSTYPE="debian12_64Guest" ;;
 esac
 
-NAME="vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-vmware"
+NAME="vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}${VACTI_FLAVOR_SUFFIX}-vmware"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 VMDK="${NAME}-disk1.vmdk"
 
