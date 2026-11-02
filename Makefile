@@ -19,24 +19,44 @@ GI := $(DISTRO)/golden-image
 LBC := $(DISTRO)/live-build-config
 PKG := $(DISTRO)/packages
 
-.PHONY: all golden cloud vmware-ova vbox-ova iso iso-gui seed scan lint clean help
+.PHONY: all golden golden-headless golden-gui cloud vmware-ova vbox-ova \
+        fanout fanout-headless fanout-gui iso iso-gui seed scan lint clean help
+
+# Flavor knob for the VM/cloud forms (golden + cloud/vmware-ova/vbox-ova).
+# VACTI_FLAVOR=headless (default) | gui. It drives both the GUI stack bake
+# (build-golden.sh) and the -headless/-gui filename tag (vacti-appliance.env ->
+# VACTI_FLAVOR_SUFFIX), mirroring the ISO's -headless/-gui split. The golden-*
+# and fanout-* convenience targets below just set it; `make golden` honors a
+# VACTI_FLAVOR passed in the environment.
+VACTI_FLAVOR ?= headless
+export VACTI_FLAVOR
 
 help:
 	@echo "vacti-distro targets:"
-	@echo "  make golden       - fetch+verify Debian 13 genericcloud qcow2, virt-customize the golden disk"
-	@echo "  make cloud        - golden -> cloud qcow2 + raw.gz"
-	@echo "  make vmware-ova   - golden -> streamOptimized VMDK -> OVF(vmx-13) -> .ova"
-	@echo "  make vbox-ova     - golden -> VMDK -> OVF(virtualbox-2.2) -> .ova"
+	@echo "  make golden       - virt-customize the golden disk (VACTI_FLAVOR=headless|gui, default headless)"
+	@echo "  make golden-headless / golden-gui - build a specific flavor's golden disk"
+	@echo "  make cloud        - golden -> cloud qcow2 + raw.gz (honors VACTI_FLAVOR)"
+	@echo "  make vmware-ova   - golden -> streamOptimized VMDK -> OVF(vmx-13) -> .ova (honors VACTI_FLAVOR)"
+	@echo "  make vbox-ova     - golden -> VMDK -> OVF(virtualbox-2.2) -> .ova (honors VACTI_FLAVOR)"
+	@echo "  make fanout       - golden -> all VM/cloud forms for one flavor (honors VACTI_FLAVOR)"
+	@echo "  make fanout-headless / fanout-gui - fan out a specific flavor"
 	@echo "  make iso          - live-build headless hybrid ISO (preseed install-to-disk)"
 	@echo "  make iso-gui      - live-build GUI SKU (XFCE + Calamares)"
 	@echo "  make seed TOKEN=.. URL=.. - build a NoCloud cidata.iso from a fresh single-use token"
 	@echo "  make scan ART=..  - run the mandatory no-secret scan on an artifact"
-	@echo "  make all          - golden + cloud + both OVAs + iso"
+	@echo "  make all          - golden + cloud + both OVAs + iso (headless flavor)"
 	@echo "  make lint         - shellcheck the scripts + sanity-check YAML/OVF"
 	@echo "  make clean        - remove build working trees and artifacts"
 
 golden:
 	$(GI)/build-golden.sh
+
+# Flavor-explicit golden builds (the CI matrix sets VACTI_FLAVOR directly).
+golden-headless:
+	$(MAKE) golden VACTI_FLAVOR=headless
+
+golden-gui:
+	$(MAKE) golden VACTI_FLAVOR=gui
 
 cloud: golden
 	$(GI)/convert-cloud.sh
@@ -50,6 +70,13 @@ vbox-ova: golden
 # Fan-out all VM/cloud forms from the one golden disk (golden built once).
 fanout: golden
 	$(GI)/fanout.sh all
+
+# Flavor-explicit fan-outs.
+fanout-headless:
+	$(MAKE) fanout VACTI_FLAVOR=headless
+
+fanout-gui:
+	$(MAKE) fanout VACTI_FLAVOR=gui
 
 iso:
 	VACTI_ISO_SKU=headless $(LBC)/build-iso.sh
