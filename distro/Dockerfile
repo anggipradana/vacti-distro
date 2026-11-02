@@ -1,29 +1,25 @@
 # syntax=docker/dockerfile:1.7
 # vacti-distro universal container image.
 #
-# The container form of the vacti pentest appliance. It reproduces the golden
-# disk's capability (vacti-engine + the lean web/infra arsenal + the first-run
-# enrollment flow) in a container, for ephemeral "docker run" pentest sessions
-# with no VM and no ISO. It mirrors distro/golden-image/build-golden.sh: a
-# Debian 13 (trixie) base, the pinned Kali apt source for the handful of
-# Kali-only tools, NodeSource Node 22, then the vacti-engine .deb installed from
-# the private apt repo. The arsenal is DERIVED from the engine's own manifest
-# (the same single source of truth the golden and ISO builds use), so it never
-# hand-drifts from the engine.
+# The container form of the vacti pentest appliance. It ships the lean web/infra
+# arsenal + the enrollment flow in a container, for ephemeral "docker run" pentest
+# sessions with no VM and no ISO. It mirrors distro/golden-image/build-golden.sh: a
+# Debian 13 (trixie) base, the pinned Kali apt source for the handful of Kali-only
+# tools, NodeSource Node 22, then the arsenal DERIVED from the vendored engine
+# manifest snapshot.
 #
-# NO SECRET IS BAKED. The private-repo apt credential arrives only as a BuildKit
-# secret mount (id=vacti_apt_token) and its auth file is removed in the same
-# layer that used it; the enrollment token is supplied per-run at "docker run",
-# never on disk. The image is inert without a live vacti enrollment, exactly like
-# the .deb and the disk images.
+# THIN-BOOTSTRAP: the vacti-engine package is NOT baked into the image. The engine
+# .deb (dist + prompt-bundle + skill-bundle = the real IP, plus its bundled
+# Chromium) is pulled at CONTAINER START by the entrypoint from the private apt
+# repo, using the per-run enrollment token. A published image therefore carries NO
+# engine code and NO plain-text methodology for anyone to inspect.
 #
-# NO PRIVATE HOST IN THE PUBLISHED HISTORY. The whole private-apt transaction
-# (and therefore every reference to the private apt URL) is confined to a
-# throw-away `builder` stage. The published stage starts from a fresh base and
-# ingests the fully-installed root filesystem from the builder over a build-time
-# bind mount, so the private apt host appears in NO layer command, ARG default,
-# or metadata of the final image. The build-arg contract is unchanged: CI still
-# passes VACTI_APT_URL (same name); the ARG default here is empty.
+# NO SECRET AND NO PRIVATE HOST ARE BAKED. The arsenal comes entirely from public
+# sources (Debian + the pinned Kali repo + NodeSource), so the build needs neither
+# the private apt repo nor its credential: there is no secret mount and no private
+# source line in any layer. The enrollment token (and the control-plane URL) are
+# supplied per-run at "docker run", never on disk. The image is inert without a
+# live vacti enrollment.
 #
 # Multi-arch: debian:trixie-slim publishes linux/amd64 and linux/arm64, and the
 # flat vacti apt repo serves a native .deb for each (dpkg resolves the right arch
@@ -87,34 +83,19 @@ RUN set -eu; \
     chmod 0755 /usr/local/sbin/vacti-docker-entrypoint; \
     rm -rf /var/lib/apt/lists/*
 
-# --- vacti-engine + arsenal from the PRIVATE apt repo (credential is a secret) -
-# The whole private-repo transaction lives in ONE layer with the token mounted as
-# a BuildKit secret: write the auth file, install the engine, derive and install
-# the arsenal from the INSTALLED engine manifest (phase order mirrors
-# build-golden.sh), then remove the auth file and the private source so no
-# credential and no authful source line ever lands in an image layer.
-# Word-splitting of ${ENGINE_SPEC} and ${PKGS} into apt args is intentional.
+# --- arsenal from PUBLIC sources (Debian + pinned Kali + NodeSource) -----------
+# THIN-BOOTSTRAP: the vacti-engine package is NOT installed here. The engine .deb
+# (dist + prompt-bundle + skill-bundle = the real IP, plus its bundled Chromium)
+# is pulled at CONTAINER START by the entrypoint (vacti-docker-entrypoint), using
+# the per-run enrollment token, so no engine code or methodology ever lands in a
+# published image layer. No private apt repo and no secret are needed at build: the
+# arsenal is DERIVED from the VENDORED manifest snapshot and installed entirely
+# from Debian + the pinned Kali repo + NodeSource. Word-splitting of ${PKGS} into
+# apt args is intentional.
 # hadolint ignore=DL3008,DL3015,SC2086
-RUN --mount=type=secret,id=vacti_apt_token set -eu; \
-    APT_SCHEME_HOST="${VACTI_APT_URL%/}"; \
-    APT_MACHINE="$(printf '%s/apt' "${APT_SCHEME_HOST}" | sed -E 's#^[a-z]+://##')"; \
-    TOKEN="$(cat /run/secrets/vacti_apt_token)"; \
-    install -d -m0700 /etc/apt/auth.conf.d; \
-    printf 'machine %s login vacti password %s\n' "${APT_MACHINE}" "${TOKEN}" \
-      > /etc/apt/auth.conf.d/vacti-engine.conf; \
-    chmod 0600 /etc/apt/auth.conf.d/vacti-engine.conf; \
-    printf 'deb [trusted=yes] %s/apt ./\n' "${APT_SCHEME_HOST}" \
-      > /etc/apt/sources.list.d/vacti-engine.list; \
+RUN set -eu; \
     apt-get update; \
-    if [ -n "${VACTI_ENGINE_REF}" ]; then \
-      ENGINE_SPEC="${VACTI_ENGINE_PKG}=${VACTI_ENGINE_REF}*"; \
-    else \
-      ENGINE_SPEC="${VACTI_ENGINE_PKG}"; \
-    fi; \
-    echo "[docker] installing ${ENGINE_SPEC}"; \
-    apt-get install -y --no-install-recommends ${ENGINE_SPEC} \
-      || apt-get install -y --no-install-recommends "${VACTI_ENGINE_PKG}"; \
-    echo "[docker] deriving the lean arsenal from the installed engine manifest"; \
+    echo "[docker] deriving the lean arsenal from the vendored engine manifest"; \
     VACTI_FULL_ARSENAL="${VACTI_FULL_ARSENAL}" VACTI_CTF_ARSENAL="0" \
       /opt/vacti-build/packages/gen-live-build-list.sh /opt/vacti-build/arsenal.list \
       || echo "[docker][warn] arsenal list generation reported an issue"; \
@@ -131,9 +112,6 @@ RUN --mount=type=secret,id=vacti_apt_token set -eu; \
     else \
       echo "[docker][warn] arsenal list empty; relying on runtime self-heal"; \
     fi; \
-    echo "[docker] FINALIZE: removing the build-time apt credential + private source"; \
-    rm -f /etc/apt/auth.conf.d/vacti-engine.conf; \
-    rm -f /etc/apt/sources.list.d/vacti-engine.list; \
     rm -rf /var/lib/apt/lists/*
 
 # --- FINALIZE identity + housekeeping (no credential in this layer) ------------
@@ -159,9 +137,9 @@ RUN set -eu; \
 # and references NO private host: the only thing it pulls from the builder is the
 # complete installed filesystem, streamed over a build-time bind mount so no
 # intermediate tarball is persisted in a layer. The resulting image therefore
-# carries the identical install state (all engine files, postinst-created
-# users/groups, systemd units, chromium, dpkg database, arsenal packages) with
-# the private apt host absent from every layer command and from image metadata.
+# carries the identical install state (arsenal packages, Chromium shared-lib
+# closure, dpkg database, base runtime) - but NOT the vacti-engine package, which
+# the entrypoint installs at container start.
 # =============================================================================
 FROM debian:trixie-slim
 
@@ -199,7 +177,10 @@ RUN --mount=type=bind,from=builder,source=/,target=/builder-root,readonly set -e
     | tar -C / --numeric-owner -p -xf -
 
 VOLUME ["/var/lib/vacti-engine"]
-WORKDIR /usr/lib/vacti-engine
+# THIN-BOOTSTRAP: do NOT WORKDIR into /usr/lib/vacti-engine - that would create the
+# engine dir (empty) in the published image. The engine tree is created by the
+# first-boot/container-start install; the entrypoint cd's into $APP after it installs.
+WORKDIR /
 
 # The engine traps SIGTERM for a graceful finish-the-tick shutdown (matches the
 # systemd unit KillSignal=SIGTERM); there is no systemd watchdog in a container,

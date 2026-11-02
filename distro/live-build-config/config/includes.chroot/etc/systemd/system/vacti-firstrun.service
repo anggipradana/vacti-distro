@@ -8,6 +8,11 @@
 Description=vacti first-run enrollment (one-time, no baked secret)
 After=network-online.target
 Wants=network-online.target
+# Thin-bootstrap: the engine package is NOT baked into the public ISO. Pull it
+# (vacti-engine-install.service) BEFORE this unit does the enroll POST + starts
+# the engine.
+Wants=vacti-engine-install.service
+After=vacti-engine-install.service
 Before=vacti-engine.service
 ConditionPathExists=!/etc/vacti-engine/engine.env
 
