@@ -406,8 +406,19 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
   KERNEL_PKG="linux-image-amd64"
   [[ "${VACTI_ARCH_SUFFIX}" == "-arm64" ]] && KERNEL_PKG="linux-image-arm64"
   CLOUD_PKG="\${KERNEL_PKG/linux-image-/linux-image-cloud-}"
-  apt-get install -y --no-install-recommends "\$KERNEL_PKG" firmware-linux firmware-linux-nonfree firmware-misc-nonfree
-  apt-get purge -y "\$CLOUD_PKG" || true
+  # The kernel/firmware install cascades a dpkg trigger that re-configures
+  # conffiles shipped by already-installed packages (e.g. earlyoom's
+  # /etc/default/earlyoom). There is no stdin inside virt-customize, so an
+  # interactive conffile prompt aborts dpkg. Force noninteractive + keep the
+  # existing conffile on both the install and the purge. The dpkg option
+  # strings are single-quoted with no \$, so they stay literal in this heredoc.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    -o Dpkg::Options::='--force-confold' -o Dpkg::Options::='--force-confdef' \
+    --no-install-recommends \
+    "\$KERNEL_PKG" firmware-linux firmware-linux-nonfree firmware-misc-nonfree
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y \
+    -o Dpkg::Options::='--force-confold' -o Dpkg::Options::='--force-confdef' \
+    "\$CLOUD_PKG" || true
   update-grub || true
   # Boot to the display-manager target (LightDM), not the text console.
   systemctl set-default graphical.target 2>/dev/null || true
