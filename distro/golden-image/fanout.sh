@@ -12,7 +12,7 @@ DISTRO_DIR="$(cd "${HERE}/.." && pwd)"
 # shellcheck source=/dev/null
 source "${DISTRO_DIR}/vacti-appliance.env"
 OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
-GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-golden.qcow2}"
+GOLDEN="${GOLDEN:-${OUT}/vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}${VACTI_FLAVOR_SUFFIX}-golden.qcow2}"
 [[ -f "$GOLDEN" ]] || { echo "[fanout] golden disk not found: $GOLDEN (run build-golden.sh first)" >&2; exit 1; }
 
 forms=("$@"); [[ ${#forms[@]} -eq 0 ]] && forms=(all)
@@ -34,5 +34,5 @@ done
 echo "[fanout] NoCloud seed ships as a TEMPLATE only (no token baked):"
 echo "         ${DISTRO_DIR}/enroll/nocloud/make-seed.sh --token <TOK> --url <CP>"
 echo "[fanout] reproducibility manifest:"
-( cd "$OUT" && sha256sum ./*.qcow2 ./*.raw.gz ./*.ova 2>/dev/null > "vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}-manifest.sha256" || true )
+( cd "$OUT" && sha256sum ./*.qcow2 ./*.raw.gz ./*.ova 2>/dev/null > "vacti-engine-${VACTI_RELEASE}${VACTI_ARCH_SUFFIX}${VACTI_FLAVOR_SUFFIX}-manifest.sha256" || true )
 echo "[fanout] done; artifacts in ${OUT}"
