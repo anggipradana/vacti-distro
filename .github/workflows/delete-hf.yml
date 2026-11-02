@@ -1,0 +1,109 @@
+# Delete obsolete image artifacts from the Hugging Face dataset.
+#
+# WHY: when a new layout supersedes previously published files (e.g. the
+# non-flavored amd64 appliance images replaced by the dual-variant gui +
+# headless flavor-split images), the stale files must be removed from the
+# dataset anggipradana/vacti-distro-images so consumers do not pull dead forms.
+#
+# This workflow is manual-only (workflow_dispatch). It reads the same
+# HF_PUBLISH_TOKEN secret and uses the same huggingface_hub auth pattern as
+# publish-images-hf.yml. It deletes ONLY the exact paths named in the `paths`
+# input, each under the v<version>/ prefix, and prints the resulting folder
+# listing as proof.
+name: delete-hf
+
+on:
+  workflow_dispatch:
+    inputs:
+      paths:
+        description: "Comma-separated file names to delete under v<version>/ (e.g. a.qcow2,b.raw.gz)"
+        required: true
+      version:
+        description: "Release version X.Y.Z (folder prefix)"
+        required: false
+        default: "0.1.0"
+
+# Least privilege: the delete authenticates with HF_PUBLISH_TOKEN, not the
+# GitHub token. Nothing in the repo is written.
+permissions:
+  contents: read
+
+concurrency:
+  group: delete-hf-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install huggingface_hub CLI (minor-pinned)
+        run: pip install -U "huggingface_hub[cli]~=0.35.0"
+
+      - name: Delete named paths from Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_PUBLISH_TOKEN }}
+          IN_PATHS: ${{ github.event.inputs.paths }}
+          IN_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "HF_PUBLISH_TOKEN secret is not set on this repo; cannot delete." >&2
+            echo "Add it in Settings > Secrets and variables > Actions (the hf_... write token)." >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+
+          from huggingface_hub import HfApi
+
+          REPO_ID = "anggipradana/vacti-distro-images"
+          REPO_TYPE = "dataset"
+
+          token = os.environ["HF_TOKEN"]
+          version = os.environ["IN_VERSION"].strip()
+          raw = os.environ["IN_PATHS"]
+
+          names = [p.strip() for p in raw.split(",") if p.strip()]
+          if not names:
+              raise SystemExit("no paths provided")
+
+          prefix = f"v{version}/"
+          targets = [f"{prefix}{n}" for n in names]
+
+          print("[delete] repo      :", REPO_ID)
+          print("[delete] version   :", version)
+          print("[delete] targets   :")
+          for t in targets:
+              print("          -", t)
+
+          api = HfApi(token=token)
+
+          api.delete_files(
+              repo_id=REPO_ID,
+              repo_type=REPO_TYPE,
+              delete_patterns=targets,
+              commit_message=f"chore: delete obsolete artifacts under v{version}",
+          )
+
+          remaining = sorted(
+              f
+              for f in api.list_repo_files(repo_id=REPO_ID, repo_type=REPO_TYPE)
+              if f.startswith(prefix)
+          )
+          print(f"[delete] remaining files under {prefix} ({len(remaining)}):")
+          for f in remaining:
+              print("          -", f)
+
+          still = [t for t in targets if t in remaining]
+          if still:
+              raise SystemExit(f"[delete] FAILED - targets still present: {still}")
+          print("[delete] OK - all targets removed")
+          PY
