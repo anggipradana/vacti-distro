@@ -46,6 +46,42 @@ ENROLL_TOKEN="${VACTI_ENROLL_TOKEN:-${ENROLL_TOKEN:-}}"
 ENGINE_ID="${ENGINE_ID:-$(hostname -s 2>/dev/null || echo engine)}"
 BASE="${VACTI_URL%/}"
 
+# THIN-BOOTSTRAP: the engine package is NOT baked into the published image (no
+# /usr/lib/vacti-engine, no prompt-bundle, no skill-bundle - the plain-text IP
+# never rides a public image). Pull the engine .deb now, from the private apt repo,
+# authenticated with HTTP Basic (login vacti, password = the enrollment token, or
+# the producer token when one is supplied directly). apt GET does not consume the
+# single-use enroll token; the enroll POST below does. No credential or private
+# host is baked: the auth.conf + source are written here, at container start.
+ensure_engine_installed() {
+  local marker="${APP}/dist/runner/cli.js"
+  [[ -e "$marker" ]] && { log "engine already present (${marker})"; return 0; }
+  local apt_token="${ENROLL_TOKEN:-${VACTI_TOKEN:-}}"
+  if [[ -z "$apt_token" ]]; then
+    die "engine not baked and no token to pull it: supply VACTI_ENROLL_TOKEN (single-use mint) or VACTI_TOKEN (producer)"
+  fi
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    die "engine not baked and this entrypoint is not root; cannot apt-get install ${VACTI_ENGINE_PKG:-vacti-engine}"
+  fi
+  local apt_machine
+  apt_machine="$(printf '%s/apt' "${BASE}" | sed -E 's#^[a-z]+://##')"
+  install -d -m0755 /etc/apt/auth.conf.d /etc/apt/sources.list.d
+  umask 077
+  printf 'machine %s login vacti password %s\n' "${apt_machine}" "${apt_token}" \
+    > /etc/apt/auth.conf.d/vacti-engine.conf
+  chmod 0600 /etc/apt/auth.conf.d/vacti-engine.conf
+  umask 022
+  printf 'deb [trusted=yes] %s/apt ./\n' "${BASE}" > /etc/apt/sources.list.d/vacti-engine.list
+  log "pulling ${VACTI_ENGINE_PKG:-vacti-engine} from ${BASE}/apt (engine not baked; token not logged)"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update || die "apt-get update failed against ${BASE}/apt (network / token?)"
+  apt-get install -y --no-install-recommends "${VACTI_ENGINE_PKG:-vacti-engine}" \
+    || die "apt-get install ${VACTI_ENGINE_PKG:-vacti-engine} failed (token expired/invalid or repo unreachable)"
+  [[ -e "$marker" ]] || die "engine install reported success but ${marker} is missing"
+  rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+}
+ensure_engine_installed
+
 # Exchange a single-use enroll token for the scoped tokens, mirroring the
 # firstboot POST /api/pentest/enroll handshake. Only when no producer token
 # was supplied or persisted.

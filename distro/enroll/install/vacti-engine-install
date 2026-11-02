@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/vacti-engine-install - FIRST-BOOT thin-bootstrap engine install.
+#
+# The public ISO/OVA images ship WITHOUT the vacti-engine package (no
+# /usr/lib/vacti-engine, no prompt-bundle, no skill-bundle - that plain-text
+# methodology is the real IP and must never ride a public download). The engine
+# .deb is pulled from the private apt repo at first boot, authenticated with the
+# per-boot ENROLLMENT TOKEN the operator supplies (the same token the enroll POST
+# consumes a moment later). The arsenal, chromium shared-lib closure, kiosk and
+# apt tooling are already baked; only the engine package arrives here.
+#
+# Ordering: this unit is pulled by (Wants=/After=) the first-boot enroll unit
+# (vacti-firstboot.service on VM/cloud, vacti-firstrun.service on the ISO) and
+# runs BEFORE it, so the engine package is present when vacti-firstboot does the
+# enroll POST, writes /etc/vacti-engine/engine.env and starts vacti-engine.service.
+# engine.env is what the LightDM gate (10-vacti-gate.conf) keys on, so the desktop
+# login still unlocks only after a full enroll.
+#
+# IDEMPOTENT + FAIL-OPEN-ON-NO-TOKEN, FAIL-LOUD-ON-APT-ERROR:
+#   - engine already installed        -> exit 0 (nothing to do)
+#   - no per-boot token located yet    -> exit 0 (vacti-firstboot emits the loud
+#                                         "no live token" error; on the GUI SKU the
+#                                         kiosk re-triggers this after the operator
+#                                         types the token)
+#   - token present but apt install fails -> exit 1 (loud; engine.env never
+#                                         appears so the kiosk shows its retry msg)
+# The token VALUE is never logged. No credential and no private host ships in the
+# image: both the auth.conf and the sources.list are written HERE, at runtime.
+set -euo pipefail
+
+CFG_DIR="/etc/vacti-engine"
+CFG_ENV="${CFG_DIR}/engine.env"
+TOKEN_FILE="${VACTI_ENROLL_FILE:-${CFG_DIR}/enroll.token}"
+APT_AUTH="/etc/apt/auth.conf.d/vacti-engine.conf"
+APT_SRC="/etc/apt/sources.list.d/vacti-engine.list"
+ENGINE_PKG="${VACTI_ENGINE_PKG:-vacti-engine}"
+ENGINE_MARKER="/usr/lib/vacti-engine/dist/runner/cli.js"
+
+log() { echo "[vacti-engine-install] $*"; }
+die() { echo "[vacti-engine-install][FATAL] $*" >&2; exit 1; }
+
+export DEBIAN_FRONTEND=noninteractive
+
+# Already enrolled, or the engine is already on disk: nothing to do.
+[[ -f "$CFG_ENV" ]] && { log "engine.env present - engine already provisioned"; exit 0; }
+[[ -e "$ENGINE_MARKER" ]] && { log "engine already installed (${ENGINE_MARKER}) - nothing to do"; exit 0; }
+
+# --- locate the per-boot enroll token + control-plane URL --------------------
+# Same precedence as vacti-firstboot so the headless/seed path works too. NONE of
+# these is baked into the image.
+ENROLL_TOKEN=""
+VACTI_URL=""
+
+# (a) the well-known file drop (GUI kiosk write / console / preseed late_command)
+if [[ -s "$TOKEN_FILE" ]]; then
+  ENROLL_TOKEN="$(sed -n '1p' "$TOKEN_FILE")"
+  VACTI_URL="$(sed -n '2p' "$TOKEN_FILE")"
+fi
+
+# (b) cloud-init / guestinfo env drop
+for ud in /run/vacti/enroll.env /var/lib/cloud/instance/vacti-enroll.env; do
+  if [[ -z "$ENROLL_TOKEN" && -s "$ud" ]]; then
+    # shellcheck disable=SC1090
+    source "$ud" || true
+    ENROLL_TOKEN="${vacti_enroll_token:-${VACTI_ENROLL_TOKEN:-}}"
+    VACTI_URL="${vacti_url:-${VACTI_URL:-}}"
+  fi
+done
+
+# (c) kernel cmdline fallback
+if [[ -z "$ENROLL_TOKEN" ]] && grep -q 'vacti.enroll_token=' /proc/cmdline 2>/dev/null; then
+  ENROLL_TOKEN="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^vacti.enroll_token=//p')"
+  VACTI_URL="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^vacti.url=//p')"
+fi
+
+if [[ -z "$ENROLL_TOKEN" || -z "$VACTI_URL" ]]; then
+  log "no per-boot enroll token/url located yet - deferring (vacti-firstboot handles the missing-token path)"
+  exit 0
+fi
+
+# --- write the runtime apt auth + source (never baked) -----------------------
+# auth.conf `machine` must match the sources.list path by host+path-PREFIX, so
+# derive it from the FULL repo URL (scheme stripped, /apt appended), mirroring the
+# build-time pattern. HTTP Basic: login vacti, password = the enrollment token.
+BASE="${VACTI_URL%/}"
+APT_MACHINE="$(printf '%s/apt' "${BASE}" | sed -E 's#^[a-z]+://##')"
+
+install -d -m0755 /etc/apt/auth.conf.d /etc/apt/sources.list.d
+umask 077
+printf 'machine %s login vacti password %s\n' "${APT_MACHINE}" "${ENROLL_TOKEN}" > "$APT_AUTH"
+chmod 0600 "$APT_AUTH"
+umask 022
+printf '# Written at first boot by vacti-engine-install from the enrollment URL.\n# Public source line (no credential); the token lives only in %s.\ndeb [trusted=yes] %s/apt ./\n' \
+  "$APT_AUTH" "${BASE}" > "$APT_SRC"
+log "apt source + auth wired for ${BASE}/apt (token not logged)"
+
+# --- pull the engine .deb -----------------------------------------------------
+log "apt-get update + install ${ENGINE_PKG} (engine not baked into the public image)"
+apt-get update || die "apt-get update failed against ${BASE}/apt (check network / enrollment token)"
+apt-get install -y --no-install-recommends "${ENGINE_PKG}" \
+  || die "apt-get install ${ENGINE_PKG} failed (token may be expired/invalid, or the repo is unreachable)"
+
+[[ -e "$ENGINE_MARKER" ]] || die "install reported success but ${ENGINE_MARKER} is missing - refusing to continue"
+
+# Keep the .list + auth.conf in place: the engine's own update path re-uses the
+# private apt source. vacti-firstboot now runs next (After=), does the enroll POST,
+# writes engine.env and starts vacti-engine.service.
+log "engine package installed; handing off to the enroll unit"
