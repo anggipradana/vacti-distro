@@ -1,0 +1,25 @@
+[Unit]
+Description=vacti pre-login activation TUI (headless SKU: network -> enroll, before getty)
+# Only when enrolled is NOT done AND LightDM is absent (= headless SKU)
+ConditionPathExists=!/etc/vacti-engine/engine.env
+ConditionPathExists=!/etc/lightdm
+After=systemd-user-sessions.service network-online.target
+Wants=network-online.target
+Conflicts=getty@tty1.service
+Before=getty@tty1.service
+OnFailure=getty@tty1.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/vacti-netsetup
+Restart=on-failure
+RestartSec=2
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
