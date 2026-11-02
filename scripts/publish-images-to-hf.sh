@@ -88,8 +88,15 @@ rm -rf "$STAGE"
 mkdir -p "$RAW" "$RENAMED"
 
 # --- 1. download the run's artifacts ----------------------------------------
-log "downloading artifacts from ${SRC_REPO} run ${RUN_ID} ..."
-gh run download "$RUN_ID" -R "$SRC_REPO" -D "$RAW" || fail "gh run download failed for run ${RUN_ID}"
+# Only pull the form-* artifacts (the publishable VM/ISO/cloud images). A bare
+# `gh run download` grabs EVERY artifact on the run, including the golden disk
+# (large, skipped below) and the `*.dockerbuild` BuildKit build record emitted
+# by docker/build-push-action. That build record is not a standard zip, so gh
+# aborts with "error extracting zip archive: zip: not a valid zip file" and the
+# whole download fails. Restricting to form-* avoids it and skips the needless
+# golden download.
+log "downloading form-* artifacts from ${SRC_REPO} run ${RUN_ID} ..."
+gh run download "$RUN_ID" -R "$SRC_REPO" -D "$RAW" --pattern 'form-*' || fail "gh run download failed for run ${RUN_ID}"
 
 # --- version: auto-derive from a filename if requested ----------------------
 if [ -z "$VERSION" ] || [ "$VERSION" = "auto" ]; then
