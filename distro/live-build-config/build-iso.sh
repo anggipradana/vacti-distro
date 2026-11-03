@@ -74,7 +74,7 @@ cp -a "${DISTRO_DIR}/branding/os-release" "${DISTRO_DIR}/branding/issue" \
       "${DISTRO_DIR}/branding/motd" "${DISTRO_DIR}/branding/disclaimer.txt" \
       "${DISTRO_DIR}/branding/apply-branding.sh" \
       "${HERE}/config/includes.chroot/usr/share/vacti/branding/"
-for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo; do
+for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo kiosk; do
   [[ -d "${DISTRO_DIR}/branding/${d}" ]] && cp -a "${DISTRO_DIR}/branding/${d}" "${HERE}/config/includes.chroot/usr/share/vacti/branding/"
 done
 # GRUB boot-menu splash (binary overlay), if the operator provided one
@@ -102,6 +102,10 @@ install -D -m0644 "${DISTRO_DIR}/enroll/install/vacti-engine-install.service" \
 #     unpackfs), so the gate carries through to the installed box.
 install -D -m0755 "${DISTRO_DIR}/enroll/activate/vacti-activate" \
   "${HERE}/config/includes.chroot/usr/local/sbin/vacti-activate"
+# Premium GTK4 + libadwaita kiosk app (GUI SKU). Travels verbatim in the squashfs;
+# vacti-activate invokes it when GTK4/libadwaita import, else falls back to yad.
+install -D -m0755 "${DISTRO_DIR}/enroll/activate/vacti-kiosk" \
+  "${HERE}/config/includes.chroot/usr/local/share/vacti-kiosk/vacti-kiosk"
 install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate.service" \
   "${HERE}/config/includes.chroot/etc/systemd/system/vacti-activate.service"
 install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate-fallback.service" \
