@@ -45,6 +45,14 @@ DI_FLAVOUR="live"
 # runs -nographic -serial file:) can observe the boot, and genuinely useful for a
 # headless appliance over a serial/virtual console. Harmless on hardware with no
 # serial port (output is discarded; the screen stays primary).
+# --apt-options hardens EVERY apt invocation live-build drives (the archive
+# apt-update AND the heavy install-packages fetch, for both the Debian and the
+# pinned Kali source) against a transient mirror failure. http.kali.org and
+# deb.debian.org are DNS round-robins across third-party mirrors; one mirror
+# returning HTTP 500/timeout on a single .deb has aborted the whole build. With
+# Acquire::Retries, apt re-requests the failed file (re-resolving the round-robin,
+# so a retry usually lands on a healthy mirror) before giving up. --yes is kept
+# because it is live-build's APT_OPTIONS default and the install step needs it.
 # shellcheck disable=SC2086  # EXTRA_OPTS is intentional word-split option list (empty on amd64)
 lb config noauto \
   --distribution trixie \
@@ -59,6 +67,7 @@ lb config noauto \
   --iso-volume "vacti-${VACTI_RELEASE}${VACTI_VOL_ARCH}" \
   --apt-indices false \
   --apt-recommends false \
+  --apt-options "--yes -o Acquire::Retries=5 -o Acquire::Retries::Delay::Maximum=15" \
   --cache true \
   --memtest none \
   "${@}"
