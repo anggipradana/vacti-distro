@@ -29,6 +29,10 @@ on:
         description: "Bake the full arsenal (1) or lean web+infra (0)"
         required: false
         default: "0"
+      ctf_arsenal:
+        description: "Also bake the CTF tool set (1) or not (0)"
+        required: false
+        default: "0"
       forms:
         description: "Which ARM64 image forms to build"
         required: false
@@ -50,6 +54,10 @@ concurrency:
 env:
   VACTI_RELEASE: ${{ github.event.inputs.release || github.event.client_payload.release || '0.1.0' }}
   VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '0' }}
+  # CTF tool set toggle (arm64 OVA/ISO). Honored by build-golden.sh via
+  # vacti-appliance.env, same as amd64; a dispatch with full_arsenal=1 +
+  # ctf_arsenal=1 bakes the entire arsenal into the arm64 forms too.
+  VACTI_CTF_ARSENAL: ${{ github.event.inputs.ctf_arsenal || '0' }}
   VACTI_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF || github.event.client_payload.release || '' }}
   VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
   VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}

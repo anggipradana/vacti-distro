@@ -33,6 +33,16 @@
 # bootstrap-apt.sh documents it as "absent from some Debian suites" and installs
 # it best-effort; the runtime arsenal-check maps gpclient -> this package for
 # post-boot self-heal where an archive does carry it.
+#
+# SOURCING DECISION (stays best-effort; do NOT hard-fail, fetch an upstream .deb,
+# or drop from the manifest). The CORE GlobalProtect capability is already
+# present and runnable on all four surfaces via the apt-installed `openconnect`
+# (core): `openconnect --protocol=gp <gateway>` builds the GP tunnel. The
+# separate globalprotect-openconnect wrapper only automates the SAML/portal
+# browser pre-auth; it is a convenience, not a required capability, and its
+# recent releases pull a GUI (Qt/Tauri) stack unsuitable for a headless
+# appliance. So it stays a best-effort install (auto-resolves if an archive ever
+# carries it) rather than a fragile build-time upstream-.deb fetch.
 globalprotect-openconnect
 #
 # scrcpy: the Android screen-mirror/control tool (mobile vertical). PRESENT in
