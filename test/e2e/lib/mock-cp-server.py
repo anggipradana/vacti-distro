@@ -61,7 +61,7 @@ except Exception as exc:  # pragma: no cover - surfaced at runtime, not py_compi
 # ---------------------------------------------------------------------------
 # State (in-process; the harness inspects it via /__admin/state).
 # ---------------------------------------------------------------------------
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 STATE = {
     "codes": {},          # normalised_code -> {token, expires_at, consumed, minted_at}
     "issued_tokens": {},  # full_token -> {from_code}
