@@ -307,6 +307,18 @@ else
   echo "[prov][warn] arsenal list empty; relying on runtime self-heal"
 fi
 
+# httpx canonical-name shim: the image ships ProjectDiscovery httpx as the
+# httpx-toolkit binary, but the engine REQUIRED_TOOLS check (arsenal-check) probes
+# bare httpx (the upstream canonical name), so 'which httpx' never clears and every
+# heartbeat reports missing_tools=[httpx] even though the capability works. A plain
+# symlink clears the check without duplicating the ~56MB binary. Guarded: only when
+# httpx-toolkit resolves AND no real httpx is already on PATH, so it never shadows a
+# genuine httpx (e.g. a future python3-httpx) if one is ever added.
+if command -v httpx-toolkit >/dev/null 2>&1 && ! command -v httpx >/dev/null 2>&1; then
+  ln -sf "\$(command -v httpx-toolkit)" /usr/local/bin/httpx
+  echo "[prov] linked /usr/local/bin/httpx -> \$(command -v httpx-toolkit) (engine bare-httpx REQUIRED_TOOLS check)"
+fi
+
 # REA (rea-agents): MANDATORY, baked on every image. Runs after Node + engine
 # install (the NodeSource 22.x repo was added above). install-rea.sh verifies the
 # Node floor itself, then installs the PINNED rea-agents globally. Best-effort: a
