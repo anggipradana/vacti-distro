@@ -108,6 +108,18 @@ RUN set -eu; \
 # arsenal is DERIVED from the VENDORED manifest snapshot and installed entirely
 # from Debian + the pinned Kali repo + NodeSource. Word-splitting of ${PKGS} into
 # apt args is intentional.
+#
+# FAIL-LOUD GATE + best-effort policy. A required grant/core package that has an
+# apt candidate but fails to install aborts the build (never ship a silently-broken
+# tool). Two packages are EXEMPT via distro/packages/best-effort.list - the single
+# cross-path policy also honored by the ISO (build-iso.sh + 0330 hook) and by the
+# golden/OVA per-package install: an arsenal tool that is transiently un-installable
+# (absent on a suite, OR a mid-flight archive transition) warns and the build
+# continues, installing cleanly once the archive heals. As of trixie's in-flight
+# ffmpeg 7.x transition this exempts `scrcpy` (Depends libavcodec63 >= 7:9.0.2 /
+# libvpl2 >= 1:2.17.0 -> "held broken packages"); it stays in the manifest + on the
+# OVA. The candidate probe reads the whole `apt-cache policy` stream (awk END, not a
+# mid-stream exit) so it never takes SIGPIPE/141 under `set -o pipefail`.
 # hadolint ignore=DL3008,DL3015,SC2086
 RUN set -eu; \
     apt-get update; \
@@ -117,6 +129,7 @@ RUN set -eu; \
       || echo "[docker][warn] arsenal list generation reported an issue"; \
     PKGS="$(grep -vE '^[[:space:]]*(#|$)' /opt/vacti-build/arsenal.list 2>/dev/null || true)"; \
     MANIFEST=/opt/vacti-build/packages/arsenal-manifest.json; \
+    BEST_EFFORT=/opt/vacti-build/packages/best-effort.list; \
     : > /tmp/arsenal-failed.list; \
     if [ -n "${PKGS}" ]; then \
       echo "[docker] installing arsenal (bulk)"; \
@@ -133,13 +146,18 @@ RUN set -eu; \
     : > /tmp/arsenal-gate-failed.list; \
     if [ -s /tmp/arsenal-failed.list ]; then \
       echo "[docker] classifying still-failed packages against the engine manifest (jq)"; \
+      BE_NAMES="$(sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$BEST_EFFORT" 2>/dev/null | grep -vE '^$' || true)"; \
       while IFS= read -r p; do \
         if [ -z "$p" ]; then continue; fi; \
+        if printf '%s\n' "$BE_NAMES" | grep -qxF "$p"; then \
+          echo "[docker][warn] best-effort tool not installable on this base/arch right now: $p (best-effort.list policy - e.g. a mid-flight archive transition; OVA retains it and runtime arsenal-check self-heals)"; \
+          continue; \
+        fi; \
         if jq -e --arg p "$p" '(([.apt.verticals[][], .apt.ctf[]] | index($p)) != null) and (([.apt.grant[], .apt.core[]] | index($p)) == null)' "$MANIFEST" >/dev/null 2>&1; then \
           echo "[docker][warn] optional (verticals/ctf) tool unavailable on this arch: $p (allowed to be arch-divergent)"; \
           continue; \
         fi; \
-        cand="$(apt-cache policy "$p" 2>/dev/null | awk -F': ' '/Candidate:/{print $2; exit}')"; \
+        cand="$(apt-cache policy "$p" 2>/dev/null | awk -F': ' '/Candidate:/{c=$2} END{print c}')"; \
         if [ -z "$cand" ] || [ "$cand" = "(none)" ]; then \
           echo "[docker][warn] required tool $p has no apt package on this base (engine runtime self-heal provisions it)"; \
         else \
