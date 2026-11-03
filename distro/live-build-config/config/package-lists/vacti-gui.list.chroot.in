@@ -2,6 +2,16 @@
 # installer. Pulled on top of vacti-core.list.chroot. Headless SKU omits all of this.
 xfce4
 xfce4-terminal
+# Human-operator desktop web browser. The engine's own Chromium (vacti-engine-chromium)
+# is HEADLESS and path-coupled to the engine home (ms-playwright) for automated evidence
+# capture - it is NOT a desktop-launchable browser. The GUI SKU therefore needs its own
+# browser so the operator can reach the control plane and browse a target by hand.
+# firefox-esr is Debian-main on both amd64 and arm64 (no Kali/third-party source needed).
+firefox-esr
+# Manual desktop screenshot tool for operator-captured evidence. Automated evidence is
+# Playwright/Caido-driven (programmatic), but the operator has no manual SS tool on the
+# desktop without this. xfce4-screenshooter integrates with the XFCE panel + hotkeys.
+xfce4-screenshooter
 # Whisker menu: the branded start-menu button (vacti radar-shield icon) wired by
 # the skel xfce4-panel.xml in the branding layer.
 xfce4-whiskermenu-plugin
