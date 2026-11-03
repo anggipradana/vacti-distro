@@ -1,6 +1,7 @@
 # best-effort.list - arsenal packages that MAY be absent from the Debian/Kali
-# apt archives on some suites and therefore must be installed BEST-EFFORT, never
-# as a hard dependency that aborts a build.
+# apt archives on some suites - OR that are present but TRANSIENTLY un-installable
+# because a dependency is mid-transition in the archive - and therefore must be
+# installed BEST-EFFORT, never as a hard dependency that aborts a build.
 #
 # WHY THIS FILE EXISTS (OVA/ISO parity). The golden/OVA path (build-golden.sh)
 # and the engine's own packaging/bootstrap-apt.sh install the curated arsenal
@@ -33,3 +34,20 @@
 # it best-effort; the runtime arsenal-check maps gpclient -> this package for
 # post-boot self-heal where an archive does carry it.
 globalprotect-openconnect
+#
+# scrcpy: the Android screen-mirror/control tool (mobile vertical). PRESENT in
+# Debian 13 trixie, but its candidate transiently pulls the in-flight ffmpeg
+# transition - it Depends on libavcodec63 (>= 7:9.0.2) / libvpl2 (>= 1:2.17.0),
+# which trixie had not finished transitioning, so `apt-get install scrcpy` dies
+# with "Unable to correct problems, you have held broken packages". That broke
+# only the all-or-nothing live-build ISO chroot and the fail-loud Docker gate;
+# the golden/OVA path installs per-package best-effort and merely warned, so
+# scrcpy STAYS present on the OVA (the primary surface). Marking it best-effort
+# applies those same warn-and-continue semantics to the ISO + Docker paths: the
+# build stays green now, and scrcpy installs cleanly again - with NO further
+# change - the moment the trixie libavcodec63/libvpl2 transition completes.
+# (Debian ffmpeg 7.x transition tracker: https://release.debian.org/transitions/)
+# It remains in the engine manifest (apt.grant/apt.core/apt.verticals.mobile), so
+# the arsenal-sync divergence guard stays satisfied; this file only governs the
+# ISO/Docker install POLICY, not manifest membership.
+scrcpy
