@@ -32,7 +32,7 @@ vacti_is_short_code() { # raw
 # on success. Exit codes (mirroring vacti-activate's resolve_exchange contract):
 #   0  ok (token on stdout)
 #   44 HTTP 404 - code not found
-#   41 HTTP 410 - code gone (expired / already consumed; single-use, 3h TTL)
+#   41 HTTP 410 - code gone (expired / already consumed; single-use, 10-min TTL)
 #   49 HTTP 409 - operator gone
 #   42 HTTP 429 - rate-limited / lockout
 #   1  network / other / empty token
@@ -68,7 +68,7 @@ vacti_pairing_exchange() { # url code
 vacti_pairing_error_en() { # rc
   case "${1:-1}" in
     44) echo "pairing code not found - check it and try again" ;;
-    41) echo "pairing code expired or already used (single-use, 3h TTL) - re-mint in the dashboard" ;;
+    41) echo "pairing code expired or already used (single-use, 10-min TTL) - re-mint in the dashboard" ;;
     49) echo "pairing session is no longer available - re-mint a code in the dashboard" ;;
     42) echo "too many attempts - wait a moment and try again" ;;
     *)  echo "network error while exchanging the pairing code - try again" ;;
@@ -79,7 +79,7 @@ vacti_pairing_error_en() { # rc
 vacti_pairing_error_id() { # rc
   case "${1:-1}" in
     44) echo "Kode tidak ditemukan. Periksa lalu coba lagi." ;;
-    41) echo "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 3 jam). Mint ulang di dashboard." ;;
+    41) echo "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit). Mint ulang di dashboard." ;;
     49) echo "Sesi kode tidak tersedia lagi. Mint ulang kode di dashboard." ;;
     42) echo "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi." ;;
     *)  echo "Gangguan jaringan saat menukar kode. Coba lagi." ;;
