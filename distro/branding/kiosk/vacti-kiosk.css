@@ -1,0 +1,86 @@
+/* vacti-kiosk.css - brand skin for the GTK4 + libadwaita activation kiosk.
+ *
+ * Installed to /usr/local/share/vacti-kiosk/vacti-kiosk.css by apply-branding.sh
+ * and loaded by vacti-kiosk at APPLICATION priority over the forced-dark
+ * libadwaita base. Everything degrades cleanly if this file is absent (the kiosk
+ * still renders the stock dark theme). Palette = the product navy/blue:
+ *   navy-900 #0E347E  blue-600 #1F5BD6  sky-400 #37B6FF  sky-200 #8FD4FF
+ *   red-500  #FF5A5A  white   #FFFFFF
+ */
+
+/* Recolour libadwaita's named accent + window to the brand palette. */
+@define-color accent_bg_color  #1F5BD6;
+@define-color accent_fg_color  #ffffff;
+@define-color accent_color     #6fb7ff;
+@define-color window_bg_color  #0a0f1e;
+@define-color window_fg_color  #eef3fb;
+@define-color view_bg_color    #0f1730;
+@define-color card_bg_color    #121c38;
+@define-color destructive_bg_color #FF5A5A;
+
+window.background {
+  background-image:
+    radial-gradient(1200px 600px at 50% -10%,
+                    rgba(31, 91, 214, 0.28) 0%,
+                    rgba(14, 52, 126, 0.10) 40%,
+                    rgba(10, 15, 30, 0.0) 70%);
+  background-color: #0a0f1e;
+}
+
+/* Hero band behind the logo + title. */
+.vacti-hero {
+  padding: 20px 28px 8px 28px;
+}
+.vacti-logo {
+  margin-bottom: 4px;
+}
+
+/* Tab switcher reads as a pill group. */
+viewswitcher {
+  padding: 4px;
+  border-radius: 12px;
+  background-color: rgba(255, 255, 255, 0.04);
+}
+viewswitcher button:checked {
+  background-color: alpha(@accent_bg_color, 0.22);
+}
+
+/* Preference cards: rounded, slightly lifted. */
+preferencesgroup > box > .background,
+list.boxed-list {
+  border-radius: 16px;
+}
+
+/* Primary call to action: full-width pill with a brand gradient. */
+.vacti-cta {
+  min-height: 46px;
+  font-weight: 700;
+  border-radius: 999px;
+  margin-top: 6px;
+  background-image: linear-gradient(90deg, #1F5BD6 0%, #37B6FF 100%);
+  color: #ffffff;
+  box-shadow: 0 6px 18px rgba(31, 91, 214, 0.35);
+}
+.vacti-cta:hover {
+  background-image: linear-gradient(90deg, #2a67e0 0%, #4cc0ff 100%);
+}
+.vacti-cta:disabled {
+  background-image: none;
+  box-shadow: none;
+}
+
+/* Monospace token/code entry reads clearly. */
+.monospace entry, entry.monospace, .monospace text {
+  font-family: "DejaVu Sans Mono", "Liberation Mono", monospace;
+  font-size: 1.05rem;
+  letter-spacing: 0.04em;
+}
+
+/* Status + pattern hints. */
+.vacti-ok   { color: #5fd38a; font-weight: 600; }
+.vacti-warn { color: #8FD4FF; font-weight: 600; }
+
+/* Success celebration icon tint. */
+statuspage image {
+  color: #5fd38a;
+}
