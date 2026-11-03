@@ -122,22 +122,43 @@ drivers.
 
 ## 4. Universal first-boot enrollment (no baked secret)
 
-A booted image auto-registers with the control plane **without any long-lived secret baked into a
+A booted image registers with the control plane **without any long-lived secret baked into a
 shared image**. The shared image carries **zero** credentials: no enroll token, no engine token, no
 tailscale key, no `EVIDENCE_KEY`. The firstboot *mechanism* is baked; the *secret* arrives
 per-instance.
 
-The unifying channel is a **NoCloud seed** - a tiny `cidata.iso` (volume label `CIDATA`) carrying
-`user-data` + `meta-data` with a short-lived per-boot enroll token. NoCloud works identically on
-cloud, VMware, VirtualBox, and the installed-ISO system. Native datasources (cloud provider
-metadata; VMware `guestinfo`) are optional enhancements layered on the **same** firstboot unit.
+Operators enroll with ONE of two credentials minted in the control plane at **Settings > Engine**:
 
-Flow: the operator mints a 30-minute, single-use enroll token, drops it into a `user-data`
-template, `genisoimage`s a `cidata.iso`, attaches it, and boots. The existing enroll path
-(single-use, 30-min expiry, server-deletes the token) obtains the scoped tokens and writes the
-engine env; tailscale joins with the server-served reusable key on normal startup. If the token
-expires before boot, firstboot fails loudly and the operator re-mints - there is **no** longer-lived
-baked fallback. The `cidata.iso` ships as a **template + `make-seed.sh`**, never pre-filled.
+- **8-char pairing code** (e.g. `K7X9-R8W2`) - the **primary** operator channel. Short, typeable,
+  clipboard-less, **single-use, 10-minute TTL**. The appliance exchanges it at the CP
+  (`POST /api/pentest/enroll/exchange`) for the full enrollment token automatically. Minted under
+  **Mint for appliance (OVA/Docker)** (the default mint mode), which also shows a ready-to-paste
+  Docker env snippet.
+- **Full UUID enrollment token** - the **advanced** channel, for cloud-init / NoCloud / pre-boot
+  injection. **Single-use, 3-hour TTL.** Minted under **Mint for terminal install** (behind the
+  "Advanced" toggle).
+
+Three operator paths, same no-secret firstboot mechanism underneath:
+
+1. **OVA / VM (GUI kiosk).** Boot the appliance; the premium first-boot kiosk opens. In its
+   **Enrollment** tab, type the 8-char pairing code (a full token also works). The kiosk exchanges
+   it and pulls the engine. No SSH, no clipboard.
+2. **Docker container.** `docker run` with `-e VACTI_PAIRING_CODE=K7X9R8W2 -e VACTI_CP_URL=<cp>`
+   (the pairing code **requires** the CP URL). The entrypoint accepts the short code OR a full
+   `VACTI_ENROLL_TOKEN`, OR a producer `VACTI_TOKEN`. Caido CLI self-heals on container start.
+3. **Headless cloud / NoCloud seed (advanced).** The unifying channel is a **NoCloud seed** - a
+   tiny `cidata.iso` (volume label `CIDATA`) carrying `user-data` + `meta-data` with a short-lived
+   per-boot enroll token, built from a **template + `make-seed.sh`** (never pre-filled). NoCloud
+   works identically on cloud, VMware, VirtualBox, and the installed-ISO system; native datasources
+   (cloud provider metadata; VMware `guestinfo`) are optional enhancements on the **same** firstboot
+   unit.
+
+In every path the enroll POST obtains the scoped tokens and writes the engine env; the server
+deletes the single-use credential on first exchange; tailscale joins with the server-served reusable
+key on normal startup. If the credential expires before enrollment, firstboot (or the kiosk, or the
+container) fails **loudly** and the operator re-mints - there is **no** longer-lived baked fallback.
+
+See **[`distro/README.md`](distro/README.md)** for the step-by-step operator quickstart.
 
 ---
 
