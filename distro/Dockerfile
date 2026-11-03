@@ -58,6 +58,11 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # removes, so no methodology or package manifest ships on the image.
 COPY distro/packages/ /opt/vacti-build/packages/
 COPY distro/golden-image/docker-entrypoint.sh /usr/local/sbin/vacti-docker-entrypoint
+# Shared short-code pairing exchange helper, SOURCED by the entrypoint so
+# VACTI_ENROLL_TOKEN / VACTI_PAIRING_CODE accept an 8-char pairing code as well as
+# a full token (same contract as the GUI kiosk + headless TUI). Library (sourced,
+# not executed) - no chmod +x needed.
+COPY distro/enroll/common/pairing-exchange.sh /usr/local/lib/vacti/pairing-exchange.sh
 
 # --- base deps + public package sources (Kali pinned prio 100, NodeSource 22) --
 # No credential here, so this layer is cacheable and public. policy-rc.d blocks
