@@ -30,8 +30,6 @@ gi.require_version("Adw", "1")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GdkPixbuf  # noqa: E402
 
-# Path to the bash driver we delegate privileged work to (argv[1] overrides).
-ACTIVATE = sys.argv[1] if len(sys.argv) > 1 else "/usr/local/sbin/vacti-activate"
 CSS_PATH = "/usr/local/share/vacti-kiosk/vacti-kiosk.css"
 LOGO_CANDIDATES = [
     "/usr/share/vacti/branding/logo/png/vacti-lockup-horizontal-light.png",
@@ -43,8 +41,231 @@ LOGO_CANDIDATES = [
 # A short code is 8 chars from a Crockford-ish alphabet (no I/O/0/1), optionally
 # hyphenated XXXX-XXXX. Everything else is treated as a full token.
 SHORT_CODE_RE = re.compile(r"^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$")
+# Language-independent "are we online?" probe for the status line (the text comes
+# back localized from the bash helper, so we detect connectivity by the IP, not a
+# word in any one language).
+IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 
 EXIT_CODE = 0
+
+# ---------------------------------------------------------------------------
+# i18n: a tiny self-contained EN/ID string table (no gettext/.po, no new deps).
+# Default is Indonesian; the operator can switch at runtime via the ID/EN pill in
+# the top-right (persisted to ~/.config/vacti/lang), or up front via --lang / the
+# VACTI_LANG env var / the inherited $LANG locale. A missing key falls back to EN
+# and logs a warning (never crashes). The chosen language is forwarded to every
+# `vacti-activate __subcommand` (via VACTI_LANG) so the whole surface stays in one
+# language.
+# ---------------------------------------------------------------------------
+SUPPORTED_LANGS = ("id", "en")
+DEFAULT_LANG = "id"
+CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "vacti"
+)
+LANG_FILE = os.path.join(CONFIG_DIR, "lang")
+
+STRINGS = {
+    "id": {
+        "win_title": "vacti - Aktivasi",
+        "hero_title": "Aktivasi perangkat",
+        "hero_sub": "Lengkapi jaringan, isi kode, lalu tekan Aktivasi.",
+        "tab_net": "Jaringan",
+        "tab_enroll": "Enrollment",
+        "tab_opt": "Opsional",
+        "activate": "Aktivasi",
+        "exit_console": "Keluar ke konsol",
+        "net_status_title": "Status jaringan",
+        "net_checking": "Memeriksa...",
+        "net_connect_title": "Aktifkan koneksi kabel (DHCP)",
+        "net_connect_sub": "Kasus paling umum di VM / NAT",
+        "connect": "Sambungkan",
+        "adv_title": "Editor jaringan lanjutan",
+        "adv_sub": "Wi-Fi / IP statis / 802.1x",
+        "open": "Buka",
+        "enroll_desc": "Ketik kode 8-karakter dari dashboard (mis. K7PQ-3M9T). "
+                       "Token lengkap juga boleh. Berlaku 3 jam, sekali pakai.",
+        "url_title": "URL control-plane",
+        "code_title": "Kode aktivasi / Token",
+        "hint_short": "Kode pendek",
+        "hint_token": "Token",
+        "opt_desc": "Kosongkan bila tidak dipakai.",
+        "proxy_title": "Proxy HTTP(S)",
+        "tskey_title": "Tailscale auth key",
+        "busy_default": "Memproses...",
+        "busy_net": "Menyiapkan jaringan...",
+        "busy_exchange": "Menukar kode aktivasi...",
+        "busy_enroll": "Mendaftarkan perangkat... mengunduh engine "
+                       "(sekali, ~1-3 mnt).",
+        "err_required": "URL dan kode wajib diisi (tab Enrollment).",
+        "err_unreachable": "Tidak bisa menjangkau {url}. "
+                           "Cek tab Jaringan lalu coba lagi.",
+        "err_notfound": "Kode tidak ditemukan. Periksa lalu coba lagi.",
+        "err_gone": "Kode sudah dipakai atau kedaluwarsa (sekali pakai, "
+                    "10 menit). Mint ulang di dashboard.",
+        "err_rate": "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi.",
+        "err_exchange_net": "Gangguan jaringan saat menukar kode.",
+        "err_token_empty": "Penukaran kode gagal (token kosong).",
+        "err_enroll": "Enrollment belum selesai - token mungkin "
+                      "kedaluwarsa/terpakai. Mint ulang di dashboard lalu "
+                      "coba lagi.",
+        "net_editor_unavailable": "Editor jaringan tidak tersedia.",
+        "success_title": "Aktivasi berhasil",
+        "success_desc": "Membuka desktop - VM reboot dalam {n} detik.",
+        "cancel_heading": "Batalkan aktivasi?",
+        "cancel_body": "Perangkat tidak akan aktif tanpa enrollment.",
+        "cancel_back": "Kembali ke aktivasi",
+        "cancel_exit": "Keluar ke konsol",
+        "status_not_connected": "Belum terhubung ke jaringan",
+    },
+    "en": {
+        "win_title": "vacti - Activation",
+        "hero_title": "Activate device",
+        "hero_sub": "Set up the network, enter your code, then press Activate.",
+        "tab_net": "Network",
+        "tab_enroll": "Enrollment",
+        "tab_opt": "Optional",
+        "activate": "Activate",
+        "exit_console": "Exit to console",
+        "net_status_title": "Network status",
+        "net_checking": "Checking...",
+        "net_connect_title": "Bring up wired connection (DHCP)",
+        "net_connect_sub": "The most common case on a VM / NAT",
+        "connect": "Connect",
+        "adv_title": "Advanced network editor",
+        "adv_sub": "Wi-Fi / static IP / 802.1x",
+        "open": "Open",
+        "enroll_desc": "Enter the 8-character code from the dashboard "
+                       "(e.g. K7PQ-3M9T). A full token works too. "
+                       "Valid 3 hours, single-use.",
+        "url_title": "Control-plane URL",
+        "code_title": "Activation code / Token",
+        "hint_short": "Short code",
+        "hint_token": "Token",
+        "opt_desc": "Leave blank if unused.",
+        "proxy_title": "HTTP(S) proxy",
+        "tskey_title": "Tailscale auth key",
+        "busy_default": "Processing...",
+        "busy_net": "Setting up the network...",
+        "busy_exchange": "Exchanging the activation code...",
+        "busy_enroll": "Enrolling device... downloading the engine "
+                       "(one-time, ~1-3 min).",
+        "err_required": "URL and code are required (Enrollment tab).",
+        "err_unreachable": "Cannot reach {url}. "
+                           "Check the Network tab and try again.",
+        "err_notfound": "Code not found. Check it and try again.",
+        "err_gone": "Code already used or expired (single-use, 10 minutes). "
+                    "Re-mint it in the dashboard.",
+        "err_rate": "Too many attempts. Wait a moment and try again.",
+        "err_exchange_net": "Network error while exchanging the code.",
+        "err_token_empty": "Code exchange failed (empty token).",
+        "err_enroll": "Enrollment did not finish - the token may be "
+                      "expired/used. Re-mint it in the dashboard and try again.",
+        "net_editor_unavailable": "Network editor is not available.",
+        "success_title": "Activation complete",
+        "success_desc": "Opening the desktop - the VM reboots in {n} seconds.",
+        "cancel_heading": "Cancel activation?",
+        "cancel_body": "The device will not be active without enrollment.",
+        "cancel_back": "Back to activation",
+        "cancel_exit": "Exit to console",
+        "status_not_connected": "Not connected to a network",
+    },
+}
+
+
+def _flag_lang(argv):
+    for i, a in enumerate(argv):
+        if a == "--lang" and i + 1 < len(argv):
+            return argv[i + 1].strip().lower()
+        if a.startswith("--lang="):
+            return a.split("=", 1)[1].strip().lower()
+    return None
+
+
+def _positional_args(argv):
+    """argv minus the --lang flag (so argv[1] can still override ACTIVATE)."""
+    out, skip = [], False
+    for a in argv[1:]:
+        if skip:
+            skip = False
+            continue
+        if a == "--lang":
+            skip = True
+            continue
+        if a.startswith("--lang="):
+            continue
+        out.append(a)
+    return out
+
+
+def _saved_lang():
+    try:
+        with open(LANG_FILE) as fh:
+            v = fh.read().strip().lower()
+            return v if v in SUPPORTED_LANGS else None
+    except Exception:
+        return None
+
+
+def resolve_lang():
+    # Precedence: --lang > VACTI_LANG > persisted file > $LANG autodetect > default.
+    flag = _flag_lang(sys.argv)
+    if flag in SUPPORTED_LANGS:
+        return flag
+    env = (os.environ.get("VACTI_LANG") or "").strip().lower()
+    if env in SUPPORTED_LANGS:
+        return env
+    saved = _saved_lang()
+    if saved:
+        return saved
+    loc = (
+        os.environ.get("LANG")
+        or os.environ.get("LC_ALL")
+        or os.environ.get("LC_MESSAGES")
+        or ""
+    ).lower()
+    if loc.startswith("id"):
+        return "id"
+    if loc:
+        return "en"
+    return DEFAULT_LANG
+
+
+CURRENT_LANG = resolve_lang()
+
+
+def save_lang(lang):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(LANG_FILE, "w") as fh:
+            fh.write(lang + "\n")
+    except Exception:
+        pass  # a read-only HOME must never break the kiosk (fail-soft).
+
+
+def t(key, **fmt):
+    """Translate KEY in the current language; fall back to EN, then the key."""
+    s = STRINGS.get(CURRENT_LANG, {}).get(key)
+    if s is None:
+        s = STRINGS["en"].get(key)
+        if s is None:
+            sys.stderr.write(f"[vacti-kiosk] missing i18n key: {key}\n")
+            return key
+        if CURRENT_LANG != "en":
+            sys.stderr.write(
+                f"[vacti-kiosk] i18n key '{key}' missing for "
+                f"'{CURRENT_LANG}'; using en\n"
+            )
+    if fmt:
+        try:
+            return s.format(**fmt)
+        except Exception:
+            return s
+    return s
+
+
+# The bash driver we delegate privileged work to (first non-flag argv overrides).
+_POS = _positional_args(sys.argv)
+ACTIVATE = _POS[0] if _POS else "/usr/local/sbin/vacti-activate"
 
 
 def normalize_code(raw):
@@ -58,6 +279,7 @@ def is_short_code(raw):
 def _run(subcmd_args, extra_env=None, capture=False, timeout=360):
     """Run `vacti-activate <subcmd...>`; return (returncode, stdout_text)."""
     env = dict(os.environ)
+    env["VACTI_LANG"] = CURRENT_LANG  # keep the whole surface in one language
     if extra_env:
         env.update(extra_env)
     try:
@@ -77,17 +299,28 @@ def _run(subcmd_args, extra_env=None, capture=False, timeout=360):
 class KioskWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
-        self.set_title("vacti - Aktivasi")
+        # Registry of zero-arg callables that re-apply a widget's text in the
+        # current language, so the ID/EN toggle re-renders in place (no restart).
+        self._i18n = []
+        self._lang_syncing = False
+        self._last_status_line = ""
+        self._reg(self.set_title, "win_title")
         self.set_default_size(960, 640)
         self.fullscreen()
 
         self.toasts = Adw.ToastOverlay()
         self.set_content(self.toasts)
 
+        # An overlay lets the ID/EN language pill float in the top-right corner
+        # WITHOUT disturbing the (already-good) centered wizard layout.
+        self.overlay = Gtk.Overlay()
+        self.toasts.set_child(self.overlay)
+
         # Top-level view switch: wizard | busy | success.
         self.root = Gtk.Stack()
         self.root.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.toasts.set_child(self.root)
+        self.overlay.set_child(self.root)
+        self.overlay.add_overlay(self._build_lang_switch())
 
         self.root.add_named(self._build_wizard(), "main")
         self.root.add_named(self._build_busy(), "busy")
@@ -98,6 +331,57 @@ class KioskWindow(Adw.ApplicationWindow):
         # Live network status refresh.
         self._refresh_status()
         GLib.timeout_add_seconds(3, self._refresh_status)
+
+    # ---- i18n plumbing -----------------------------------------------------
+    def _reg(self, apply_fn, key, **fmt):
+        """Apply a translated string now AND register it for re-translation."""
+        apply_fn(t(key, **fmt))
+        self._i18n.append(lambda: apply_fn(t(key, **fmt)))
+
+    def _build_lang_switch(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        box.add_css_class("linked")
+        box.add_css_class("vacti-lang-switch")
+        box.set_halign(Gtk.Align.END)
+        box.set_valign(Gtk.Align.START)
+        box.set_margin_top(16)
+        box.set_margin_end(16)
+        self.btn_id = Gtk.ToggleButton(label="ID")
+        self.btn_en = Gtk.ToggleButton(label="EN")
+        for b in (self.btn_id, self.btn_en):
+            b.add_css_class("pill")
+        self.btn_id.connect("clicked", lambda *_: self._set_lang("id"))
+        self.btn_en.connect("clicked", lambda *_: self._set_lang("en"))
+        box.append(self.btn_id)
+        box.append(self.btn_en)
+        self._sync_lang_switch()
+        return box
+
+    def _sync_lang_switch(self):
+        self._lang_syncing = True
+        self.btn_id.set_active(CURRENT_LANG == "id")
+        self.btn_en.set_active(CURRENT_LANG == "en")
+        self._lang_syncing = False
+
+    def _set_lang(self, lang):
+        if self._lang_syncing or lang not in SUPPORTED_LANGS:
+            return
+        global CURRENT_LANG
+        if lang == CURRENT_LANG:
+            self._sync_lang_switch()
+            return
+        CURRENT_LANG = lang
+        save_lang(lang)
+        for fn in self._i18n:
+            try:
+                fn()
+            except Exception:
+                pass
+        self._sync_lang_switch()
+        # Re-apply the dynamic (runtime-set) bits too.
+        if hasattr(self, "code_row"):
+            self.on_code_changed(self.code_row)
+        self._apply_status(self._last_status_line)
 
     # ---- wizard page -------------------------------------------------------
     def _build_wizard(self):
@@ -118,12 +402,12 @@ class KioskWindow(Adw.ApplicationWindow):
         logo = self._logo_widget()
         if logo:
             hero.append(logo)
-        title = Gtk.Label(label="Aktivasi perangkat")
+        title = Gtk.Label()
+        self._reg(title.set_label, "hero_title")
         title.add_css_class("title-1")
         hero.append(title)
-        sub = Gtk.Label(
-            label="Lengkapi jaringan, isi kode, lalu tekan Aktivasi."
-        )
+        sub = Gtk.Label()
+        self._reg(sub.set_label, "hero_sub")
         sub.add_css_class("dim-label")
         sub.set_wrap(True)
         sub.set_justify(Gtk.Justification.CENTER)
@@ -138,9 +422,16 @@ class KioskWindow(Adw.ApplicationWindow):
         switcher.set_halign(Gtk.Align.CENTER)
         col.append(switcher)
 
-        self.stack.add_titled(self._page_network(), "net", "Jaringan")
-        self.stack.add_titled(self._page_enroll(), "enroll", "Enrollment")
-        self.stack.add_titled(self._page_optional(), "opt", "Opsional")
+        p_net = self.stack.add_titled(self._page_network(), "net", t("tab_net"))
+        p_enr = self.stack.add_titled(
+            self._page_enroll(), "enroll", t("tab_enroll")
+        )
+        p_opt = self.stack.add_titled(
+            self._page_optional(), "opt", t("tab_opt")
+        )
+        self._reg(p_net.set_title, "tab_net")
+        self._reg(p_enr.set_title, "tab_enroll")
+        self._reg(p_opt.set_title, "tab_opt")
         self.stack.set_visible_child_name("enroll")
         col.append(self.stack)
 
@@ -157,7 +448,8 @@ class KioskWindow(Adw.ApplicationWindow):
         col.append(self.status_lbl)
 
         # Primary / secondary actions.
-        self.activate_btn = Gtk.Button(label="Aktivasi")
+        self.activate_btn = Gtk.Button()
+        self._reg(self.activate_btn.set_label, "activate")
         self.activate_btn.add_css_class("suggested-action")
         self.activate_btn.add_css_class("pill")
         self.activate_btn.add_css_class("vacti-cta")
@@ -165,7 +457,8 @@ class KioskWindow(Adw.ApplicationWindow):
         self.activate_btn.connect("clicked", self.on_activate)
         col.append(self.activate_btn)
 
-        cancel = Gtk.Button(label="Keluar ke konsol")
+        cancel = Gtk.Button()
+        self._reg(cancel.set_label, "exit_console")
         cancel.add_css_class("flat")
         cancel.set_halign(Gtk.Align.CENTER)
         cancel.connect("clicked", self.on_cancel)
@@ -190,15 +483,16 @@ class KioskWindow(Adw.ApplicationWindow):
     def _page_network(self):
         grp = Adw.PreferencesGroup()
         self.net_row = Adw.ActionRow()
-        self.net_row.set_title("Status jaringan")
-        self.net_row.set_subtitle("Memeriksa...")
+        self._reg(self.net_row.set_title, "net_status_title")
+        self._reg(self.net_row.set_subtitle, "net_checking")
         grp.add(self.net_row)
 
         connect_row = Adw.ActionRow()
-        connect_row.set_title("Aktifkan koneksi kabel (DHCP)")
-        connect_row.set_subtitle("Kasus paling umum di VM / NAT")
+        self._reg(connect_row.set_title, "net_connect_title")
+        self._reg(connect_row.set_subtitle, "net_connect_sub")
         self.net_spinner = Gtk.Spinner()
-        connect_btn = Gtk.Button(label="Sambungkan")
+        connect_btn = Gtk.Button()
+        self._reg(connect_btn.set_label, "connect")
         connect_btn.add_css_class("suggested-action")
         connect_btn.set_valign(Gtk.Align.CENTER)
         connect_btn.connect("clicked", self.on_net_connect)
@@ -208,9 +502,10 @@ class KioskWindow(Adw.ApplicationWindow):
         grp.add(connect_row)
 
         adv_row = Adw.ActionRow()
-        adv_row.set_title("Editor jaringan lanjutan")
-        adv_row.set_subtitle("Wi-Fi / IP statis / 802.1x")
-        adv_btn = Gtk.Button(label="Buka")
+        self._reg(adv_row.set_title, "adv_title")
+        self._reg(adv_row.set_subtitle, "adv_sub")
+        adv_btn = Gtk.Button()
+        self._reg(adv_btn.set_label, "open")
         adv_btn.add_css_class("flat")
         adv_btn.set_valign(Gtk.Align.CENTER)
         adv_btn.connect("clicked", self.on_net_editor)
@@ -221,16 +516,13 @@ class KioskWindow(Adw.ApplicationWindow):
 
     def _page_enroll(self):
         grp = Adw.PreferencesGroup()
-        grp.set_description(
-            "Ketik kode 8-karakter dari dashboard (mis. K7PQ-3M9T). "
-            "Token lengkap juga boleh. Berlaku 3 jam, sekali pakai."
-        )
+        self._reg(grp.set_description, "enroll_desc")
         self.url_row = Adw.EntryRow()
-        self.url_row.set_title("URL control-plane")
+        self._reg(self.url_row.set_title, "url_title")
         grp.add(self.url_row)
 
         self.code_row = Adw.EntryRow()
-        self.code_row.set_title("Kode aktivasi / Token")
+        self._reg(self.code_row.set_title, "code_title")
         self.code_row.add_css_class("monospace")
         self.code_hint = Gtk.Label(label="")
         self.code_hint.add_css_class("caption")
@@ -242,12 +534,12 @@ class KioskWindow(Adw.ApplicationWindow):
 
     def _page_optional(self):
         grp = Adw.PreferencesGroup()
-        grp.set_description("Kosongkan bila tidak dipakai.")
+        self._reg(grp.set_description, "opt_desc")
         self.proxy_row = Adw.EntryRow()
-        self.proxy_row.set_title("Proxy HTTP(S)")
+        self._reg(self.proxy_row.set_title, "proxy_title")
         grp.add(self.proxy_row)
         self.tskey_row = Adw.PasswordEntryRow()
-        self.tskey_row.set_title("Tailscale auth key")
+        self._reg(self.tskey_row.set_title, "tskey_title")
         grp.add(self.tskey_row)
         return grp
 
@@ -260,7 +552,7 @@ class KioskWindow(Adw.ApplicationWindow):
         sp.set_size_request(48, 48)
         sp.start()
         box.append(sp)
-        self.busy_lbl = Gtk.Label(label="Memproses...")
+        self.busy_lbl = Gtk.Label(label=t("busy_default"))
         self.busy_lbl.add_css_class("title-3")
         self.busy_lbl.set_wrap(True)
         self.busy_lbl.set_justify(Gtk.Justification.CENTER)
@@ -277,9 +569,12 @@ class KioskWindow(Adw.ApplicationWindow):
         return True  # keep the GLib timer alive
 
     def _apply_status(self, line):
-        connected = bool(line) and "Belum" not in line
+        self._last_status_line = line
+        # Connectivity is detected by the presence of an IPv4 (language-neutral),
+        # not by any localized word in the status line.
+        connected = bool(line) and bool(IPV4_RE.search(line))
         dot = "●"  # ●
-        text = line or "Belum terhubung ke jaringan"
+        text = line or t("status_not_connected")
         markup_cls = "vacti-ok" if connected else "vacti-warn"
         if hasattr(self, "net_row"):
             self.net_row.set_subtitle(text)
@@ -295,11 +590,11 @@ class KioskWindow(Adw.ApplicationWindow):
             self.code_hint.set_text("")
             return
         if is_short_code(raw):
-            self.code_hint.set_text("Kode pendek")
+            self.code_hint.set_text(t("hint_short"))
             self.code_hint.remove_css_class("vacti-warn")
             self.code_hint.add_css_class("vacti-ok")
         else:
-            self.code_hint.set_text("Token")
+            self.code_hint.set_text(t("hint_token"))
             self.code_hint.remove_css_class("vacti-ok")
             self.code_hint.add_css_class("vacti-warn")
 
@@ -343,7 +638,7 @@ class KioskWindow(Adw.ApplicationWindow):
                 stderr=subprocess.DEVNULL,
             )
         except Exception:
-            self._toast("Editor jaringan tidak tersedia.")
+            self._toast(t("net_editor_unavailable"))
 
     # ---- activation pipeline ----------------------------------------------
     def on_activate(self, _btn):
@@ -354,12 +649,12 @@ class KioskWindow(Adw.ApplicationWindow):
         tskey = self.tskey_row.get_text().strip()
 
         if not url or not code:
-            self._banner("URL dan kode wajib diisi (tab Enrollment).")
+            self._banner(t("err_required"))
             self.stack.set_visible_child_name("enroll")
             return
 
         self.activate_btn.set_sensitive(False)
-        self._busy("Menyiapkan jaringan...")
+        self._busy(t("busy_net"))
         threading.Thread(
             target=self._pipeline, args=(url, code, proxy, tskey), daemon=True
         ).start()
@@ -376,13 +671,13 @@ class KioskWindow(Adw.ApplicationWindow):
         if rc != 0:
             GLib.idle_add(
                 self._back_to_main,
-                f"Tidak bisa menjangkau {url}. Cek tab Jaringan lalu coba lagi.",
+                t("err_unreachable", url=url),
             )
             return
         # 3. resolve the short code -> full token (or pass the token through).
         token = code
         if is_short_code(code):
-            GLib.idle_add(self._busy, "Menukar kode aktivasi...")
+            GLib.idle_add(self._busy, t("busy_exchange"))
             rc, out = _run(
                 ["__exchange", url],
                 extra_env={"VACTI_CODE": normalize_code(code)},
@@ -390,27 +685,26 @@ class KioskWindow(Adw.ApplicationWindow):
                 timeout=40,
             )
             msg = {
-                44: "Kode tidak ditemukan. Periksa lalu coba lagi.",
-                41: "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit). "
-                    "Mint ulang di dashboard.",
-                42: "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi.",
+                44: t("err_notfound"),
+                41: t("err_gone"),
+                42: t("err_rate"),
             }
             if rc != 0:
                 GLib.idle_add(
                     self._back_to_main,
-                    msg.get(rc, "Gangguan jaringan saat menukar kode."),
+                    msg.get(rc, t("err_exchange_net")),
                 )
                 return
             token = out
             if not token:
                 GLib.idle_add(
-                    self._back_to_main, "Penukaran kode gagal (token kosong)."
+                    self._back_to_main, t("err_token_empty")
                 )
                 return
         # 4. stage enroll.token + run the existing firstboot enroll chain.
         GLib.idle_add(
             self._busy,
-            "Mendaftarkan perangkat... mengunduh engine (sekali, ~1-3 mnt).",
+            t("busy_enroll"),
         )
         rc, _ = _run(
             ["__enroll", url], extra_env={"VACTI_TOKEN": token}, timeout=360
@@ -420,16 +714,15 @@ class KioskWindow(Adw.ApplicationWindow):
         else:
             GLib.idle_add(
                 self._back_to_main,
-                "Enrollment belum selesai - token mungkin kedaluwarsa/terpakai. "
-                "Mint ulang di dashboard lalu coba lagi.",
+                t("err_enroll"),
             )
 
     def _show_success(self):
         self.success_page.set_icon_name("emblem-ok-symbolic")
-        self.success_page.set_title("Aktivasi berhasil")
+        self.success_page.set_title(t("success_title"))
         self._reboot_left = 10
         self.success_page.set_description(
-            f"Membuka desktop - VM reboot dalam {self._reboot_left} detik."
+            t("success_desc", n=self._reboot_left)
         )
         self.root.set_visible_child_name("success")
         GLib.timeout_add_seconds(1, self._tick_reboot)
@@ -441,18 +734,18 @@ class KioskWindow(Adw.ApplicationWindow):
             _run(["__finish"], timeout=20)
             return False
         self.success_page.set_description(
-            f"Membuka desktop - VM reboot dalam {self._reboot_left} detik."
+            t("success_desc", n=self._reboot_left)
         )
         return True
 
     def on_cancel(self, _btn):
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading="Batalkan aktivasi?",
-            body="Perangkat tidak akan aktif tanpa enrollment.",
+            heading=t("cancel_heading"),
+            body=t("cancel_body"),
         )
-        dialog.add_response("back", "Kembali ke aktivasi")
-        dialog.add_response("exit", "Keluar ke konsol")
+        dialog.add_response("back", t("cancel_back"))
+        dialog.add_response("exit", t("cancel_exit"))
         dialog.set_response_appearance(
             "exit", Adw.ResponseAppearance.DESTRUCTIVE
         )
