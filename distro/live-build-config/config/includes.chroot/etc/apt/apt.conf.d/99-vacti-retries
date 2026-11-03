@@ -1,0 +1,12 @@
+// Survive transient apt mirror failures (HTTP 500 / timeout) in the SHIPPED image
+// at runtime - most importantly the first-boot vacti-engine .deb install and any
+// later apt use. The build-time fetch is covered separately by lb config
+// --apt-options in auto/config (this includes.chroot overlay lands after the heavy
+// install-packages step, so it cannot help that fetch; it ships for runtime).
+// http.kali.org and deb.debian.org are DNS round-robins across third-party
+// mirrors; one mirror returning 500/timeout on a single file should not be fatal.
+// A retry re-resolves the round-robin DNS, so it usually lands on a healthy mirror.
+// Applies to both the Debian base and the pinned Kali source. Not a credential and
+// does not wire any vacti apt source - the thin-bootstrap invariant is preserved.
+Acquire::Retries "5";
+Acquire::Retries::Delay::Maximum "15";
