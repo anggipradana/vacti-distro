@@ -296,6 +296,85 @@ if [[ -x "${APP}/bin/ensure-browser.sh" ]]; then
   "${APP}/bin/ensure-browser.sh" || log "ensure-browser best-effort (runtime self-heal covers it)"
 fi
 
+# Best-effort Caido CLI self-heal. The OVA/golden image bakes caido-cli via
+# install-engine-extras.sh step_caido (into the engine user's home); the THIN Docker
+# image bakes NOTHING engine-side, so the first container start heals it here - the
+# container twin of that bake. The engine resolves caido-cli at $HOME/caido/caido-cli
+# (start-arsenal.sh: CAIDO_BIN="${CAIDO_BIN:-$HOME/caido/caido-cli}"; preflight-heal.ts:
+# join(homedir(),'caido','caido-cli')) - both prefer $HOME - and this entrypoint execs
+# the engine with the SAME uid/$HOME below, so we install into that exact $HOME. Pinned
+# version + URL + arch mapping mirror install-engine-extras.sh. Fail-OPEN: a missing
+# Caido only degrades evidence to the Playwright render (same contract as
+# ensure-browser.sh above); it must never block container start.
+# NOTE: $HOME (/root) is NOT the persisted state volume, so this re-fetches on each
+# fresh container; it is idempotent within a container's lifetime (restart reuses it).
+CAIDO_VERSION="${VACTI_CAIDO_VERSION:-v0.57.0}"
+heal_caido() {
+  # Resolve the engine's effective home exactly as the engine will at exec time:
+  # $HOME when set (node os.homedir() + the shell both prefer it), else the passwd entry.
+  local home="${HOME:-}"
+  if [[ -z "$home" ]]; then
+    home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+    [[ -n "$home" ]] || home="/root"
+  fi
+  local caido_dir="${home}/caido"
+  local caido_bin="${caido_dir}/caido-cli"
+  [[ -x "$caido_bin" ]] && { log "caido self-heal: already present (${caido_bin})"; return 0; }
+  command -v curl >/dev/null 2>&1 || { log "caido self-heal: curl unavailable, skipping (evidence degrades to the render)"; return 0; }
+
+  local arch caido_arch
+  arch="$(uname -m 2>/dev/null || echo unknown)"
+  case "$arch" in
+    x86_64|amd64)   caido_arch="x86_64" ;;
+    aarch64|arm64)  caido_arch="aarch64" ;;
+    *)              caido_arch="x86_64"; log "caido self-heal: unknown arch ${arch}, trying x86_64" ;;
+  esac
+  local url="https://caido.download/releases/${CAIDO_VERSION}/caido-cli-${CAIDO_VERSION}-linux-${caido_arch}.tar.gz"
+
+  local tmp
+  tmp="$(mktemp -d 2>/dev/null || true)"
+  [[ -n "$tmp" && -d "$tmp" ]] || { log "caido self-heal: mktemp failed, continuing with degraded capability"; return 0; }
+
+  log "caido self-heal: downloading ${CAIDO_VERSION} (${caido_arch}) from ${url}"
+  local http
+  http="$(curl -sL -o "${tmp}/caido-cli.tar.gz" -w '%{http_code}' --connect-timeout 10 -m 180 "$url" 2>/dev/null || echo 000)"
+  if [[ "$http" != "200" || ! -s "${tmp}/caido-cli.tar.gz" ]]; then
+    log "caido self-heal: failed (fetched URL=${url}, http=${http}), continuing with degraded capability"
+    rm -rf "$tmp" 2>/dev/null || true
+    return 0
+  fi
+
+  # Best-effort checksum: verify ONLY if caido.download publishes a .sha256 sidecar.
+  # A 404 (or no sha256sum) means skip-but-log, never fail the heal.
+  local sha_url="${url}.sha256" sha_http
+  sha_http="$(curl -sL -o "${tmp}/caido-cli.tar.gz.sha256" -w '%{http_code}' --connect-timeout 10 -m 30 "$sha_url" 2>/dev/null || echo 000)"
+  if [[ "$sha_http" == "200" && -s "${tmp}/caido-cli.tar.gz.sha256" ]] && command -v sha256sum >/dev/null 2>&1; then
+    local want got
+    want="$(awk '{print $1}' "${tmp}/caido-cli.tar.gz.sha256" 2>/dev/null | head -1 || true)"
+    got="$(sha256sum "${tmp}/caido-cli.tar.gz" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ -n "$want" && -n "$got" && "$want" != "$got" ]]; then
+      log "caido self-heal: checksum MISMATCH (want=${want} got=${got}); refusing the tarball, continuing with degraded capability"
+      rm -rf "$tmp" 2>/dev/null || true
+      return 0
+    fi
+    log "caido self-heal: checksum verified"
+  else
+    log "caido self-heal: no checksum sidecar (http=${sha_http}); skipping checksum verification"
+  fi
+
+  mkdir -p "$caido_dir" 2>/dev/null || true
+  if tar xzf "${tmp}/caido-cli.tar.gz" -C "$caido_dir" 2>/dev/null && [[ -e "$caido_bin" ]]; then
+    chmod +x "$caido_bin" 2>/dev/null || true
+    rm -rf "$tmp" 2>/dev/null || true
+    log "caido self-heal: ready (${caido_bin})"
+    return 0
+  fi
+  log "caido self-heal: extraction failed (fetched URL=${url}, http=${http}), continuing with degraded capability"
+  rm -rf "$tmp" 2>/dev/null || true
+  return 0
+}
+heal_caido
+
 # If the caller passed an explicit command, honour it; otherwise run the engine
 # the same way the systemd unit does (node dist/runner/cli.js from WorkingDirectory).
 cd "$APP"
