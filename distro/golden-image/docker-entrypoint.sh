@@ -38,6 +38,74 @@ STATE_ENV="${STATE_DIR}/engine.env"
 log() { echo "[vacti-docker] $*"; }
 die() { echo "[vacti-docker][FATAL] $*" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# i18n (EN/ID). Self-contained string table - no gettext, no new deps. Default
+# is Indonesian. In a container the language is chosen via the VACTI_LANG env var
+# (e.g. `docker run -e VACTI_LANG=en`), else the inherited $LANG locale. No --lang
+# flag here: this entrypoint's positional args are the container command to exec.
+# Operator-facing enrollment/token/network errors are translated; deep apt /
+# signature plumbing diagnostics stay in English for searchability. A key missing
+# in the chosen language falls back to EN. Strings use "{}" as a placeholder.
+# ---------------------------------------------------------------------------
+_resolve_uilang() {
+  local v="${VACTI_LANG:-}"
+  if [[ -z "$v" ]]; then
+    if   [[ "${LANG:-}" == id* || "${LC_ALL:-}" == id* ]]; then v="id"
+    elif [[ -n "${LANG:-}${LC_ALL:-}" ]]; then v="en"; fi
+  fi
+  v="${v,,}"; v="${v//[[:space:]]/}"
+  case "$v" in en) echo en ;; id) echo id ;; *) echo id ;; esac
+}
+VACTI_UILANG="$(_resolve_uilang)"
+
+declare -A VT_EN=(
+  [err_need_url]="set VACTI_URL=https://<control-plane> (or CP_URL)"
+  [err_pairing_helper]="pairing-code support helper missing (/usr/local/lib/vacti/pairing-exchange.sh); supply a full VACTI_ENROLL_TOKEN instead"
+  [err_url_for_code]="VACTI_CP_URL required when VACTI_ENROLL_TOKEN is a short code (the pairing code is control-plane-scoped)"
+  [err_pairing_failed]="pairing-code exchange failed: {}"
+  [err_pairing_empty]="pairing-code exchange returned an empty token"
+  [err_no_token_pull]="engine not baked and no token to pull it: supply VACTI_ENROLL_TOKEN (single-use mint) or VACTI_TOKEN (producer)"
+  [err_enroll_http]="enroll failed (HTTP {}). The token may be expired or used (single-use, 3h TTL). Re-mint and retry. Response: {}"
+  [err_no_engine_token]="no engine token available: supply VACTI_TOKEN (producer) or VACTI_ENROLL_TOKEN (single-use mint)"
+)
+declare -A VT_ID=(
+  [err_need_url]="atur VACTI_URL=https://<control-plane> (atau CP_URL)"
+  [err_pairing_helper]="helper pendukung kode pairing tidak ada (/usr/local/lib/vacti/pairing-exchange.sh); pakai VACTI_ENROLL_TOKEN lengkap sebagai gantinya"
+  [err_url_for_code]="VACTI_CP_URL wajib diisi bila VACTI_ENROLL_TOKEN berupa kode pendek (kode pairing terikat ke control-plane)"
+  [err_pairing_failed]="penukaran kode pairing gagal: {}"
+  [err_pairing_empty]="penukaran kode pairing mengembalikan token kosong"
+  [err_no_token_pull]="engine belum ter-bake dan tidak ada token untuk menariknya: pakai VACTI_ENROLL_TOKEN (mint sekali pakai) atau VACTI_TOKEN (producer)"
+  [err_enroll_http]="enroll gagal (HTTP {}). Token mungkin kedaluwarsa atau sudah dipakai (sekali pakai, TTL 3 jam). Mint ulang lalu coba lagi. Respons: {}"
+  [err_no_engine_token]="tidak ada token engine: pakai VACTI_TOKEN (producer) atau VACTI_ENROLL_TOKEN (mint sekali pakai)"
+)
+
+_lookup() { # key
+  local key="$1" val=""
+  if [[ "$VACTI_UILANG" == "en" ]]; then
+    val="${VT_EN[$key]-}"
+  else
+    val="${VT_ID[$key]-}"
+    if [[ -z "$val" && -n "${VT_EN[$key]-}" ]]; then
+      echo "[vacti-docker] i18n key '$key' missing for id; using en" >&2
+      val="${VT_EN[$key]}"
+    fi
+  fi
+  if [[ -z "$val" ]]; then
+    [[ -z "${VT_EN[$key]-}" ]] && echo "[vacti-docker] missing i18n key: $key" >&2
+    val="${VT_EN[$key]-$key}"
+  fi
+  printf '%s' "$val"
+}
+
+# _t KEY [ARG...] -> the translated string with each "{}" replaced by an ARG.
+_t() {
+  local key="$1"; shift || true
+  local val; val="$(_lookup "$key")"
+  local a
+  for a in "$@"; do val="${val/"{}"/$a}"; done
+  printf '%s' "$val"
+}
+
 # apt-pool signing keyring, BAKED into the image (see distro/Dockerfile). Present
 # => pin the engine apt source to signed-by=.
 APT_KEYRING="/usr/share/keyrings/vacti-apt.gpg"
@@ -81,7 +149,7 @@ if [[ -z "${VACTI_TOKEN:-}" && -f "$STATE_ENV" ]]; then
   set +a
 fi
 
-[[ -n "${VACTI_URL:-}" ]] || die "set VACTI_URL=https://<control-plane> (or CP_URL)"
+[[ -n "${VACTI_URL:-}" ]] || die "$(_t err_need_url)"
 
 # Accept the enroll-token aliases.
 ENROLL_TOKEN="${VACTI_ENROLL_TOKEN:-${ENROLL_TOKEN:-}}"
@@ -102,17 +170,21 @@ if [[ -z "$PAIRING_CODE" && -z "${VACTI_TOKEN:-}" && -n "$ENROLL_TOKEN" ]] \
 fi
 if [[ -n "$PAIRING_CODE" ]]; then
   declare -F vacti_pairing_exchange >/dev/null 2>&1 \
-    || die "pairing-code support helper missing (/usr/local/lib/vacti/pairing-exchange.sh); supply a full VACTI_ENROLL_TOKEN instead"
+    || die "$(_t err_pairing_helper)"
   [[ -n "${VACTI_URL:-}" ]] \
-    || die "VACTI_CP_URL required when VACTI_ENROLL_TOKEN is a short code (the pairing code is control-plane-scoped)"
+    || die "$(_t err_url_for_code)"
   log "pairing code detected - exchanging for the full enrollment token at ${BASE}/api/pentest/enroll/exchange (code not logged)"
   if _tok="$(vacti_pairing_exchange "$BASE" "$PAIRING_CODE")"; then
     ENROLL_TOKEN="$_tok"
   else
     _xrc=$?
-    die "pairing-code exchange failed: $(vacti_pairing_error_en "$_xrc")"
+    if [[ "$VACTI_UILANG" == "en" ]]; then
+      die "$(_t err_pairing_failed "$(vacti_pairing_error_en "$_xrc")")"
+    else
+      die "$(_t err_pairing_failed "$(vacti_pairing_error_id "$_xrc")")"
+    fi
   fi
-  [[ -n "$ENROLL_TOKEN" ]] || die "pairing-code exchange returned an empty token"
+  [[ -n "$ENROLL_TOKEN" ]] || die "$(_t err_pairing_empty)"
 fi
 
 # THIN-BOOTSTRAP: the engine package is NOT baked into the published image (no
@@ -127,7 +199,7 @@ ensure_engine_installed() {
   [[ -e "$marker" ]] && { log "engine already present (${marker})"; return 0; }
   local apt_token="${ENROLL_TOKEN:-${VACTI_TOKEN:-}}"
   if [[ -z "$apt_token" ]]; then
-    die "engine not baked and no token to pull it: supply VACTI_ENROLL_TOKEN (single-use mint) or VACTI_TOKEN (producer)"
+    die "$(_t err_no_token_pull)"
   fi
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     die "engine not baked and this entrypoint is not root; cannot apt-get install ${VACTI_ENGINE_PKG:-vacti-engine}"
@@ -183,7 +255,7 @@ if [[ -z "${VACTI_TOKEN:-}" && -n "${ENROLL_TOKEN}" ]]; then
     -d "{\"engine_id\":\"${ENGINE_ID}\"}" || echo "000")"
   if [[ "$http_code" != "200" ]]; then
     body="$(cat /tmp/vacti-enroll.out 2>/dev/null || true)"; rm -f /tmp/vacti-enroll.out
-    die "enroll failed (HTTP ${http_code}). The token may be expired or used (single-use, 3h TTL). Re-mint and retry. Response: ${body:-none}"
+    die "$(_t err_enroll_http "${http_code}" "${body:-none}")"
   fi
   install -d -m0755 "$STATE_DIR"
   umask 077
@@ -207,7 +279,7 @@ if [[ -z "${VACTI_TOKEN:-}" && -n "${ENROLL_TOKEN}" ]]; then
 fi
 
 export VACTI_URL="${BASE}"
-[[ -n "${VACTI_TOKEN:-}" ]] || die "no engine token available: supply VACTI_TOKEN (producer) or VACTI_ENROLL_TOKEN (single-use mint)"
+[[ -n "${VACTI_TOKEN:-}" ]] || die "$(_t err_no_engine_token)"
 export VACTI_TOKEN
 [[ -n "${VACTI_VERIFIER_TOKEN:-}" ]] && export VACTI_VERIFIER_TOKEN
 [[ -n "${VACTI_GATEKEEPER_TOKEN:-}" ]] && export VACTI_GATEKEEPER_TOKEN
