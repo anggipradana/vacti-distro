@@ -408,6 +408,7 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
   # zenity stay as the fail-soft fallback if GTK4/Adw ever fail to import.
   apt-get install -y --no-install-recommends \
     xfce4 xfce4-terminal xfce4-whiskermenu-plugin \
+    firefox-esr xfce4-screenshooter \
     lightdm lightdm-gtk-greeter \
     plymouth plymouth-themes \
     xserver-xorg xinit openbox \
@@ -418,7 +419,8 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
     yad zenity \
     || {
       echo "[prov][warn] GUI stack bulk install hit a snag; retrying best-effort per-package"
-      for p in xfce4 xfce4-terminal xfce4-whiskermenu-plugin lightdm lightdm-gtk-greeter \
+      for p in xfce4 xfce4-terminal xfce4-whiskermenu-plugin firefox-esr xfce4-screenshooter \
+               lightdm lightdm-gtk-greeter \
                plymouth plymouth-themes xserver-xorg xinit openbox \
                network-manager network-manager-gnome network-manager-openvpn-gnome \
                network-manager-openconnect-gnome wireguard-tools openconnect \
