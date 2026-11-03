@@ -1,0 +1,18 @@
+# e2e harness runtime outputs - never commit
+/.venv/
+__pycache__/
+*.pyc
+
+# scenario workspaces / evidence (screenshots, logs, converted disks)
+work/
+e2e-out/
+*.png
+*.qcow2
+*.vmdk
+*.ova
+*.console.log
+*.pty
+mock-cp.log
+s*-container.log
+s*-serial-session.log
+s*-journal.txt
