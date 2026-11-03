@@ -10,9 +10,20 @@
 # it starts Caido and Xvfb itself per engagement, so this entrypoint does not).
 #
 # Accepted per-run inputs (supplied at "docker run", never on the image):
-#   VACTI_URL   or CP_URL             control-plane base URL (required)
+#   VACTI_URL or VACTI_CP_URL or CP_URL   control-plane base URL (required)
 #   VACTI_TOKEN                       a producer token (skips the enroll exchange)
-#   VACTI_ENROLL_TOKEN or ENROLL_TOKEN  a single-use mint token (3h TTL) to exchange
+#   VACTI_ENROLL_TOKEN or ENROLL_TOKEN  a single-use mint token (3h TTL) to
+#                                     exchange. ALSO accepts an 8-char pairing
+#                                     code (K7X9-R8W2): if the value looks like a
+#                                     short code it is first exchanged at the CP
+#                                     for the full token (see VACTI_PAIRING_CODE).
+#   VACTI_PAIRING_CODE               an 8-char pairing code (explicit alias for an
+#                                     operator who prefers not to overload
+#                                     VACTI_ENROLL_TOKEN). Either form works; a
+#                                     pairing code REQUIRES the CP URL to be set
+#                                     (the code is control-plane-scoped) and is
+#                                     exchanged for the full enrollment token
+#                                     before anything else runs.
 #   ENGINE_ID                         optional engine id (defaults to the hostname)
 #
 # The scoped tokens obtained from an exchange are persisted to the state volume
@@ -27,8 +38,23 @@ STATE_ENV="${STATE_DIR}/engine.env"
 log() { echo "[vacti-docker] $*"; }
 die() { echo "[vacti-docker][FATAL] $*" >&2; exit 1; }
 
+# Shared short-code pairing exchange (lets VACTI_ENROLL_TOKEN / VACTI_PAIRING_CODE
+# accept an 8-char pairing code, like the GUI kiosk + headless TUI). Sourced from
+# the runtime install path, with a source-tree fallback for dev/CI. Fail-soft: if
+# the helper is absent, only a FULL token works and a pairing code is rejected
+# with a clear error - a producer/full token path is unaffected.
+for _ph in \
+  /usr/local/lib/vacti/pairing-exchange.sh \
+  "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../enroll/common/pairing-exchange.sh"; do
+  if [[ -r "$_ph" ]]; then
+    # shellcheck source=/dev/null
+    . "$_ph"
+    break
+  fi
+done
+
 # Normalize the URL aliases.
-VACTI_URL="${VACTI_URL:-${CP_URL:-}}"
+VACTI_URL="${VACTI_URL:-${VACTI_CP_URL:-${CP_URL:-}}}"
 
 # A prior run on this state volume already wrote the scoped tokens: reuse them.
 if [[ -z "${VACTI_TOKEN:-}" && -f "$STATE_ENV" ]]; then
@@ -45,6 +71,33 @@ fi
 ENROLL_TOKEN="${VACTI_ENROLL_TOKEN:-${ENROLL_TOKEN:-}}"
 ENGINE_ID="${ENGINE_ID:-$(hostname -s 2>/dev/null || echo engine)}"
 BASE="${VACTI_URL%/}"
+
+# PAIRING CODE -> FULL TOKEN. An operator may supply an 8-char pairing code
+# (K7X9-R8W2) instead of a full enrollment token, either explicitly via
+# VACTI_PAIRING_CODE or simply as the value of VACTI_ENROLL_TOKEN. The code is
+# control-plane-scoped and single-use; it is exchanged for the full enrollment
+# token HERE - before ensure_engine_installed, which uses the full token as the
+# private-apt password to pull the engine .deb, and before the enroll POST below.
+# Only when no producer token short-circuits the enroll path.
+PAIRING_CODE="${VACTI_PAIRING_CODE:-}"
+if [[ -z "$PAIRING_CODE" && -z "${VACTI_TOKEN:-}" && -n "$ENROLL_TOKEN" ]] \
+   && declare -F vacti_is_short_code >/dev/null 2>&1 && vacti_is_short_code "$ENROLL_TOKEN"; then
+  PAIRING_CODE="$ENROLL_TOKEN"   # VACTI_ENROLL_TOKEN was actually a short code
+fi
+if [[ -n "$PAIRING_CODE" ]]; then
+  declare -F vacti_pairing_exchange >/dev/null 2>&1 \
+    || die "pairing-code support helper missing (/usr/local/lib/vacti/pairing-exchange.sh); supply a full VACTI_ENROLL_TOKEN instead"
+  [[ -n "${VACTI_URL:-}" ]] \
+    || die "VACTI_CP_URL required when VACTI_ENROLL_TOKEN is a short code (the pairing code is control-plane-scoped)"
+  log "pairing code detected - exchanging for the full enrollment token at ${BASE}/api/pentest/enroll/exchange (code not logged)"
+  if _tok="$(vacti_pairing_exchange "$BASE" "$PAIRING_CODE")"; then
+    ENROLL_TOKEN="$_tok"
+  else
+    _xrc=$?
+    die "pairing-code exchange failed: $(vacti_pairing_error_en "$_xrc")"
+  fi
+  [[ -n "$ENROLL_TOKEN" ]] || die "pairing-code exchange returned an empty token"
+fi
 
 # THIN-BOOTSTRAP: the engine package is NOT baked into the published image (no
 # /usr/lib/vacti-engine, no prompt-bundle, no skill-bundle - the plain-text IP
