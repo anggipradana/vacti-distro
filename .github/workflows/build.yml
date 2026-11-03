@@ -21,6 +21,10 @@ on:
         description: "Bake the full arsenal (1) or lean web+infra (0)"
         required: false
         default: "0"
+      ctf_arsenal:
+        description: "Also bake the CTF tool set (1) or not (0)"
+        required: false
+        default: "0"
       forms:
         description: "Which image forms to build"
         required: false
@@ -47,6 +51,13 @@ permissions:
 env:
   VACTI_RELEASE: ${{ github.event.inputs.release || github.event.client_payload.release || '0.1.0' }}
   VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '0' }}
+  # CTF tool set toggle. Honored by build-golden.sh (via vacti-appliance.env,
+  # which reads VACTI_CTF_ARSENAL from the environment) for the OVA/cloud forms
+  # and fed to the Dockerfile as a build-arg for the container form, so a single
+  # dispatch with full_arsenal=1 + ctf_arsenal=1 bakes the ENTIRE arsenal (core
+  # superset incl. mobile/ios/re verticals + the CTF apt set) into every surface.
+  # Default 0 keeps the lean-by-default images unchanged.
+  VACTI_CTF_ARSENAL: ${{ github.event.inputs.ctf_arsenal || '0' }}
   # Pinned engine ref the image builds against + the arsenal manifest the sync
   # guard checks. Empty = floating latest (historical behavior). The engine-deb-
   # published dispatch feeds the just-published version in via client_payload.release.
@@ -571,6 +582,7 @@ jobs:
             VACTI_ENGINE_PKG=vacti-engine
             VACTI_ENGINE_REF=${{ steps.ver.outputs.version }}
             VACTI_FULL_ARSENAL=${{ env.VACTI_FULL_ARSENAL }}
+            VACTI_CTF_ARSENAL=${{ env.VACTI_CTF_ARSENAL }}
           secrets: |
             vacti_apt_token=${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
           cache-from: type=gha
