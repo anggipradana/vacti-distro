@@ -5,14 +5,20 @@
 # enrolled - see /etc/systemd/system/lightdm.service.d/10-vacti-gate.conf). It is
 # a front-end that drives the EXISTING enroll chain; it NEVER reimplements enroll:
 #
-#   Stage A (network): bring the box onto the network (NetworkManager frontends),
-#                      optional proxy / host VPN / tailscale, then probe that the
-#                      control-plane URL is reachable.
-#   Stage B (enroll):  collect the control-plane URL + the enrollment token
-#                      ("license"), write them to /etc/vacti-engine/enroll.token
-#                      in the EXACT format vacti-firstboot already parses
-#                      (line 1 = token, line 2 = url), chmod 0600, then start the
-#                      existing first-boot enroll unit and wait for engine.env.
+#   Network: bring the box onto the network (NetworkManager), optional proxy /
+#            Tailscale, then probe that the control-plane URL is reachable.
+#   Enroll:  collect the control-plane URL + the enrollment token ("license"),
+#            write them to /etc/vacti-engine/enroll.token in the EXACT format
+#            vacti-firstboot already parses (line 1 = token, line 2 = url),
+#            chmod 0600, start the existing first-boot enroll unit, wait for
+#            engine.env.
+#
+# UX: instead of a chain of plain popups + the full nm-connection-editor (which
+# trapped operators with no clear "done"), the GUI path is ONE branded yad
+# notebook window: vacti logo on top + three tabs (Jaringan | Enrollment |
+# Opsional) + a single "Aktivasi" button. The advanced NetworkManager editor is
+# still one click away for Wi-Fi / static IP / 802.1x, but the common DHCP case
+# never needs it.
 #
 # On success (engine.env appears) it starts LightDM and exits 0 -> the gate flips
 # and the normal desktop login is now allowed. The token VALUE is never logged;
@@ -23,6 +29,9 @@
 # vacti-activate-fallback.service (OnFailure=) which drops a plain getty so the box
 # is NEVER bricked by a kiosk bug. The engine stays inert without engine.env
 # regardless, so failing open costs no security (the moat is server-side).
+#
+# The HEADLESS SKU uses a separate twin (vacti-netsetup / whiptail); this script
+# is the GUI SKU only and does not implement a TUI branch.
 set -euo pipefail
 
 CFG_DIR="/etc/vacti-engine"
@@ -30,19 +39,19 @@ CFG_ENV="${CFG_DIR}/engine.env"
 TOKEN_FILE="${CFG_DIR}/enroll.token"
 PROXY_ENV="${CFG_DIR}/proxy.env"
 XLOG="/var/log/vacti-activate.xorg.log"
+SELF="$0"
+
+# Branding logo for the kiosk header. Copied into the rootfs by build-golden
+# (branding logo/ dir) long before this runs; referenced only if present so a
+# stripped image still renders the dialog (fail-soft, works-everywhere).
+LOGO=""
+for _l in /usr/share/vacti/branding/logo/png/vacti-logomark-128.png \
+          /usr/share/vacti/branding/logo/png/vacti-logomark-256.png \
+          /usr/share/pixmaps/vacti.svg; do
+  [[ -f "$_l" ]] && { LOGO="$_l"; break; }
+done
 
 log() { echo "[vacti-activate] $*"; }
-
-# Marker for the boot smoke test + operator console: the activation kiosk is the
-# boot destination (not a bare login). Harmless in production.
-echo "VACTI_ACTIVATE_KIOSK=start" > /dev/console 2>/dev/null || true
-
-# Already enrolled? Nothing to do - let LightDM take over immediately.
-if [[ -f "$CFG_ENV" ]]; then
-  log "engine.env present - handing off to the desktop login"
-  systemctl start lightdm.service 2>/dev/null || true
-  exit 0
-fi
 
 # The existing first-boot enroll unit is named vacti-firstrun.service on the
 # installed/live ISO and vacti-firstboot.service on the cloud/VM golden. Drive
@@ -57,7 +66,260 @@ pick_firstboot_unit() {
   done
   echo "vacti-firstboot.service"
 }
-FB_UNIT="$(pick_firstboot_unit)"
+
+# ---------------------------------------------------------------------------
+# Network helpers (shared by the kiosk tab button + the status label).
+# ---------------------------------------------------------------------------
+net_status_line() {
+  local ip
+  ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+  if [[ -n "$ip" ]]; then
+    echo "Terhubung ke jaringan: ${ip}"
+  else
+    echo "Belum terhubung ke jaringan"
+  fi
+}
+
+# Bring up the first wired/ethernet connection (the NAT-via-DHCP common case).
+# No hardcoded connection name: pick the first 802-3-ethernet profile, else
+# connect the first ethernet device. Runs as root; also covered by the polkit
+# rule when run as the vacti-activate user.
+do_net_connect() {
+  local con dev
+  con="$(nmcli -t -f NAME,TYPE con show 2>/dev/null | awk -F: '$2=="802-3-ethernet"{print $1; exit}')"
+  if [[ -n "$con" ]]; then
+    nmcli con up "$con" >/dev/null 2>&1 || true
+  else
+    dev="$(nmcli -t -f DEVICE,TYPE dev status 2>/dev/null | awk -F: '$2=="ethernet"{print $1; exit}')"
+    [[ -n "$dev" ]] && nmcli device connect "$dev" >/dev/null 2>&1 || true
+  fi
+  sleep 2
+  local line; line="$(net_status_line)"
+  local args=(--title="vacti - Jaringan" --text="${line}" --button="OK:0" --width=380 --center)
+  [[ -n "$LOGO" ]] && args+=(--image="$LOGO")
+  yad "${args[@]}" 2>/dev/null || true
+}
+
+# Returns 0 if the control-plane URL answers within ~15s (HEAD), else non-zero.
+reachable() { # url
+  local base="${1%/}"
+  curl -sS -o /dev/null --connect-timeout 10 --max-time 15 -I "${base}/" >/dev/null 2>&1
+}
+
+# Persist optional proxy (for the enroll curl AND the engine) and best-effort
+# bring up Tailscale if an auth key was supplied. Neither value is logged.
+apply_optional() { # proxy tskey
+  local px="${1:-}" ts="${2:-}"
+  if [[ -n "$px" ]]; then
+    install -d -m0755 "$CFG_DIR"
+    umask 077
+    { echo "WEB_PROXY=${px}"; echo "HTTPS_PROXY=${px}"; echo "HTTP_PROXY=${px}"; } > "$PROXY_ENV"
+    umask 022
+    export HTTPS_PROXY="$px" HTTP_PROXY="$px" https_proxy="$px" http_proxy="$px"
+    log "proxy saved to ${PROXY_ENV}"
+  fi
+  if [[ -n "$ts" ]] && command -v tailscale >/dev/null 2>&1; then
+    tailscale up --authkey="$ts" --accept-routes >/dev/null 2>&1 || true
+    log "tailscale up attempted (key not logged)"
+  fi
+}
+
+# Hand the URL+token to the EXISTING enroll chain and wait for engine.env. The
+# window is wide because the enroll unit first pulls the engine .deb (one-time
+# download this boot) before the enroll POST writes engine.env.
+stage_token_and_enroll() { # url token fb_unit
+  local url="$1" token="$2" fb_unit="$3"
+  install -d -m0755 "$CFG_DIR"
+  umask 077
+  { printf '%s\n' "$token"; printf '%s\n' "$url"; } > "$TOKEN_FILE"
+  chmod 0600 "$TOKEN_FILE"
+  umask 022
+  log "token staged; starting ${fb_unit} (token not logged)"
+  systemctl start "$fb_unit" 2>/dev/null || true
+  local _
+  for _ in $(seq 1 150); do
+    [[ -f "$CFG_ENV" ]] && break
+    sleep 2
+  done
+}
+
+# ---------------------------------------------------------------------------
+# GUI kiosk (runs INSIDE the Xorg session via the __wizard re-exec below).
+# yad preferred (branded notebook); zenity is a minimal fail-soft fallback.
+# ---------------------------------------------------------------------------
+DIALOG=""
+pick_dialog() {
+  if command -v yad >/dev/null 2>&1; then DIALOG="yad"; return 0; fi
+  if command -v zenity >/dev/null 2>&1; then DIALOG="zenity"; return 0; fi
+  return 1
+}
+
+# One branded multi-tab window. Loops until engine.env appears or the operator
+# confirms a cancel (fail-open). Prior input is kept and prefilled on re-open.
+kiosk_yad() { # fb_unit
+  local fb_unit="$1"
+  local def_url="" def_token="" def_proxy="" def_tskey=""
+  while [[ ! -f "$CFG_ENV" ]]; do
+    local tmp key status ret
+    tmp="$(mktemp -d)"
+    key="$RANDOM"
+    status="$(net_status_line)"
+
+    # Tab 1 - Jaringan: status snapshot + live action buttons (no captured output).
+    yad --plug="$key" --tabnum=1 --form --columns=1 \
+      --field="Status jaringan saat ini:LBL" "" \
+      --field=":RO" "$status" \
+      --field="Aktifkan koneksi kabel (DHCP - paling umum):FBTN" "$SELF __net-connect" \
+      --field="Buka editor jaringan lanjutan (Wi-Fi / IP statis / 802.1x):FBTN" "nm-connection-editor" \
+      >/dev/null 2>&1 &
+
+    # Tab 2 - Enrollment: control-plane URL + token (prefilled on re-open).
+    yad --plug="$key" --tabnum=2 --form \
+      --field="URL control-plane":TEXT "$def_url" \
+      --field="Token enrollment (lisensi)":H "$def_token" \
+      --field="Tempel token dari dashboard. Berlaku 3 jam, sekali pakai.:LBL" "" \
+      > "${tmp}/2" 2>/dev/null &
+
+    # Tab 3 - Opsional: proxy + Tailscale auth key.
+    yad --plug="$key" --tabnum=3 --form \
+      --field="Proxy HTTP(S) (opsional)":TEXT "$def_proxy" \
+      --field="Tailscale auth key (opsional)":H "$def_tskey" \
+      --field="Kosongkan bila tidak memakai proxy / Tailscale.:LBL" "" \
+      > "${tmp}/3" 2>/dev/null &
+
+    # Parent notebook: logo header + tabs + single Aktivasi button.
+    local nb=(--notebook --key="$key" --tab-pos=top \
+      --tab="Jaringan" --tab="Enrollment" --tab="Opsional" \
+      --text="<b>vacti</b> - Aktivasi perangkat\nLengkapi jaringan, isi token, lalu tekan Aktivasi." \
+      --text-align=center --title="vacti - Aktivasi" \
+      --width=640 --height=480 --center --fixed --undecorated \
+      --button="Batal:1" --button="Aktivasi:0")
+    if [[ -n "$LOGO" ]]; then nb+=(--image="$LOGO" --image-on-top --window-icon="$LOGO"); fi
+    yad "${nb[@]}" 2>/dev/null
+    ret=$?
+    wait 2>/dev/null || true
+
+    if [[ $ret -ne 0 ]]; then
+      # Batal -> confirm. Confirmed exit fails OPEN to the fallback console.
+      local cargs=(--title="vacti" --width=460 --center \
+        --text="Batalkan aktivasi? Perangkat tidak akan aktif tanpa enrollment." \
+        --button="Kembali ke aktivasi:1" --button="Keluar ke konsol:0")
+      [[ -n "$LOGO" ]] && cargs+=(--image="$LOGO")
+      if yad "${cargs[@]}" 2>/dev/null; then
+        rm -rf "$tmp"
+        return 1
+      fi
+      rm -rf "$tmp"
+      continue
+    fi
+
+    def_url="$(cut -d'|' -f1 "${tmp}/2" 2>/dev/null || true)"
+    def_token="$(cut -d'|' -f2 "${tmp}/2" 2>/dev/null || true)"
+    def_proxy="$(cut -d'|' -f1 "${tmp}/3" 2>/dev/null || true)"
+    def_tskey="$(cut -d'|' -f2 "${tmp}/3" 2>/dev/null || true)"
+    rm -rf "$tmp"
+
+    apply_optional "$def_proxy" "$def_tskey"
+
+    if [[ -z "$def_url" || -z "$def_token" ]]; then
+      yad_msg "URL control-plane dan token enrollment wajib diisi (tab Enrollment)."
+      continue
+    fi
+    if ! reachable "$def_url"; then
+      yad_msg "Tidak bisa menjangkau ${def_url}. Cek tab Jaringan (aktifkan koneksi / proxy / Tailscale) lalu coba lagi."
+      continue
+    fi
+
+    stage_token_and_enroll "$def_url" "$def_token" "$fb_unit"
+    if [[ -f "$CFG_ENV" ]]; then
+      yad_msg "Aktivasi berhasil. Membuka desktop..."
+      return 0
+    fi
+    yad_msg "Enrollment belum selesai (token mungkin kedaluwarsa atau sekali pakai - berlaku 3 jam). Mint ulang di dashboard lalu coba lagi.\nDetail: journalctl -u ${fb_unit}"
+  done
+  return 0
+}
+
+yad_msg() { # text
+  local args=(--title="vacti - Aktivasi" --text="$1" --button="OK:0" --width=460 --center)
+  [[ -n "$LOGO" ]] && args+=(--image="$LOGO")
+  yad "${args[@]}" 2>/dev/null || true
+}
+
+# Minimal fail-soft fallback when only zenity is present (yad is the golden
+# default; this keeps the kiosk functional if it is ever stripped).
+kiosk_zenity() { # fb_unit
+  local fb_unit="$1"
+  zenity --info --title="vacti - Aktivasi" \
+    --text="Siapkan jaringan. Editor NetworkManager akan terbuka untuk Wi-Fi / kabel / IP statis. Tutup editor bila sudah." 2>/dev/null || true
+  command -v nm-connection-editor >/dev/null 2>&1 && nm-connection-editor 2>/dev/null || true
+  local px; px="$(zenity --entry --title="Proxy (opsional)" --text="URL proxy HTTP(S), atau kosongkan" 2>/dev/null || true)"
+  apply_optional "$px" ""
+  while [[ ! -f "$CFG_ENV" ]]; do
+    local url token
+    url="$(zenity --entry --title="vacti - Aktivasi" --text="URL control-plane" 2>/dev/null || true)"
+    token="$(zenity --password --title="Token enrollment (lisensi)" 2>/dev/null || true)"
+    if [[ -z "$url" || -z "$token" ]]; then
+      zenity --error --text="URL dan token wajib diisi." 2>/dev/null || true
+      continue
+    fi
+    if ! reachable "$url"; then
+      zenity --error --text="Tidak bisa menjangkau ${url}. Cek jaringan lalu coba lagi." 2>/dev/null || true
+      continue
+    fi
+    stage_token_and_enroll "$url" "$token" "$fb_unit"
+    if [[ -f "$CFG_ENV" ]]; then
+      zenity --info --text="Aktivasi berhasil. Membuka desktop..." 2>/dev/null || true
+      return 0
+    fi
+    zenity --error --text="Enrollment belum selesai (token mungkin kedaluwarsa). Coba lagi." 2>/dev/null || true
+  done
+  return 0
+}
+
+run_wizard() {
+  if ! pick_dialog; then
+    log "no yad/zenity dialog toolkit present - cannot render the kiosk"
+    return 1
+  fi
+  # A tiny WM so the advanced NetworkManager editor window is manageable under
+  # the bare xinit session (best-effort; the kiosk works without it too).
+  if command -v openbox >/dev/null 2>&1; then
+    openbox >/dev/null 2>&1 &
+    sleep 1
+  fi
+  local fb_unit; fb_unit="$(pick_firstboot_unit)"
+  if [[ "$DIALOG" == "yad" ]]; then
+    kiosk_yad "$fb_unit"
+  else
+    kiosk_zenity "$fb_unit"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Re-exec hooks (inside the X session): the wizard client + the tab button.
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+  __wizard)
+    run_wizard || exit 1
+    exit 0
+    ;;
+  __net-connect)
+    do_net_connect
+    exit 0
+    ;;
+esac
+
+# Marker for the boot smoke test + operator console: the activation kiosk is the
+# boot destination (not a bare login). Harmless in production.
+echo "VACTI_ACTIVATE_KIOSK=start" > /dev/console 2>/dev/null || true
+
+# Already enrolled? Nothing to do - let LightDM take over immediately.
+if [[ -f "$CFG_ENV" ]]; then
+  log "engine.env present - handing off to the desktop login"
+  systemctl start lightdm.service 2>/dev/null || true
+  exit 0
+fi
 
 # A usable graphical display must exist, or we fail OPEN to the fallback getty.
 # (-vga none / a headless VM / a broken GPU all land here deterministically.)
@@ -71,131 +333,6 @@ graphical_possible() {
   return 1
 }
 
-# ---------------------------------------------------------------------------
-# GUI wizard (runs INSIDE the Xorg session via the __wizard re-exec below).
-# Lightweight + renderer-agnostic (yad preferred, zenity fallback) per the
-# works-everywhere rule: no GPU/compositor assumption.
-# ---------------------------------------------------------------------------
-DIALOG=""
-pick_dialog() {
-  if command -v yad >/dev/null 2>&1; then DIALOG="yad"; return 0; fi
-  if command -v zenity >/dev/null 2>&1; then DIALOG="zenity"; return 0; fi
-  return 1
-}
-
-msg() { # title text
-  case "$DIALOG" in
-    yad)    yad --title="$1" --text="$2" --button=OK:0 --width=460 2>/dev/null || true ;;
-    zenity) zenity --info --title="$1" --text="$2" 2>/dev/null || true ;;
-    *)      log "$1: $2" ;;
-  esac
-}
-
-ask_two() { # url_var token_var -> echoes "URL\nTOKEN"
-  case "$DIALOG" in
-    yad)
-      yad --title="vacti activation" --form --width=520 \
-        --text="Enter the control-plane URL and your enrollment token (license)." \
-        --field="Control-plane URL":TEXT "" \
-        --field="Enrollment token":H "" 2>/dev/null
-      ;;
-    zenity)
-      local u t
-      u="$(zenity --entry --title="vacti activation" --text="Control-plane URL" 2>/dev/null || true)"
-      t="$(zenity --password --title="Enrollment token (license)" 2>/dev/null || true)"
-      printf '%s|%s|\n' "$u" "$t"
-      ;;
-  esac
-}
-
-network_stage() {
-  msg "vacti - Step 1 of 2: Network" \
-      "Set up networking so the box can reach the control plane.\n\nThe NetworkManager editor will open for Wi-Fi / wired / 802.1x / DNS / VPN. Proxy and Tailscale are optional. Close the editor when done."
-  if command -v nm-connection-editor >/dev/null 2>&1; then
-    nm-connection-editor 2>/dev/null || true
-  elif command -v nmtui >/dev/null 2>&1; then
-    nmtui 2>/dev/null || true
-  fi
-  # Optional proxy: persist for the enroll curl AND the engine (WEB_PROXY/HTTPS_PROXY).
-  local px=""
-  case "$DIALOG" in
-    yad)    px="$(yad --title="Proxy (optional)" --entry --text="HTTP(S) proxy URL, or leave blank" 2>/dev/null || true)" ;;
-    zenity) px="$(zenity --entry --title="Proxy (optional)" --text="HTTP(S) proxy URL, or leave blank" 2>/dev/null || true)" ;;
-  esac
-  if [[ -n "$px" ]]; then
-    install -d -m0755 "$CFG_DIR"
-    umask 077
-    { echo "WEB_PROXY=${px}"; echo "HTTPS_PROXY=${px}"; echo "HTTP_PROXY=${px}"; } > "$PROXY_ENV"
-    umask 022
-    log "proxy saved to ${PROXY_ENV}"
-  fi
-}
-
-# Returns 0 if the control-plane URL answers within 10s (HEAD), else non-zero.
-reachable() { # url
-  local base="${1%/}"
-  curl -sS -o /dev/null --connect-timeout 10 --max-time 15 -I "${base}/" >/dev/null 2>&1
-}
-
-enroll_stage() { # loops until engine.env appears or the kiosk exits
-  while [[ ! -f "$CFG_ENV" ]]; do
-    local raw url token
-    raw="$(ask_two || true)"
-    url="$(printf '%s' "$raw" | cut -d'|' -f1)"
-    token="$(printf '%s' "$raw" | cut -d'|' -f2)"
-    if [[ -z "$url" || -z "$token" ]]; then
-      msg "vacti activation" "URL and token are both required."
-      continue
-    fi
-    if ! reachable "$url"; then
-      msg "vacti activation" "Could not reach ${url}. Check Step 1 (network/proxy/VPN) and retry."
-      continue
-    fi
-    # Hand the token to the EXISTING enroll chain - never parse/validate it here.
-    install -d -m0755 "$CFG_DIR"
-    umask 077
-    { printf '%s\n' "$token"; printf '%s\n' "$url"; } > "$TOKEN_FILE"
-    chmod 0600 "$TOKEN_FILE"
-    umask 022
-    log "token staged; starting ${FB_UNIT} (token not logged)"
-    systemctl start "$FB_UNIT" 2>/dev/null || true
-    # Wait up to 300s for the enroll chain to produce engine.env. The window is
-    # wider than before because the enroll unit now first pulls the engine .deb
-    # (vacti-engine-install.service) from the private apt repo - a one-time
-    # download on this boot - before the enroll POST writes engine.env.
-    local _
-    for _ in $(seq 1 150); do
-      [[ -f "$CFG_ENV" ]] && break
-      sleep 2
-    done
-    if [[ -f "$CFG_ENV" ]]; then
-      msg "vacti activation" "Activated. Starting the desktop..."
-      return 0
-    fi
-    msg "vacti activation" "Enrollment did not complete (the token may be expired or single-use - it is valid for 3h). Re-mint in the dashboard and retry. See: journalctl -u ${FB_UNIT}"
-  done
-  return 0
-}
-
-run_wizard() {
-  if ! pick_dialog; then
-    log "no yad/zenity dialog toolkit present - cannot render the kiosk"
-    return 1
-  fi
-  network_stage
-  enroll_stage
-}
-
-# When re-executed by xinit inside the X session, just run the wizard.
-if [[ "${1:-}" == "__wizard" ]]; then
-  run_wizard || exit 1
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Top level: bring up a bare Xorg on vt1 and run the wizard inside it. If no
-# usable display exists, fail OPEN (exit non-zero -> fallback getty).
-# ---------------------------------------------------------------------------
 if ! graphical_possible; then
   log "no usable graphical display (headless/no-GPU) - failing open to the console"
   echo "VACTI_ACTIVATE_NODISPLAY=1" > /dev/console 2>/dev/null || true
