@@ -1,0 +1,145 @@
+# vacti-distro arsenal cross-arch parity gate.
+#
+# Answers the operator's standing question: "are the required tools confirmed to
+# auto-install and stay up to date on EVERY architecture (OVA + Docker)?" Both the
+# OVA golden image and the Docker image derive their install set from the SAME
+# engine arsenal manifest (distro/packages/arsenal-manifest.json). This gate proves
+# every apt package that manifest declares resolves CONSISTENTLY on the real image
+# base - Debian 13 "trixie" + the pinned Kali rolling source - across amd64 and
+# arm64, so a tool that installs on one arch but silently skips on the other can no
+# longer ship unnoticed.
+#
+# HOW: the resolution that matters is the TARGET base's resolution, not the Ubuntu
+# runner's. So each arch job runs the simulation INSIDE a debian:trixie-slim
+# container, native per-arch (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) -
+# no QEMU, no Ubuntu-noble skew. The container adds the EXISTING pinned kali.list /
+# kali-pin.pref from the repo (the same files the Dockerfile and golden image use),
+# then `apt-get install --simulate`s every manifest package and records the result.
+#
+# GATE (decided by the diff job): a grant/core package installable on one arch but
+# NOT the other is a parity FAILURE. A grant/core package absent on BOTH arches is a
+# runtime-self-heal fact (Go tools via `go install`, Kali-only tools unsatisfiable
+# under the pin), arch-consistent, so it is reported loudly but does NOT fail CI -
+# otherwise the gate would be permanently red on a package the engine installs at
+# runtime and that this repo may not edit out of the engine-generated manifest. The
+# verticals and ctf sets are ALLOWED to be arch-divergent (reported only). See
+# distro/packages/README.md for which arches each optional set supports.
+#
+# This workflow is read-only (it never dispatches a build and never publishes). It
+# does not touch the existing build / build-arm64 / publish workflows.
+name: arsenal-parity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Per-SHA: a new push to the same commit supersedes an in-flight run; distinct
+# commits (and distinct PR heads) run independently.
+concurrency:
+  group: arsenal-parity-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: parity (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Simulate arsenal install on Debian trixie + pinned Kali (${{ matrix.arch }})
+        run: |
+          set -euo pipefail
+          mkdir -p generated-reports
+          # Native per-arch: on ubuntu-24.04-arm this pulls the arm64 trixie image,
+          # on ubuntu-latest the amd64 one. The parity script enumerates the
+          # manifest, adds the pinned Kali source, and simulates every package.
+          docker run --rm \
+            -v "${PWD}:/repo" \
+            -w /repo \
+            "debian:trixie-slim" \
+            bash ci/arsenal-parity.sh \
+              "${{ matrix.arch }}" \
+              distro/packages/arsenal-manifest.json \
+              distro/packages/kali-repo \
+              "generated-reports/arsenal-parity-${{ matrix.arch }}.json"
+
+      - name: Publish per-arch report to the job summary
+        if: ${{ always() }}
+        run: |
+          md="generated-reports/arsenal-parity-${{ matrix.arch }}.md"
+          if [ -f "$md" ]; then
+            cat "$md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Arsenal parity - ${{ matrix.arch }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "No report produced (the simulation step failed before writing one)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload per-arch parity report artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: arsenal-parity-${{ matrix.arch }}
+          path: |
+            generated-reports/arsenal-parity-${{ matrix.arch }}.json
+            generated-reports/arsenal-parity-${{ matrix.arch }}.md
+          if-no-files-found: warn
+
+  # --- the gate: compare the two arch reports and fail on grant/core divergence ----
+  parity-diff:
+    name: parity gate (amd64 vs arm64)
+    needs: parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download amd64 report
+        uses: actions/download-artifact@v4
+        with:
+          name: arsenal-parity-amd64
+          path: generated-reports
+
+      - name: Download arm64 report
+        uses: actions/download-artifact@v4
+        with:
+          name: arsenal-parity-arm64
+          path: generated-reports
+
+      - name: Compare arches and gate on grant/core divergence
+        run: |
+          set -euo pipefail
+          bash ci/arsenal-parity-diff.sh \
+            generated-reports/arsenal-parity-amd64.json \
+            generated-reports/arsenal-parity-arm64.json \
+            generated-reports/arsenal-parity-diff.md
+
+      - name: Publish parity verdict to the job summary
+        if: ${{ always() }}
+        run: |
+          if [ -f generated-reports/arsenal-parity-diff.md ]; then
+            cat generated-reports/arsenal-parity-diff.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Arsenal cross-arch parity verdict" >> "$GITHUB_STEP_SUMMARY"
+            echo "No verdict produced (the diff step failed before writing one)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload parity verdict artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: arsenal-parity-diff
+          path: generated-reports/arsenal-parity-diff.md
+          if-no-files-found: warn
