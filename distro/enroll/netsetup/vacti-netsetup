@@ -10,6 +10,108 @@
 # unenrolled. Run it as root (sudo vacti-netsetup).
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# i18n (EN/ID). Self-contained string table - no gettext, no new deps. Default
+# is Indonesian. Language precedence: --lang en|id > VACTI_LANG env >
+# /etc/vacti/lang (or ~/.config/vacti/lang) > $LANG locale. A key missing in the
+# chosen language falls back to EN (warning on stderr, never fatal). Strings use
+# "{}" as a value placeholder.
+# ---------------------------------------------------------------------------
+VACTI_LANG_FLAG=""
+_vacti_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lang) VACTI_LANG_FLAG="${2:-}"; shift 2 || shift ;;
+    --lang=*) VACTI_LANG_FLAG="${1#--lang=}"; shift ;;
+    *) _vacti_args+=("$1"); shift ;;
+  esac
+done
+set -- ${_vacti_args[@]+"${_vacti_args[@]}"}
+
+_resolve_uilang() {
+  local v="" home_lang="${HOME:-/root}/.config/vacti/lang"
+  if   [[ -n "${VACTI_LANG_FLAG:-}" ]]; then v="$VACTI_LANG_FLAG"
+  elif [[ -n "${VACTI_LANG:-}"      ]]; then v="$VACTI_LANG"
+  elif [[ -r /etc/vacti/lang        ]]; then v="$(cat /etc/vacti/lang 2>/dev/null)"
+  elif [[ -r "$home_lang"           ]]; then v="$(cat "$home_lang" 2>/dev/null)"
+  elif [[ "${LANG:-}" == id* || "${LC_ALL:-}" == id* ]]; then v="id"
+  elif [[ -n "${LANG:-}${LC_ALL:-}" ]]; then v="en"
+  fi
+  v="${v,,}"; v="${v//[[:space:]]/}"
+  case "$v" in en) echo en ;; id) echo id ;; *) echo id ;; esac
+}
+VACTI_UILANG="$(_resolve_uilang)"
+
+declare -A VT_EN=(
+  [cfg_static]="Configure a STATIC IPv4 address? (No = keep DHCP)"
+  [q_iface]="Interface name"
+  [q_addr]="Address/CIDR (e.g. 192.168.1.50/24)"
+  [q_gw]="Gateway"
+  [q_dns]="DNS servers (space-separated)"
+  [cfg_proxy]="Set an HTTP(S) proxy for enrollment + the engine?"
+  [q_proxy]="Proxy URL (http://host:port)"
+  [cfg_vpn]="Bring up a host VPN now (wg-quick / openconnect)?"
+  [cfg_wg]="Use a WireGuard config at /etc/wireguard/wg0.conf?"
+  [q_oc]="openconnect server (host)"
+  [q_url]="Control-plane URL (e.g. https://cp.example)"
+  [q_token]="Pairing code (e.g. K7X9-R8W2) OR full enrollment token (single-use, valid 3h)"
+  [err_root]="must run as root (try: sudo vacti-netsetup)"
+  [already_enrolled]="engine.env already present - this box is already enrolled. Nothing to do."
+  [err_url_required]="the control-plane URL is required"
+  [err_token_required]="a pairing code or enrollment token is required"
+  [err_no_token]="no enrollment token resolved"
+  [success]="SUCCESS: engine.env written - the engine will start. Enrollment complete."
+  [err_enroll_incomplete]="enrollment did not complete. The token may be expired/used (single-use, valid 3h) - re-mint and retry. See: journalctl -u vacti-firstboot.service (or vacti-firstrun.service)"
+)
+declare -A VT_ID=(
+  [cfg_static]="Atur alamat IPv4 STATIS? (Tidak = tetap DHCP)"
+  [q_iface]="Nama interface"
+  [q_addr]="Alamat/CIDR (mis. 192.168.1.50/24)"
+  [q_gw]="Gateway"
+  [q_dns]="Server DNS (pisahkan dengan spasi)"
+  [cfg_proxy]="Pakai proxy HTTP(S) untuk enrollment + engine?"
+  [q_proxy]="URL proxy (http://host:port)"
+  [cfg_vpn]="Nyalakan VPN host sekarang (wg-quick / openconnect)?"
+  [cfg_wg]="Pakai konfigurasi WireGuard di /etc/wireguard/wg0.conf?"
+  [q_oc]="Server openconnect (host)"
+  [q_url]="URL control-plane (mis. https://cp.example)"
+  [q_token]="Kode pairing (mis. K7X9-R8W2) ATAU token enrollment lengkap (sekali pakai, berlaku 3 jam)"
+  [err_root]="harus dijalankan sebagai root (coba: sudo vacti-netsetup)"
+  [already_enrolled]="engine.env sudah ada - perangkat ini sudah ter-enroll. Tidak ada yang perlu dilakukan."
+  [err_url_required]="URL control-plane wajib diisi"
+  [err_token_required]="kode pairing atau token enrollment wajib diisi"
+  [err_no_token]="token enrollment tidak berhasil didapatkan"
+  [success]="BERHASIL: engine.env tertulis - engine akan berjalan. Enrollment selesai."
+  [err_enroll_incomplete]="enrollment belum selesai. Token mungkin kedaluwarsa/terpakai (sekali pakai, berlaku 3 jam) - mint ulang lalu coba lagi. Lihat: journalctl -u vacti-firstboot.service (atau vacti-firstrun.service)"
+)
+
+_lookup() { # key
+  local key="$1" val=""
+  if [[ "$VACTI_UILANG" == "en" ]]; then
+    val="${VT_EN[$key]-}"
+  else
+    val="${VT_ID[$key]-}"
+    if [[ -z "$val" && -n "${VT_EN[$key]-}" ]]; then
+      echo "[vacti-netsetup] i18n key '$key' missing for id; using en" >&2
+      val="${VT_EN[$key]}"
+    fi
+  fi
+  if [[ -z "$val" ]]; then
+    [[ -z "${VT_EN[$key]-}" ]] && echo "[vacti-netsetup] missing i18n key: $key" >&2
+    val="${VT_EN[$key]-$key}"
+  fi
+  printf '%s' "$val"
+}
+
+# _t KEY [ARG...] -> the translated string with each "{}" replaced by an ARG.
+_t() {
+  local key="$1"; shift || true
+  local val; val="$(_lookup "$key")"
+  local a
+  for a in "$@"; do val="${val/"{}"/$a}"; done
+  printf '%s' "$val"
+}
+
 CFG_DIR="/etc/vacti-engine"
 CFG_ENV="${CFG_DIR}/engine.env"
 TOKEN_FILE="${CFG_DIR}/enroll.token"
@@ -34,10 +136,10 @@ for _ph in \
   fi
 done
 
-[[ "$(id -u)" == "0" ]] || die "must run as root (try: sudo vacti-netsetup)"
+[[ "$(id -u)" == "0" ]] || die "$(_t err_root)"
 
 if [[ -f "$CFG_ENV" ]]; then
-  log "engine.env already present - this box is already enrolled. Nothing to do."
+  log "$(_t already_enrolled)"
   exit 0
 fi
 
@@ -92,11 +194,11 @@ msg() { # text -> informational box (whiptail if present, else stderr)
 if command -v nmtui >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
   log "NetworkManager active - launching nmtui for network setup"
   nmtui 2>/dev/null || true
-elif confirm "Configure a STATIC IPv4 address? (No = keep DHCP)"; then
-  iface="$(ask "Interface name" "$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')")"
-  addr="$(ask "Address/CIDR (e.g. 192.168.1.50/24)" "")"
-  gw="$(ask "Gateway" "")"
-  dns="$(ask "DNS servers (space-separated)" "1.1.1.1 8.8.8.8")"
+elif confirm "$(_t cfg_static)"; then
+  iface="$(ask "$(_t q_iface)" "$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')")"
+  addr="$(ask "$(_t q_addr)" "")"
+  gw="$(ask "$(_t q_gw)" "")"
+  dns="$(ask "$(_t q_dns)" "1.1.1.1 8.8.8.8")"
   if [[ -n "$iface" && -n "$addr" ]]; then
     install -d -m0755 "$NETWORKD_DIR"
     {
@@ -115,8 +217,8 @@ elif confirm "Configure a STATIC IPv4 address? (No = keep DHCP)"; then
 fi
 
 # --- 2. optional proxy ------------------------------------------------------
-if confirm "Set an HTTP(S) proxy for enrollment + the engine?"; then
-  px="$(ask "Proxy URL (http://host:port)" "")"
+if confirm "$(_t cfg_proxy)"; then
+  px="$(ask "$(_t q_proxy)" "")"
   if [[ -n "$px" ]]; then
     install -d -m0755 "$CFG_DIR"
     umask 077
@@ -127,11 +229,11 @@ if confirm "Set an HTTP(S) proxy for enrollment + the engine?"; then
 fi
 
 # --- 3. optional host VPN (reach the CP behind a corporate VPN) --------------
-if confirm "Bring up a host VPN now (wg-quick / openconnect)?"; then
-  if command -v wg-quick >/dev/null 2>&1 && confirm "Use a WireGuard config at /etc/wireguard/wg0.conf?"; then
+if confirm "$(_t cfg_vpn)"; then
+  if command -v wg-quick >/dev/null 2>&1 && confirm "$(_t cfg_wg)"; then
     wg-quick up wg0 2>/dev/null || log "wg-quick up wg0 failed (check /etc/wireguard/wg0.conf)"
   elif command -v openconnect >/dev/null 2>&1; then
-    srv="$(ask "openconnect server (host)" "")"
+    srv="$(ask "$(_t q_oc)" "")"
     [[ -n "$srv" ]] && { log "launching openconnect to ${srv} (interactive)"; openconnect "$srv" || log "openconnect exited"; }
   else
     log "no wg-quick/openconnect available; configure host VPN manually, then re-run"
@@ -139,8 +241,8 @@ if confirm "Bring up a host VPN now (wg-quick / openconnect)?"; then
 fi
 
 # --- 4. enroll via the EXISTING first-boot chain ----------------------------
-url="$(ask "Control-plane URL (e.g. https://cp.example)" "")"
-[[ -n "$url" ]] || die "the control-plane URL is required"
+url="$(ask "$(_t q_url)" "")"
+[[ -n "$url" ]] || die "$(_t err_url_required)"
 
 # The enrollment prompt accepts EITHER an 8-char pairing code (K7X9-R8W2) OR a
 # full enrollment token. A pairing code is exchanged at the CP for the full token
@@ -150,15 +252,17 @@ url="$(ask "Control-plane URL (e.g. https://cp.example)" "")"
 # so vacti-firstboot is unchanged.
 token=""
 while :; do
-  entered="$(ask_secret "Pairing code (e.g. K7X9-R8W2) OR full enrollment token (single-use, valid 3h)")"
-  [[ -n "$entered" ]] || die "a pairing code or enrollment token is required"
+  entered="$(ask_secret "$(_t q_token)")"
+  [[ -n "$entered" ]] || die "$(_t err_token_required)"
   if declare -F vacti_is_short_code >/dev/null 2>&1 && vacti_is_short_code "$entered"; then
     log "pairing code detected - exchanging for the full enrollment token (code not logged)"
     real_token="$(vacti_pairing_exchange "$url" "$entered")"; xrc=$?
     if [[ $xrc -ne 0 ]]; then
-      msg "$(vacti_pairing_error_id "$xrc")
-
-$(vacti_pairing_error_en "$xrc")"
+      if [[ "$VACTI_UILANG" == "en" ]]; then
+        msg "$(vacti_pairing_error_en "$xrc")"
+      else
+        msg "$(vacti_pairing_error_id "$xrc")"
+      fi
       continue
     fi
     token="$real_token"
@@ -167,7 +271,7 @@ $(vacti_pairing_error_en "$xrc")"
   fi
   break
 done
-[[ -n "$token" ]] || die "no enrollment token resolved"
+[[ -n "$token" ]] || die "$(_t err_no_token)"
 
 install -d -m0755 "$CFG_DIR"
 umask 077
@@ -188,7 +292,7 @@ for _ in $(seq 1 45); do
 done
 
 if [[ -f "$CFG_ENV" ]]; then
-  log "SUCCESS: engine.env written - the engine will start. Enrollment complete."
+  log "$(_t success)"
   exit 0
 fi
-die "enrollment did not complete. The token may be expired/used (single-use, valid 3h) - re-mint and retry. See: journalctl -u vacti-firstboot.service (or vacti-firstrun.service)"
+die "$(_t err_enroll_incomplete)"
