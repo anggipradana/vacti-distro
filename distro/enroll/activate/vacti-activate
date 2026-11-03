@@ -296,7 +296,7 @@ kiosk_yad() { # fb_unit
       if [[ $xrc -ne 0 ]]; then
         case $xrc in
           44) yad_msg "Kode tidak ditemukan. Periksa lalu coba lagi." ;;
-          41) yad_msg "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 3 jam). Mint ulang di dashboard." ;;
+          41) yad_msg "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit). Mint ulang di dashboard." ;;
           42) yad_msg "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi." ;;
           *)  yad_msg "Gangguan jaringan saat menukar kode. Coba lagi." ;;
         esac
@@ -348,7 +348,7 @@ kiosk_zenity() { # fb_unit
       if [[ $xrc -ne 0 ]]; then
         case $xrc in
           44) zenity --error --text="Kode tidak ditemukan." 2>/dev/null || true ;;
-          41) zenity --error --text="Kode sudah dipakai atau kedaluwarsa (sekali pakai, 3 jam)." 2>/dev/null || true ;;
+          41) zenity --error --text="Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit)." 2>/dev/null || true ;;
           42) zenity --error --text="Terlalu banyak percobaan. Tunggu sebentar." 2>/dev/null || true ;;
           *)  zenity --error --text="Gangguan jaringan saat menukar kode." 2>/dev/null || true ;;
         esac

@@ -391,7 +391,7 @@ class KioskWindow(Adw.ApplicationWindow):
             )
             msg = {
                 44: "Kode tidak ditemukan. Periksa lalu coba lagi.",
-                41: "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 3 jam). "
+                41: "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit). "
                     "Mint ulang di dashboard.",
                 42: "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi.",
             }
