@@ -80,10 +80,20 @@ rm -rf "$STAGE"; mkdir -p \
   "${STAGE}/etc/sysctl.d" \
   "${STAGE}/etc/tmpfiles.d" \
   "${STAGE}/etc/default" \
+  "${STAGE}/usr/share/keyrings" \
   "${STAGE}/opt/vacti-build"
 # branding assets -> /usr/share/vacti/branding (apply-branding.sh reads these)
 cp -a "${BRAND_DIR}/os-release" "${BRAND_DIR}/issue" "${BRAND_DIR}/issue.net" \
       "${BRAND_DIR}/motd" "${BRAND_DIR}/disclaimer.txt" "${STAGE}/usr/share/vacti/branding/"
+# apt-pool signing keyring (ed25519 OpenPGP, fingerprint
+# 1240992D7986141C461AEC4B1F971D5D47DBFA8F). BAKED into the base image so the
+# first-boot thin-bootstrap can pin the engine apt source to signed-by= (apt
+# cryptographically verifies the repo InRelease) instead of [trusted=yes], which
+# closes a TLS-intercepting proxy serving a forged vacti-engine.deb. Public
+# verification key ONLY - no secret - so it is safe on a public image. The engine
+# .deb itself is NEVER baked (thin-bootstrap IP protection); only this public key
+# ships here, exactly as the engine's own postinst installs it to the same path.
+install -m0644 "${BRAND_DIR}/vacti-apt.gpg" "${STAGE}/usr/share/keyrings/vacti-apt.gpg"
 for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo kiosk; do
   [[ -d "${BRAND_DIR}/${d}" ]] && cp -a "${BRAND_DIR}/${d}" "${STAGE}/usr/share/vacti/branding/"
 done
