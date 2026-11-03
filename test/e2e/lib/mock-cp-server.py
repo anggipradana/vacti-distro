@@ -137,10 +137,15 @@ def enroll():
         return jsonify(error="unauthorized"), 401
     _record("enroll", result=200, engine_id=engine_id,
             token_from_code=STATE["issued_tokens"][token].get("from_code"))
+    # engineSharedSecret mirrors the real control plane (libs/api pentest-routes enroll
+    # response): the X-Engine-Auth value the first-boot writer must persist as
+    # VACTI_ENGINE_SHARED_SECRET so off-tailnet engines clear the edge Basic gate on their
+    # first heartbeat. A real CP returns "" when its own env var is unset (feature off).
     return jsonify(
         producer_token="prod-" + uuid.uuid4().hex,
         verifier_token="ver-" + uuid.uuid4().hex,
         gatekeeper_token="gk-" + uuid.uuid4().hex,
+        engineSharedSecret=os.environ.get("MOCK_ENGINE_SHARED_SECRET", ""),
     ), 200
 
 
