@@ -365,8 +365,11 @@ jobs:
       - name: Flatten + reproducibility manifest
         run: |
           mkdir -p release
+          # MOVE (not copy): dist/ and release/ share a filesystem so this is a
+          # rename (near-zero extra space); 'cp' would double peak disk and ENOSPC
+          # as the arm64 matrix grows. Nothing reads dist/ after this step.
           find dist -type f \( -name '*.qcow2' -o -name '*.raw.gz' -o -name '*.ova' -o -name '*.iso' -o -name '*.sha256' \) \
-            -exec cp -n {} release/ \;
+            -exec mv -n {} release/ \;
           ( cd release && sha256sum ./*.ova ./*.iso 2>/dev/null > MANIFEST-arm64.sha256 || true )
       - name: Final no-secret scan gate (every published artifact)  # MANDATORY
         run: |
