@@ -424,9 +424,10 @@ jobs:
       LIBGUESTFS_BACKEND: direct
     steps:
       # Same squeeze as golden/fanout/iso/smoke: publish downloads EVERY built
-      # form (~25GB on the full matrix) onto the runner's ~14GB free at "Collect
-      # all artifacts"/"Flatten", so without this reclaim it ENOSPC's before it
-      # can even assemble the release. This is the ONLY job that lacked the step.
+      # form (~50 GiB / 10 artifacts on the full matrix) onto the runner's ~14GB
+      # free at "Collect all artifacts"/"Flatten", so without this reclaim it
+      # ENOSPC's before it can even assemble the release. The Flatten step moves
+      # (not copies) images so peak stays ~50 GiB, not ~100 GiB.
       # (It does NOT fix the >2GiB-asset host limit - that is the separate,
       # operator-gated R2 wiring - but it lets the collect/flatten step run.)
       - name: Free disk space (reclaim >30GB on the runner)
@@ -461,11 +462,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+          # Scope to the real image artifacts (mirrors the smoke job, which
+          # downloads this same ~50 GiB on the full matrix successfully). Without
+          # the pattern the step also pulls the stray ~372KB .dockerbuild artifact
+          # and, on the full matrix, the concurrent all-artifact fetch flakes with
+          # "Artifact download failed after 5 retries".
+          pattern: "{form-*,golden-qcow2-*}"
       - name: Flatten + reproducibility manifest
         run: |
           mkdir -p release
+          # MOVE (not copy) each image dist/ -> release/: dist/ and release/ are on
+          # the same filesystem so this is a rename (near-zero extra space), where
+          # 'cp' would hold BOTH copies at once (~2x) and ENOSPC on the ~50 GiB
+          # full matrix. Nothing reads dist/ after this step (scan + publish read
+          # release/ only). -n keeps the no-clobber semantics of the old 'cp -n'.
           find dist -type f \( -name '*.qcow2' -o -name '*.raw.gz' -o -name '*.ova' -o -name '*.iso' -o -name '*.sha256' \) \
-            -exec cp -n {} release/ \;
+            -exec mv -n {} release/ \;
           ( cd release && sha256sum ./*.qcow2 ./*.raw.gz ./*.ova ./*.iso 2>/dev/null > MANIFEST.sha256 || true )
       - name: Final no-secret scan gate (every published artifact)  # MANDATORY
         # The libguestfs toolchain + runner workarounds are installed above; this
@@ -475,6 +487,16 @@ jobs:
           for a in release/*.qcow2 release/*.raw.gz release/*.ova release/*.iso; do
             ci/no-secret-scan.sh "$a"
           done
+      - name: Enforce the 2GiB Release asset cap (log + continue; does not solve R2)
+        # GitHub Releases reject a single asset > 2 GiB and softprops/action-gh-
+        # release aborts the WHOLE release on the first over-cap upload. On the full
+        # matrix most of the ~50 GiB of images individually exceed 2 GiB, so without
+        # this the publish hard-fails at upload even after download+flatten succeed.
+        # This moves any over-cap file out of release/ (into release/over-cap/) with
+        # a warning so every in-limit asset still publishes; over-cap files are
+        # fetched via 'gh run download' + the operator-gated R2 mirror and remain
+        # listed in MANIFEST.sha256. Same graceful behavior as the arm64 publish.
+        run: ci/cap-release-assets.sh release 2147483648
       - name: Publish PRIVATE GitHub Release (assets stay private to this repo)
         uses: softprops/action-gh-release@v2
         with:
