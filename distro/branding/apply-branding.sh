@@ -163,6 +163,17 @@ if [[ -d "${SRC}/xfce" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 9b. premium activation kiosk brand skin (GUI SKU). The GTK4 + libadwaita kiosk
+#     app itself is installed by build-golden under /usr/local/share/vacti-kiosk;
+#     here we install its brand CSS beside it. Fail-soft: the kiosk renders the
+#     stock dark theme if this is absent, and a headless image simply never runs it.
+# ---------------------------------------------------------------------------
+if [[ -f "${SRC}/kiosk/vacti-kiosk.css" ]]; then
+  install -D -m0644 "${SRC}/kiosk/vacti-kiosk.css" /usr/local/share/vacti-kiosk/vacti-kiosk.css
+  log "kiosk brand CSS installed"
+fi
+
+# ---------------------------------------------------------------------------
 # 10. a sensible default hostname (only if still the generic base default)
 # ---------------------------------------------------------------------------
 cur_host="$(cat /etc/hostname 2>/dev/null | tr -d '[:space:]')"

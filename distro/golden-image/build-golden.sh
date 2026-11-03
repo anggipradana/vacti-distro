@@ -84,7 +84,7 @@ rm -rf "$STAGE"; mkdir -p \
 # branding assets -> /usr/share/vacti/branding (apply-branding.sh reads these)
 cp -a "${BRAND_DIR}/os-release" "${BRAND_DIR}/issue" "${BRAND_DIR}/issue.net" \
       "${BRAND_DIR}/motd" "${BRAND_DIR}/disclaimer.txt" "${STAGE}/usr/share/vacti/branding/"
-for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo; do
+for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo kiosk; do
   [[ -d "${BRAND_DIR}/${d}" ]] && cp -a "${BRAND_DIR}/${d}" "${STAGE}/usr/share/vacti/branding/"
 done
 cp -a "${BRAND_DIR}/apply-branding.sh" "${STAGE}/opt/vacti-build/apply-branding.sh"
@@ -108,6 +108,12 @@ cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot.service" "${STAGE}/etc/syste
 # installed by apply-branding.sh (GUI-only). vacti-netsetup is the headless
 # operator command surfaced in the MOTD while unenrolled.
 cp -a "${ENROLL_DIR}/activate/vacti-activate"                 "${STAGE}/usr/local/sbin/vacti-activate"
+# Premium GTK4 + libadwaita kiosk app driven by vacti-activate's run_wizard (GUI
+# SKU). Staged UNCONDITIONALLY; it is only invoked when GTK4/libadwaita import
+# (GUI SKU), and vacti-activate falls back to yad/zenity otherwise. The brand CSS
+# it loads is installed by apply-branding.sh (distro/branding/kiosk).
+install -d "${STAGE}/usr/local/share/vacti-kiosk"
+cp -a "${ENROLL_DIR}/activate/vacti-kiosk"                    "${STAGE}/usr/local/share/vacti-kiosk/vacti-kiosk"
 cp -a "${ENROLL_DIR}/activate/vacti-activate.service"         "${STAGE}/etc/systemd/system/vacti-activate.service"
 cp -a "${ENROLL_DIR}/activate/vacti-activate-fallback.service" "${STAGE}/etc/systemd/system/vacti-activate-fallback.service"
 cp -a "${ENROLL_DIR}/activate/vacti-activate-polkit.rules"    "${STAGE}/etc/polkit-1/rules.d/49-vacti-activate.rules"
@@ -167,6 +173,7 @@ fi
 chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/vacti-swap-firstboot" \
            "${STAGE}/usr/local/sbin/vacti-activate" "${STAGE}/usr/local/sbin/vacti-netsetup" \
            "${STAGE}/usr/local/sbin/vacti-engine-install" \
+           "${STAGE}/usr/local/share/vacti-kiosk/vacti-kiosk" \
            "${STAGE}/opt/vacti-build/apply-branding.sh"
 
 # --- 4. the provisioning script that runs INSIDE the guest --------------------
@@ -380,6 +387,9 @@ fi
 # token, line 2 = url - the exact format vacti-firstboot already parses).
 if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
   echo "[prov] GUI flavor: installing the graphical stack (XFCE + LightDM + pre-login kiosk)"
+  # The premium pre-login kiosk is a GTK4 + libadwaita Python app (chosen over a
+  # webkit webview: ~45MB vs ~200MB, and far more robust in a bare-X VM). yad +
+  # zenity stay as the fail-soft fallback if GTK4/Adw ever fail to import.
   apt-get install -y --no-install-recommends \
     xfce4 xfce4-terminal xfce4-whiskermenu-plugin \
     lightdm lightdm-gtk-greeter \
@@ -388,13 +398,15 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
     network-manager network-manager-gnome \
     network-manager-openvpn-gnome network-manager-openconnect-gnome \
     wireguard-tools openconnect \
+    python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
     yad zenity \
     || {
       echo "[prov][warn] GUI stack bulk install hit a snag; retrying best-effort per-package"
       for p in xfce4 xfce4-terminal xfce4-whiskermenu-plugin lightdm lightdm-gtk-greeter \
                plymouth plymouth-themes xserver-xorg xinit openbox \
                network-manager network-manager-gnome network-manager-openvpn-gnome \
-               network-manager-openconnect-gnome wireguard-tools openconnect yad zenity; do
+               network-manager-openconnect-gnome wireguard-tools openconnect \
+               python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 yad zenity; do
         apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] GUI pkg \$p not installable here (runtime self-heal covers it)"
       done
     }
