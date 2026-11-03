@@ -180,6 +180,10 @@ RUN set -eu; \
       echo "[docker][error] aborting the build so a broken required tool is never shipped silently."; \
       exit 1; \
     fi; \
+    if command -v httpx-toolkit >/dev/null 2>&1 && ! command -v httpx >/dev/null 2>&1; then \
+      ln -sf "$(command -v httpx-toolkit)" /usr/local/bin/httpx; \
+      echo "[docker] linked /usr/local/bin/httpx -> $(command -v httpx-toolkit) (engine bare-httpx REQUIRED_TOOLS check; image ships ProjectDiscovery httpx as httpx-toolkit)"; \
+    fi; \
     rm -rf /var/lib/apt/lists/*
 
 # --- FINALIZE identity + housekeeping (no credential in this layer) ------------
