@@ -63,14 +63,14 @@ printf '%s\n' "$logs" > "${E2E_WORK:-/tmp}/s3-container.log" 2>/dev/null || true
 
 # c3: exchange POST for normalised code, 200
 norm="$(printf '%s' "$PAIRING_CODE" | tr -d ' -' | tr '[:lower:]' '[:upper:]')"
-assert_contains "$state" '"kind": "exchange"' "c3 exchange POST received"
+assert_contains "$state" '"kind":"exchange"' "c3 exchange POST received"
 assert_contains "$state" '"result": 200'     "c3b exchange returned 200 (code ${norm:0:2}..)"
 
 # c4: apt deb pulled with exchanged token
 assert_contains "$state" '"is_deb": true' "c4 engine .deb pulled over apt with exchanged token"
 
 # c5: enroll POST + runner started
-assert_contains "$state" '"kind": "enroll"'          "c5 enroll POST received"
+assert_contains "$state" '"kind":"enroll"'          "c5 enroll POST received"
 assert_contains "$logs"  'starting vacti-engine runner' "c5b entrypoint reached the engine runner"
 
 e2e_ok "scenario 3 PASS"

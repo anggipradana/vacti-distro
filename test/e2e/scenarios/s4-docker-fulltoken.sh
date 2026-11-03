@@ -66,7 +66,7 @@ cp_pass "c3 no exchange POST (full-token path unchanged)"
 assert_contains "$state" '"is_deb": true' "c4 engine .deb pulled over apt with supplied token"
 
 # c5: enroll + runner
-assert_contains "$state" '"kind": "enroll"'          "c5 enroll POST received"
+assert_contains "$state" '"kind":"enroll"'          "c5 enroll POST received"
 assert_contains "$logs"  'starting vacti-engine runner' "c5b entrypoint reached the engine runner"
 
 e2e_ok "scenario 4 PASS"
