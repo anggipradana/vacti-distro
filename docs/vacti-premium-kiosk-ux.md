@@ -74,7 +74,8 @@ is the most fragile in a headless/no-GPU VM where the kiosk MUST fail open.
 - **Live pattern pill** next to the field: when input matches
   `^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$` → shows **"Kode pendek"** (accent);
   otherwise **"Token"** (neutral). Purely advisory.
-- Caption: "Berlaku 3 jam, sekali pakai. / Valid 3 h, single-use."
+- Caption: "Kode pendek berlaku 10 menit; token lengkap 3 jam; keduanya sekali pakai. /
+  Short code valid 10 min; full token 3 h; both single-use."
 
 ### Tab 3 — Opsional (Optional)
 - `AdwEntryRow` "Proxy HTTP(S)".
@@ -90,8 +91,8 @@ is the most fragile in a headless/no-GPU VM where the kiosk MUST fail open.
      hyphen-stripped, uppercase>"}`, `Content-Type: application/json`.
    - 200 `{"token":"<full>"}` → continue with the full token.
    - 404 → "Kode tidak ditemukan. / Code not found."
-   - 410 → "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 3 jam). / Code
-     already used or expired."
+   - 410 → "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit). / Code
+     already used or expired (single-use, 10 min)."
    - 429 → "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi. / Too many
      attempts, wait and retry."
    - network/other → "Gangguan jaringan saat menukar kode. / Network error while
