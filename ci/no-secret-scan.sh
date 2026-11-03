@@ -92,25 +92,36 @@ mount_disk() {
   # never allowed to pass as "secretless"). A genuine mount failure is reported
   # with a distinct [infra] diagnostic so it is distinguishable in the logs from
   # an actual secret/credential being found - but both still block publish.
-  local img="$1" label="$2" m attempt rc
+  local img="$1" label="$2" m attempt rc=0 errlog lasterr=""
   command -v guestmount >/dev/null 2>&1 || { bad "guestmount not available to scan ${label}"; return; }
   local tries="${GUESTMOUNT_RETRIES:-3}"
+  errlog="$(mktemp "${TMPROOT}/guestmount.err.XXXX")"
   for (( attempt=1; attempt<=tries; attempt++ )); do
     m="$(mktemp -d "${TMPROOT}/mnt.XXXX")"
-    if LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestmount --ro -a "$img" -i "$m" 2>/dev/null; then
+    # Capture guestmount's REAL exit code and stderr. The previous form put
+    # `rc=$?` on the line after a branchless `if ... fi`, which reads the exit
+    # status of the *if statement* (0 when no branch runs under POSIX), not
+    # guestmount's - so every genuine failure was mislabelled "rc=0" and the
+    # libguestfs error (e.g. passt network boot failure when the runner
+    # workarounds are missing) was swallowed by 2>/dev/null. Grab both here.
+    if LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestmount --ro -a "$img" -i "$m" 2>"$errlog"; then
       scan_rootfs "$m" "$label"
       guestunmount "$m" 2>/dev/null || fusermount -u "$m" 2>/dev/null || true
       return
+    else
+      rc=$?
     fi
-    rc=$?
+    lasterr="$(tail -n 20 "$errlog" 2>/dev/null)"
     rmdir "$m" 2>/dev/null || true
+    echo "[no-secret-scan][infra] guestmount attempt ${attempt}/${tries} failed (rc=${rc}) for ${label}" >&2
+    [[ -n "$lasterr" ]] && echo "$lasterr" | sed 's/^/    [guestmount] /' >&2
     if [[ "$attempt" -lt "$tries" ]]; then
-      echo "[no-secret-scan][infra] guestmount attempt ${attempt}/${tries} failed (rc=${rc}) for ${label}; retrying..." >&2
+      echo "[no-secret-scan][infra] retrying..." >&2
       sleep $(( attempt * 5 ))
     fi
   done
   # Fail-closed: exhausted retries -> treat as a blocking failure (never a pass).
-  bad "[infra] could not guestmount ${label} (${img}) after ${tries} attempts - artifact is UNSCANNED, refusing to pass (fail-closed)"
+  bad "[infra] could not guestmount ${label} (${img}) after ${tries} attempts (last rc=${rc}) - artifact is UNSCANNED, refusing to pass (fail-closed)"
 }
 
 scan_artifact() {

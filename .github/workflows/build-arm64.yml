@@ -268,6 +268,14 @@ jobs:
     # golden/fanout jobs already scan natively on ubuntu-24.04-arm, so match that
     # here to keep the fail-closed gate working.
     runs-on: ubuntu-24.04-arm
+    # The final no-secret scan guestmounts each published OVA, so this job needs the
+    # SAME libguestfs runner environment as golden/fanout: the direct backend plus
+    # the readable-kernel / KVM / passt-AppArmor / userns workarounds the composite
+    # action applies. A bare `apt-get install libguestfs-tools` is NOT enough -
+    # without the workarounds the appliance's passt network fails to boot and
+    # guestmount fails, tripping the fail-closed gate as UNSCANNED (SHA f4cef2d).
+    env:
+      LIBGUESTFS_BACKEND: direct
     steps:
       - name: Free disk space (reclaim >30GB on the runner)
         run: |
@@ -283,6 +291,16 @@ jobs:
           sudo apt-get clean || true
           echo "[disk] after:"; df -h /
       - uses: actions/checkout@v4
+      - name: Install libguestfs toolchain (+ runner workarounds)
+        # WHY: the "Final no-secret scan gate" step guestmounts every published
+        # artifact. Without the composite action's readable-kernel / KVM / passt
+        # workarounds (and LIBGUESTFS_BACKEND=direct above) guestmount fails on the
+        # GH-hosted arm64 runner, and the fail-closed scan refuses to publish the
+        # images as UNSCANNED. The golden + fanout jobs (same ubuntu-24.04-arm
+        # runner) scan natively with exactly this setup; this mirrors them.
+        uses: ./.github/actions/libguestfs-runner
+        with:
+          extra-packages: fuse3
       - name: Collect ARM64 artifacts
         uses: actions/download-artifact@v4
         with:
@@ -301,8 +319,9 @@ jobs:
             -exec mv -n {} release/ \;
           ( cd release && sha256sum ./*.ova 2>/dev/null > MANIFEST-arm64.sha256 || true )
       - name: Final no-secret scan gate (every published artifact)  # MANDATORY
+        # The libguestfs toolchain + runner workarounds are installed above; this
+        # step only runs the fail-closed scan over the assembled release/ set.
         run: |
-          sudo apt-get update && sudo apt-get install -y libguestfs-tools qemu-utils fuse3
           shopt -s nullglob
           for a in release/*.ova; do
             ci/no-secret-scan.sh "$a"
