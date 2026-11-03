@@ -40,6 +40,14 @@ ARG VACTI_APT_URL=""
 ARG VACTI_ENGINE_PKG="vacti-engine"
 ARG VACTI_ENGINE_REF=""
 ARG VACTI_FULL_ARSENAL="0"
+# VACTI_CTF_ARSENAL=1 additionally bakes the apt-installable CTF tool set
+# (.apt.ctf: forensics/steg/pwn/crack - foremost, scalpel, sleuthkit, steghide,
+# john, hashcat, radare2, nasm, pwntools, ropgadget, ...). Default 0 keeps the
+# published image lean; the CI docker job feeds the workflow's ctf_arsenal input
+# through so a single dispatch can bake the full arsenal into the image too.
+# (The non-apt CTF half - gems/pipx/GEF - is an OVA-only installer and is not
+# baked into the container form.)
+ARG VACTI_CTF_ARSENAL="0"
 ARG VACTI_NO_KALI_REPO="0"
 ARG NODE_MAJOR="22"
 
@@ -123,8 +131,8 @@ RUN set -eu; \
 # hadolint ignore=DL3008,DL3015,SC2086
 RUN set -eu; \
     apt-get update; \
-    echo "[docker] deriving the lean arsenal from the vendored engine manifest"; \
-    VACTI_FULL_ARSENAL="${VACTI_FULL_ARSENAL}" VACTI_CTF_ARSENAL="0" \
+    echo "[docker] deriving the arsenal from the vendored engine manifest (full=${VACTI_FULL_ARSENAL} ctf=${VACTI_CTF_ARSENAL})"; \
+    VACTI_FULL_ARSENAL="${VACTI_FULL_ARSENAL}" VACTI_CTF_ARSENAL="${VACTI_CTF_ARSENAL}" \
       /opt/vacti-build/packages/gen-live-build-list.sh /opt/vacti-build/arsenal.list \
       || echo "[docker][warn] arsenal list generation reported an issue"; \
     PKGS="$(grep -vE '^[[:space:]]*(#|$)' /opt/vacti-build/arsenal.list 2>/dev/null || true)"; \
