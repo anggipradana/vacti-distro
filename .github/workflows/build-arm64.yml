@@ -321,7 +321,13 @@ jobs:
     # stages produced artifacts; it never waits on a green smoke. iso is skipped on
     # the vbox-ova-only path, so accept skipped-iso as well as success.
     if: ${{ always() && needs.fanout.result == 'success' && (needs.iso.result == 'success' || needs.iso.result == 'skipped') }}
-    runs-on: ubuntu-latest
+    # Native arm64 runner: the "Final no-secret scan gate" step runs
+    # ci/no-secret-scan.sh, which uses libguestfs guestmount. guestmount cannot
+    # mount an aarch64 guest on an x86_64 host (no cross-arch KVM; TCG not wired),
+    # so on ubuntu-latest the scan failed 3x -> fail-closed -> publish died. The
+    # golden/fanout/iso jobs already scan natively on ubuntu-24.04-arm, so match
+    # that here to keep the fail-closed gate working.
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Free disk space (reclaim >30GB on the runner)
         run: |
