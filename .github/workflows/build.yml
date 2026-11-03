@@ -1,10 +1,15 @@
 # vacti-distro image build matrix.
 #
 # This is where the HEAVY build runs: GitHub Actions (OFF-PROD), never on the
-# vacti control plane. It builds the golden disk once, fans it out to every
-# VM/cloud form, builds the ISO, runs the MANDATORY no-secret scan on every
-# emitted artifact, smoke-boots each, and publishes them as PRIVATE GitHub
-# Release assets on this (private) repo.
+# vacti control plane. It builds the golden disk once (GUI flavor), fans it out to
+# the two GUI OVA forms (VMware OVA + VirtualBox OVA), runs the MANDATORY no-secret
+# scan on every emitted artifact, smoke-boots each, and publishes them as PRIVATE
+# GitHub Release assets on this (private) repo. The universal multi-arch Docker
+# image is built in parallel (docker-publish-ghcr).
+#
+# Operator scope (TG 7503/7505): VMware + VirtualBox OVA, GUI only, amd64 (arm64
+# is the companion build-arm64.yml) + multi-arch Docker. The headless, cloud and
+# ISO forms were removed as out-of-scope ("hapus semua yg ga diperlukan").
 #
 # Triggered manually, or by a repository_dispatch from the engine release-deb
 # pipeline after a new vacti-engine .deb is published.
@@ -29,15 +34,18 @@ on:
         description: "Which image forms to build"
         required: false
         type: choice
-        default: "golden+cloud"
+        default: "vbox-vmware-gui"
         options:
-          - "golden+cloud"   # cheap first run: lint -> golden(headless) -> cloud -> smoke -> publish
-          - "all"            # full matrix: golden(headless,gui) x cloud/vmware-ova/vbox-ova + iso(headless,gui)
-          - "vbox-ova"       # VirtualBox OVA only: golden(headless,gui) -> vbox-ova fanout -> smoke -> publish (+ docker); iso skipped
+          # Operator scope (TG 7503/7505): VMware OVA + VirtualBox OVA, GUI only,
+          # both arches (arm64 via build-arm64.yml) + multi-arch Docker. The dead
+          # 'all' (never cleared the ~50 GiB release cap) and 'golden+cloud'
+          # (cloud removed) options were pruned, along with the headless/cloud/iso
+          # forms. This is now the only build shape.
+          - "vbox-vmware-gui"   # golden(gui) -> vmware-ova(gui) + vbox-ova(gui) -> smoke -> publish (+ multi-arch Docker)
   repository_dispatch:
     types: [engine-deb-published]
   # Tag push: builds ONLY the universal Docker image (the docker-publish-ghcr job
-  # gates itself on this event). The heavy VM/ISO matrix skips on a bare tag push
+  # gates itself on this event). The heavy VM/OVA matrix skips on a bare tag push
   # via the event guard on the lint job, which the rest of the matrix depends on.
   push:
     tags:
@@ -67,12 +75,10 @@ env:
   # guard checks. Empty = floating latest (historical behavior). The engine-deb-
   # published dispatch feeds the just-published version in via client_payload.release.
   VACTI_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF || github.event.client_payload.release || '' }}
-  # Form scoping. workflow_dispatch defaults to the cheap golden+cloud path; a
-  # repository_dispatch (engine-deb-published) has no input, so it falls back to
-  # 'all' - the full matrix, exactly as before. NOTE: the `env` context is not
-  # available in a job's `strategy.matrix`, so the fan-out matrix and the iso
-  # job gate evaluate `github.event.inputs.forms` directly (same default).
-  VACTI_FORMS: ${{ github.event.inputs.forms || 'all' }}
+  # Form scoping. There is now a single build shape (vbox-vmware-gui): golden(gui)
+  # -> vmware-ova(gui) + vbox-ova(gui). Both workflow_dispatch and the input-less
+  # repository_dispatch (engine-deb-published) resolve to it.
+  VACTI_FORMS: ${{ github.event.inputs.forms || 'vbox-vmware-gui' }}
   VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
   # Build-time private-repo credential. A build-time secret, NEVER baked into an
   # image (the build strips it before finalize; the no-secret scan re-verifies).
@@ -112,11 +118,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Dual-flavor VM/cloud build (matches how the ISO already splits):
-        # forms=all OR forms=vbox-ova -> both flavors; the cheap golden+cloud
-        # first run stays headless-only. env is unavailable in matrix, so read
-        # the input directly.
-        flavor: ${{ fromJSON(((github.event.inputs.forms || 'all') == 'all' || github.event.inputs.forms == 'vbox-ova') && '["headless","gui"]' || '["headless"]') }}
+        # Operator scope (TG 7503): GUI only. The golden disk is built once in the
+        # gui flavor and is the shared conversion source for both OVA fan-out forms.
+        flavor: [gui]
     steps:
       # Hosted Ubuntu runners ship ~14GB free; the golden qcow2 (~2GB raw, grown
       # to give the appliance room) plus the downloaded Debian base image exhaust
@@ -181,12 +185,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # forms=all -> cloud + both OVA forms; forms=vbox-ova -> vbox-ova only;
-        # forms=golden+cloud -> cloud only. env is unavailable here, so read the input.
-        form: ${{ fromJSON(github.event.inputs.forms == 'vbox-ova' && '["vbox-ova"]' || (github.event.inputs.forms || 'all') == 'all' && '["cloud","vmware-ova","vbox-ova"]' || '["cloud"]') }}
-        # Cross-product with the flavor: all OR vbox-ova -> both flavors;
-        # golden+cloud -> headless only (so each cell converts the matching golden-qcow2-<flavor>).
-        flavor: ${{ fromJSON(((github.event.inputs.forms || 'all') == 'all' || github.event.inputs.forms == 'vbox-ova') && '["headless","gui"]' || '["headless"]') }}
+        # Operator scope (TG 7503/7505): VMware OVA + VirtualBox OVA, GUI only. No
+        # cloud, no headless, no iso. Each (form,gui) cell converts the shared
+        # golden-qcow2-gui disk.
+        form: [vmware-ova, vbox-ova]
+        flavor: [gui]
     steps:
       # Same squeeze as golden: the fetched golden qcow2 (~2GB) plus the
       # converted form (raw.gz / streamOptimized VMDK / .ova) blow past the
@@ -255,117 +258,13 @@ jobs:
         with:
           name: form-${{ matrix.form }}-${{ matrix.flavor }}
           path: |
-            out/*.qcow2
-            out/*.raw.gz
             out/*.ova
             out/*.sha256
           retention-days: 2
 
-  # --- the installable ISO: live-build in a privileged debian:trixie container -
-  iso:
-    needs: lint
-    # ISO (live-build, both SKUs) only on the full-matrix path; skipped for the
-    # cheap golden+cloud first run.
-    if: ${{ (github.event.inputs.forms || 'all') == 'all' }}
-    runs-on: ubuntu-latest
-    container:
-      image: debian:trixie
-      options: --privileged   # loop devices + mount for live-build/squashfs
-      # This container's overlay, the workspace and /tmp all live on the HOST's
-      # root disk (/dev/root, ~14GB free; on these runners /mnt is that same
-      # disk, not a spare volume). Bind the host toolchain trees in so the first
-      # step can reclaim that disk from inside the container.
-      volumes:
-        - /usr:/host/usr
-        - /opt:/host/opt
-    strategy:
-      fail-fast: false
-      matrix:
-        sku: [headless, gui]
-    steps:
-      # Same squeeze as golden/fanout, done from INSIDE the container: live-build
-      # copies its ~8-9GB chroot (installer + binary stages) and adds the squashfs,
-      # .deb cache and ISO, which exhausted ~14GB free. The host /usr and /opt
-      # are bound in above, so deleting the same toolchains golden drops frees the
-      # very disk this container writes to (14GB -> ~44GB+). live-build itself
-      # keeps REAL work dirs in place: it moves/copies chroot/ and binary/ into the
-      # chroot and runs mksquashfs/xorriso there, so they must not be symlinks.
-      # Runs FIRST, before any checkout or build.
-      - name: Free disk space (reclaim >30GB of the host disk from the container)
-        run: |
-          echo "[disk] before:"; df -h /
-          rm -rf \
-            /host/usr/local/lib/android \
-            /host/usr/share/dotnet \
-            /host/opt/ghc /host/usr/local/.ghcup \
-            /host/opt/hostedtoolcache \
-            /host/usr/local/share/boost \
-            /host/usr/share/swift \
-            /host/usr/lib/jvm \
-            /host/usr/local/share/powershell \
-            /host/usr/lib/google-cloud-sdk || true
-          echo "[disk] after:"; df -h /
-      - uses: actions/checkout@v4
-      - name: Install live-build toolchain
-        run: |
-          apt-get update
-          # jq: gen-live-build-list.sh parses the engine arsenal manifest with it
-          # (the debian:trixie container has neither jq nor python3 by default).
-          # python3: the auto-revendor resolver (ci/arsenal-sync-check.sh) parses the
-          # apt Packages index + manifests with it. dpkg-deb + tar + gzip are already
-          # in the base image (dpkg is Essential).
-          apt-get install -y live-build xorriso squashfs-tools ca-certificates curl gnupg make jq python3
-      # AUTO-REVENDOR (auto-triggered rebuilds only). The ISO derives its baked
-      # arsenal package list HOST-SIDE from the vendored snapshot (build-iso.sh ->
-      # gen-live-build-list.sh; no engine .deb is installed in this container to read
-      # the manifest from, unlike the golden path). So on an engine-deb-published
-      # rebuild the snapshot must be refreshed to the pinned ref BEFORE `make iso`,
-      # or the ISO bakes a stale list. Same resolver/guard as the lint job; a manual
-      # build keeps the committed snapshot.
-      - name: Auto-revendor arsenal manifest (engine-deb-published only)
-        if: ${{ github.event_name == 'repository_dispatch' }}
-        shell: bash
-        run: ci/revendor-arsenal.sh
-      - name: Build ISO (${{ matrix.sku }}, off-prod)
-        run: VACTI_ISO_SKU=${{ matrix.sku }} make $([ "${{ matrix.sku }}" = gui ] && echo iso-gui || echo iso)
-      - name: Reclaim live-build work tree before scan
-        # Only the finished *.hybrid.iso is needed downstream. Drop the chroot,
-        # binary tree and .deb cache (many GB) so the scan, which extracts the ISO
-        # and unsquashes its rootfs under /tmp, has headroom. --one-file-system
-        # never descends into anything live-build might have left mounted.
-        run: |
-          echo "[disk] before cleanup:"; df -h /
-          cd distro/live-build-config
-          rm -rf --one-file-system chroot binary cache .build || true
-          echo "[disk] after cleanup:"; df -h /
-      - name: No-secret scan (iso)  # MANDATORY
-        # bash, not the container default sh (dash): this block uses shopt, a bash
-        # builtin. The host jobs default to bash; this container job does not.
-        shell: bash
-        run: |
-          apt-get install -y libguestfs-tools qemu-utils bsdextrautils
-          shopt -s nullglob
-          for a in distro/live-build-config/*.hybrid.iso; do ci/no-secret-scan.sh "$a"; done
-      - name: Stage ISO to out/
-        run: |
-          mkdir -p out
-          cp distro/live-build-config/*.hybrid.iso out/vacti-engine-${VACTI_RELEASE}-${{ matrix.sku }}.iso || true
-          ( cd out && sha256sum vacti-engine-${VACTI_RELEASE}-${{ matrix.sku }}.iso > vacti-engine-${VACTI_RELEASE}-${{ matrix.sku }}.iso.sha256 ) || true
-      - name: Upload ISO artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: form-iso-${{ matrix.sku }}
-          path: |
-            out/*.iso
-            out/*.iso.sha256
-          retention-days: 2
-
   # --- smoke boot: prove each image enrolls + claims a job vs staging ----------
   smoke:
-    needs: [fanout, iso]
-    # Run once the forms actually built are green. On the golden+cloud path the
-    # iso job is skipped, so accept skipped-iso; fanout must have succeeded.
-    if: ${{ always() && needs.fanout.result == 'success' && (needs.iso.result == 'success' || needs.iso.result == 'skipped') }}
+    needs: [fanout]
     runs-on: ubuntu-latest
     steps:
       # Same squeeze as golden/fanout: on the full matrix smoke fetches every
@@ -394,22 +293,16 @@ jobs:
           path: out
           pattern: "{form-*,golden-qcow2-*}"
       - name: Smoke-boot every built image (qemu TCG, real boot + health probe)
-        # Boots each disk image (cloud qcow2 + both OVAs) in qemu with a throwaway
+        # Boots each OVA (vmware-ova + vbox-ova, gui) in qemu with a throwaway
         # NoCloud health-probe seed and asserts a healthy multi-user boot with the
-        # baked vacti units present + network up. ISOs (full-matrix only) are
-        # boot-asserted (BIOS + UEFI). TCG (-cpu qemu64) so no /dev/kvm needed.
-        # If STAGING_CP_URL + STAGING_ENROLL_TOKEN are set, the seed additionally
-        # drives a real enroll roundtrip; otherwise the enroll assertion is skipped
-        # (we never require a staging CP to exist for the gate to run).
+        # baked vacti units present + network up. TCG (-cpu qemu64) so no /dev/kvm
+        # needed. If STAGING_CP_URL + STAGING_ENROLL_TOKEN are set, the seed
+        # additionally drives a real enroll roundtrip; otherwise the enroll
+        # assertion is skipped (we never require a staging CP to exist for the gate).
         env:
           STAGING_CP_URL: ${{ vars.STAGING_CP_URL }}
           STAGING_ENROLL_TOKEN: ${{ secrets.STAGING_ENROLL_TOKEN }}
           BOOT_TIMEOUT: "900"
-          # ISO legs reach a serial login/boot marker early now that the live
-          # cmdline carries console=ttyS0; bound each leg's watch so a genuine
-          # hang still fails in reasonable time under TCG (the loop breaks the
-          # instant a marker appears, so a healthy ISO exits in minutes).
-          ISO_WATCH: "600"
         run: ci/smoke-boot.sh out
 
   # --- publish as PRIVATE GitHub Release assets on this private repo -----------
@@ -423,13 +316,11 @@ jobs:
     env:
       LIBGUESTFS_BACKEND: direct
     steps:
-      # Same squeeze as golden/fanout/iso/smoke: publish downloads EVERY built
-      # form (~50 GiB / 10 artifacts on the full matrix) onto the runner's ~14GB
-      # free at "Collect all artifacts"/"Flatten", so without this reclaim it
-      # ENOSPC's before it can even assemble the release. The Flatten step moves
-      # (not copies) images so peak stays ~50 GiB, not ~100 GiB.
-      # (It does NOT fix the >2GiB-asset host limit - that is the separate,
-      # operator-gated R2 wiring - but it lets the collect/flatten step run.)
+      # Same squeeze as golden/fanout/smoke: publish downloads the two built OVAs
+      # (vmware-ova + vbox-ova, gui) onto the runner's ~14GB free at "Collect all
+      # artifacts"/"Flatten". The Flatten step moves (not copies) images so peak
+      # stays ~1x. (It does NOT fix the >2GiB-asset host limit - that is the
+      # separate, operator-gated R2 wiring - but it lets the collect/flatten run.)
       - name: Free disk space (reclaim >30GB on the runner)
         run: |
           echo "[disk] before:"; df -h /
@@ -462,40 +353,36 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          # Scope to the real image artifacts (mirrors the smoke job, which
-          # downloads this same ~50 GiB on the full matrix successfully). Without
-          # the pattern the step also pulls the stray ~372KB .dockerbuild artifact
-          # and, on the full matrix, the concurrent all-artifact fetch flakes with
-          # "Artifact download failed after 5 retries".
-          pattern: "{form-*,golden-qcow2-*}"
+          # Scope to the two OVA artifacts. The golden qcow2 is a build-only source
+          # (never a deliverable), so it is NOT fetched here. The pattern also keeps
+          # the stray ~372KB .dockerbuild artifact out of the collect step.
+          pattern: "form-*"
       - name: Flatten + reproducibility manifest
         run: |
           mkdir -p release
           # MOVE (not copy) each image dist/ -> release/: dist/ and release/ are on
           # the same filesystem so this is a rename (near-zero extra space), where
-          # 'cp' would hold BOTH copies at once (~2x) and ENOSPC on the ~50 GiB
-          # full matrix. Nothing reads dist/ after this step (scan + publish read
-          # release/ only). -n keeps the no-clobber semantics of the old 'cp -n'.
-          find dist -type f \( -name '*.qcow2' -o -name '*.raw.gz' -o -name '*.ova' -o -name '*.iso' -o -name '*.sha256' \) \
+          # 'cp' would hold BOTH copies at once (~2x). Nothing reads dist/ after this
+          # step (scan + publish read release/ only). -n keeps no-clobber semantics.
+          find dist -type f \( -name '*.ova' -o -name '*.sha256' \) \
             -exec mv -n {} release/ \;
-          ( cd release && sha256sum ./*.qcow2 ./*.raw.gz ./*.ova ./*.iso 2>/dev/null > MANIFEST.sha256 || true )
+          ( cd release && sha256sum ./*.ova 2>/dev/null > MANIFEST.sha256 || true )
       - name: Final no-secret scan gate (every published artifact)  # MANDATORY
         # The libguestfs toolchain + runner workarounds are installed above; this
         # step only runs the fail-closed scan over the assembled release/ set.
         run: |
           shopt -s nullglob
-          for a in release/*.qcow2 release/*.raw.gz release/*.ova release/*.iso; do
+          for a in release/*.ova; do
             ci/no-secret-scan.sh "$a"
           done
       - name: Enforce the 2GiB Release asset cap (log + continue; does not solve R2)
         # GitHub Releases reject a single asset > 2 GiB and softprops/action-gh-
-        # release aborts the WHOLE release on the first over-cap upload. On the full
-        # matrix most of the ~50 GiB of images individually exceed 2 GiB, so without
-        # this the publish hard-fails at upload even after download+flatten succeed.
-        # This moves any over-cap file out of release/ (into release/over-cap/) with
-        # a warning so every in-limit asset still publishes; over-cap files are
-        # fetched via 'gh run download' + the operator-gated R2 mirror and remain
-        # listed in MANIFEST.sha256. Same graceful behavior as the arm64 publish.
+        # release aborts the WHOLE release on the first over-cap upload. A full-
+        # arsenal OVA can exceed 2 GiB, so this moves any over-cap file out of
+        # release/ (into release/over-cap/) with a warning so every in-limit asset
+        # still publishes; over-cap files are fetched via 'gh run download' + the
+        # operator-gated R2 mirror and remain listed in MANIFEST.sha256. Same
+        # graceful behavior as the arm64 publish.
         run: ci/cap-release-assets.sh release 2147483648
       - name: Publish PRIVATE GitHub Release (assets stay private to this repo)
         uses: softprops/action-gh-release@v2
@@ -509,10 +396,7 @@ jobs:
           draft: false
           prerelease: true
           files: |
-            release/*.qcow2
-            release/*.raw.gz
             release/*.ova
-            release/*.iso
             release/MANIFEST.sha256
 
   # --- universal multi-arch Docker image -> GHCR (TG 7182) --------------------
