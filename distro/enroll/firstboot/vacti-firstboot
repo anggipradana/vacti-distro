@@ -89,7 +89,20 @@ if command -v vacti-engine-write-env >/dev/null 2>&1; then
   vacti-engine-write-env --url "$BASE" --from /run/vacti-enroll.out
 else
   # Minimal inline writer: the enroll response is JSON with the three scoped
-  # tokens. Use jq if present, else node (both ship in the arsenal/.deb).
+  # tokens plus the OPTIONAL edge shared secret. Use jq if present, else node
+  # (both ship in the arsenal/.deb).
+  #
+  # VACTI_ENGINE_SHARED_SECRET: Caddy at the public edge Basic-traps (401 realm
+  # "restricted") every engine writeback - heartbeat (/api/pentest/runners/heartbeat),
+  # jobs/next, knowledge/catalog, engine-config - unless the request carries
+  # X-Engine-Auth == this secret. Only the Bearer-exempt /enroll* subtree is reachable
+  # without it, so WITHOUT this line a container ENROLLS fine but its first heartbeat is
+  # 401'd when it reaches the control plane over the public edge (on-tailnet engines hit
+  # the runner API internally and never cross the edge Basic gate, which is why the live
+  # fleet was unaffected). The terminal installer (engine bootstrap-apt.sh) already
+  # provisions this from the SAME enroll field; this brings the appliance / Docker
+  # first-boot path to parity. Emit ONLY when the CP returned a non-empty value, so an
+  # unset CP env var yields a byte-identical engine.env to the pre-feature behaviour.
   {
     echo "VACTI_URL=${BASE}"
     if command -v jq >/dev/null 2>&1; then
@@ -98,8 +111,21 @@ else
         "VACTI_VERIFIER_TOKEN=\(.verifier_token // .verifier // "")",
         "VACTI_GATEKEEPER_TOKEN=\(.gatekeeper_token // .gatekeeper // "")"
       ' /run/vacti-enroll.out
+      secret="$(jq -r '.engineSharedSecret // .engine_shared_secret // empty' /run/vacti-enroll.out 2>/dev/null || true)"
+      [[ -n "$secret" ]] && printf 'VACTI_ENGINE_SHARED_SECRET=%s\n' "$secret"
+      unset secret
     else
-      node -e 'const j=require("/run/vacti-enroll.out");' 2>/dev/null || true
+      # Robust node fallback (the previous one-liner required an unresolvable path and
+      # wrote nothing). Read + parse the response and emit only non-empty values.
+      node -e '
+        const fs = require("fs");
+        const j = JSON.parse(fs.readFileSync("/run/vacti-enroll.out", "utf8"));
+        const w = (k, v) => { if (v) process.stdout.write(k + "=" + v + "\n"); };
+        w("VACTI_PRODUCER_TOKEN", j.producer_token || j.producer);
+        w("VACTI_VERIFIER_TOKEN", j.verifier_token || j.verifier);
+        w("VACTI_GATEKEEPER_TOKEN", j.gatekeeper_token || j.gatekeeper);
+        w("VACTI_ENGINE_SHARED_SECRET", j.engineSharedSecret || j.engine_shared_secret);
+      ' 2>/dev/null || true
     fi
   } > "$CFG_ENV"
 fi
