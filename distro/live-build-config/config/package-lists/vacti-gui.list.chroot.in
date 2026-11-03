@@ -25,7 +25,13 @@ network-manager-openvpn-gnome
 network-manager-openconnect-gnome
 wireguard-tools
 openconnect
-# Lightweight dialog toolkit for the kiosk UI (yad preferred; zenity fallback).
+# Premium pre-login kiosk: GTK4 + libadwaita Python app (vacti-kiosk). Chosen over
+# a webkit webview (~45MB vs ~200MB, far more robust in a bare-X VM). yad + zenity
+# remain the fail-soft fallback if GTK4/libadwaita ever fail to import.
+python3-gi
+gir1.2-gtk-4.0
+gir1.2-adw-1
+libadwaita-1-0
 yad
 zenity
 # NOTE: polkit (polkitd) is pulled transitively by network-manager + lightdm, so
