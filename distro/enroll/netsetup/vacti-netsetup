@@ -19,6 +19,21 @@ NETWORKD_DIR="/etc/systemd/network"
 log() { echo "[vacti-netsetup] $*"; }
 die() { echo "[vacti-netsetup][ERROR] $*" >&2; exit 1; }
 
+# Shared short-code pairing exchange (lets the enrollment prompt accept an 8-char
+# pairing code in addition to a full token, like the GUI kiosk). Sourced from the
+# runtime install path, with a source-tree fallback for dev checkouts. Fail-soft:
+# if the helper is absent, only a FULL token works (a short code is still typed
+# into the same prompt but cannot be exchanged) - enrollment itself is unaffected.
+for _ph in \
+  /usr/local/lib/vacti/pairing-exchange.sh \
+  "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../common/pairing-exchange.sh"; do
+  if [[ -r "$_ph" ]]; then
+    # shellcheck source=/dev/null
+    . "$_ph"
+    break
+  fi
+done
+
 [[ "$(id -u)" == "0" ]] || die "must run as root (try: sudo vacti-netsetup)"
 
 if [[ -f "$CFG_ENV" ]]; then
@@ -59,6 +74,14 @@ confirm() { # prompt -> 0 yes / 1 no
     local v
     read -r -p "$1 [y/N]: " v || true
     [[ "$v" =~ ^(y|Y|yes|YES)$ ]]
+  fi
+}
+
+msg() { # text -> informational box (whiptail if present, else stderr)
+  if [[ "$HAVE_WHIPTAIL" == "1" ]]; then
+    whiptail --msgbox "$1" 12 70 3>&1 1>&2 2>&3 || true
+  else
+    echo "$1" >&2
   fi
 }
 
@@ -117,8 +140,34 @@ fi
 
 # --- 4. enroll via the EXISTING first-boot chain ----------------------------
 url="$(ask "Control-plane URL (e.g. https://cp.example)" "")"
-token="$(ask_secret "Enrollment token (license; single-use, valid 3h)")"
-[[ -n "$url" && -n "$token" ]] || die "both the control-plane URL and the enrollment token are required"
+[[ -n "$url" ]] || die "the control-plane URL is required"
+
+# The enrollment prompt accepts EITHER an 8-char pairing code (K7X9-R8W2) OR a
+# full enrollment token. A pairing code is exchanged at the CP for the full token
+# (the same convenience the GUI kiosk offers); a full token passes through
+# unchanged. Loop so a mistyped/expired code can be retried without re-doing the
+# network steps. The finalized full token is what lands in enroll.token below,
+# so vacti-firstboot is unchanged.
+token=""
+while :; do
+  entered="$(ask_secret "Pairing code (e.g. K7X9-R8W2) OR full enrollment token (single-use, valid 3h)")"
+  [[ -n "$entered" ]] || die "a pairing code or enrollment token is required"
+  if declare -F vacti_is_short_code >/dev/null 2>&1 && vacti_is_short_code "$entered"; then
+    log "pairing code detected - exchanging for the full enrollment token (code not logged)"
+    real_token="$(vacti_pairing_exchange "$url" "$entered")"; xrc=$?
+    if [[ $xrc -ne 0 ]]; then
+      msg "$(vacti_pairing_error_id "$xrc")
+
+$(vacti_pairing_error_en "$xrc")"
+      continue
+    fi
+    token="$real_token"
+  else
+    token="$entered"
+  fi
+  break
+done
+[[ -n "$token" ]] || die "no enrollment token resolved"
 
 install -d -m0755 "$CFG_DIR"
 umask 077
