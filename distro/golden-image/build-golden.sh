@@ -123,6 +123,12 @@ cp -a "${ENROLL_DIR}/activate/vacti-activate-polkit.rules"    "${STAGE}/etc/polk
 # headless branch of provision.sh enables it, the GUI branch leaves it disabled.
 cp -a "${ENROLL_DIR}/activate/vacti-headless-activate.service" "${STAGE}/etc/systemd/system/vacti-headless-activate.service"
 cp -a "${ENROLL_DIR}/netsetup/vacti-netsetup"                 "${STAGE}/usr/local/sbin/vacti-netsetup"
+# Shared short-code pairing exchange helper, SOURCED by vacti-netsetup (and the
+# Docker entrypoint in the container image) so the non-GUI enrollment paths accept
+# an 8-char pairing code in addition to a full token. Library file (0644, sourced
+# not executed); kept 1:1 with the GUI kiosk's exchange contract.
+install -d "${STAGE}/usr/local/lib/vacti"
+cp -a "${ENROLL_DIR}/common/pairing-exchange.sh"              "${STAGE}/usr/local/lib/vacti/pairing-exchange.sh"
 # anti-OOM drop-ins (sysctl / zram / THP / earlyoom) baked into the golden image
 cp -a "${OOM_DIR}/sysctl-90-vacti.conf"    "${STAGE}/etc/sysctl.d/90-vacti.conf"
 cp -a "${OOM_DIR}/zram-generator.conf"     "${STAGE}/etc/systemd/zram-generator.conf"
