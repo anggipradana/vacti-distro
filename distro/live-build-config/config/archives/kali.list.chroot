@@ -8,4 +8,4 @@
 # apt-get update on this source, so no `signed-by=` path is used (an includes.chroot
 # keyring would land too late - after the archive apt-update). It is public info,
 # not a credential, and the kali-pin.pref (prio 100) keeps it package-source-only.
-deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware
+deb http://kali.download/kali kali-rolling main contrib non-free non-free-firmware
