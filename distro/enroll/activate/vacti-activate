@@ -13,12 +13,15 @@
 #            chmod 0600, start the existing first-boot enroll unit, wait for
 #            engine.env.
 #
-# UX: instead of a chain of plain popups + the full nm-connection-editor (which
-# trapped operators with no clear "done"), the GUI path is ONE branded yad
-# notebook window: vacti logo on top + three tabs (Jaringan | Enrollment |
-# Opsional) + a single "Aktivasi" button. The advanced NetworkManager editor is
-# still one click away for Wi-Fi / static IP / 802.1x, but the common DHCP case
-# never needs it.
+# UX: the GUI path is a PREMIUM branded kiosk - a GTK4 + libadwaita app
+# (/usr/local/share/vacti-kiosk/vacti-kiosk) with three tabs (Jaringan |
+# Enrollment | Opsional), a single prominent "Aktivasi" button, and a SHORT-CODE
+# input: operators can type an 8-char code (no clipboard in a fresh VM) which the
+# backend exchanges for the full token. The GTK app is PRESENTATION ONLY - it
+# delegates every privileged step back to this script's __subcommands, so the
+# enroll chain stays the single source of truth. If GTK4/libadwaita are not
+# importable, run_wizard falls back to a yad notebook, then zenity; the advanced
+# NetworkManager editor is always one click away for Wi-Fi / static IP / 802.1x.
 #
 # On success (engine.env appears) it starts LightDM and exits 0 -> the gate flips
 # and the normal desktop login is now allowed. The token VALUE is never logged;
@@ -50,6 +53,11 @@ for _l in /usr/share/vacti/branding/logo/png/vacti-logomark-128.png \
           /usr/share/pixmaps/vacti.svg; do
   [[ -f "$_l" ]] && { LOGO="$_l"; break; }
 done
+
+# Premium GTK4 + libadwaita kiosk (preferred GUI). Falls back to the yad notebook
+# then zenity if GTK4/Adw are not importable - see run_wizard.
+KIOSK_APP="/usr/local/share/vacti-kiosk/vacti-kiosk"
+PYTHON_BIN="$(command -v python3 || true)"
 
 log() { echo "[vacti-activate] $*"; }
 
@@ -83,8 +91,9 @@ net_status_line() {
 # Bring up the first wired/ethernet connection (the NAT-via-DHCP common case).
 # No hardcoded connection name: pick the first 802-3-ethernet profile, else
 # connect the first ethernet device. Runs as root; also covered by the polkit
-# rule when run as the vacti-activate user.
-do_net_connect() {
+# rule when run as the vacti-activate user. UI-free core so both the GTK kiosk
+# (quiet, reads the returned status line) and the yad fallback (popup) share it.
+_net_connect_core() {
   local con dev
   con="$(nmcli -t -f NAME,TYPE con show 2>/dev/null | awk -F: '$2=="802-3-ethernet"{print $1; exit}')"
   if [[ -n "$con" ]]; then
@@ -94,10 +103,58 @@ do_net_connect() {
     [[ -n "$dev" ]] && nmcli device connect "$dev" >/dev/null 2>&1 || true
   fi
   sleep 2
+}
+
+# yad fallback: connect, then confirm with a branded popup.
+do_net_connect() {
+  _net_connect_core
   local line; line="$(net_status_line)"
   local args=(--title="vacti - Jaringan" --text="${line}" --button="OK:0" --width=380 --center)
   [[ -n "$LOGO" ]] && args+=(--image="$LOGO")
   yad "${args[@]}" 2>/dev/null || true
+}
+
+# GTK kiosk: connect silently and print the new status line (no popup; the GTK
+# app owns the UI).
+do_net_connect_quiet() {
+  _net_connect_core
+  net_status_line
+}
+
+# A short code is 8 chars from a Crockford-ish alphabet (no I/O/0/1), optionally
+# hyphenated XXXX-XXXX. Everything else is a full token. Matches the GTK kiosk's
+# SHORT_CODE_RE and the CP exchange contract.
+is_short_code() { # raw
+  local s="${1//[[:space:]]/}"; s="${s^^}"
+  [[ "$s" =~ ^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$ ]]
+}
+
+# Exchange a short code for the full enrollment token via the CP exchange
+# endpoint. Prints the token on stdout on success. Returns: 0 ok, 44=404 not
+# found, 41=410 gone/consumed, 42=429 rate-limited, 1=network/other. The code is
+# normalised (uppercased, hyphen-stripped) before sending; no value is logged.
+resolve_exchange() { # url code
+  local base="${1%/}" code="${2//[[:space:]]/}"
+  code="${code^^}"; code="${code//-/}"
+  local out http tok rc=1
+  out="$(mktemp)"
+  http="$(curl -sS -o "$out" -w '%{http_code}' --connect-timeout 10 --max-time 20 \
+      -H 'Content-Type: application/json' \
+      -X POST "${base}/api/pentest/enroll/exchange" \
+      --data "$(printf '{"code":"%s"}' "$code")" 2>/dev/null || true)"
+  case "$http" in
+    200)
+      tok="$(jq -r '.token // empty' "$out" 2>/dev/null)"
+      [[ -z "$tok" ]] && tok="$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$out" | head -n1)"
+      if [[ -n "$tok" ]]; then printf '%s' "$tok"; rc=0; else rc=1; fi
+      ;;
+    404) rc=44 ;;
+    410) rc=41 ;;
+    429) rc=42 ;;
+    *)   rc=1 ;;
+  esac
+  rm -f "$out"
+  return $rc
 }
 
 # Returns 0 if the control-plane URL answers within ~15s (HEAD), else non-zero.
@@ -230,7 +287,24 @@ kiosk_yad() { # fb_unit
       continue
     fi
 
-    stage_token_and_enroll "$def_url" "$def_token" "$fb_unit"
+    # Short code typed instead of a full token? Exchange it for the full token
+    # (same convenience the premium GTK kiosk offers). A full token passes through.
+    local real_token="$def_token"
+    if is_short_code "$def_token"; then
+      local xrc
+      real_token="$(resolve_exchange "$def_url" "$def_token")"; xrc=$?
+      if [[ $xrc -ne 0 ]]; then
+        case $xrc in
+          44) yad_msg "Kode tidak ditemukan. Periksa lalu coba lagi." ;;
+          41) yad_msg "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 3 jam). Mint ulang di dashboard." ;;
+          42) yad_msg "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi." ;;
+          *)  yad_msg "Gangguan jaringan saat menukar kode. Coba lagi." ;;
+        esac
+        continue
+      fi
+    fi
+
+    stage_token_and_enroll "$def_url" "$real_token" "$fb_unit"
     if [[ -f "$CFG_ENV" ]]; then
       yad_msg "Aktivasi berhasil. Membuka desktop..."
       return 0
@@ -258,16 +332,30 @@ kiosk_zenity() { # fb_unit
   while [[ ! -f "$CFG_ENV" ]]; do
     local url token
     url="$(zenity --entry --title="vacti - Aktivasi" --text="URL control-plane" 2>/dev/null || true)"
-    token="$(zenity --password --title="Token enrollment (lisensi)" 2>/dev/null || true)"
+    token="$(zenity --entry --title="vacti - Aktivasi" --text="Kode aktivasi 8-karakter (mis. K7PQ-3M9T) atau token lengkap" 2>/dev/null || true)"
     if [[ -z "$url" || -z "$token" ]]; then
-      zenity --error --text="URL dan token wajib diisi." 2>/dev/null || true
+      zenity --error --text="URL dan kode/token wajib diisi." 2>/dev/null || true
       continue
     fi
     if ! reachable "$url"; then
       zenity --error --text="Tidak bisa menjangkau ${url}. Cek jaringan lalu coba lagi." 2>/dev/null || true
       continue
     fi
-    stage_token_and_enroll "$url" "$token" "$fb_unit"
+    local real_token="$token"
+    if is_short_code "$token"; then
+      local xrc
+      real_token="$(resolve_exchange "$url" "$token")"; xrc=$?
+      if [[ $xrc -ne 0 ]]; then
+        case $xrc in
+          44) zenity --error --text="Kode tidak ditemukan." 2>/dev/null || true ;;
+          41) zenity --error --text="Kode sudah dipakai atau kedaluwarsa (sekali pakai, 3 jam)." 2>/dev/null || true ;;
+          42) zenity --error --text="Terlalu banyak percobaan. Tunggu sebentar." 2>/dev/null || true ;;
+          *)  zenity --error --text="Gangguan jaringan saat menukar kode." 2>/dev/null || true ;;
+        esac
+        continue
+      fi
+    fi
+    stage_token_and_enroll "$url" "$real_token" "$fb_unit"
     if [[ -f "$CFG_ENV" ]]; then
       zenity --info --text="Aktivasi berhasil. Membuka desktop..." 2>/dev/null || true
       return 0
@@ -277,18 +365,46 @@ kiosk_zenity() { # fb_unit
   return 0
 }
 
+# True if the premium GTK4 kiosk can actually run here (app present, python3
+# present, and GTK4 + libadwaita importable). Preflighted so a missing/broken
+# toolkit deterministically falls back to yad instead of crash-looping.
+gtk4_kiosk_available() {
+  [[ -f "$KIOSK_APP" && -n "$PYTHON_BIN" ]] || return 1
+  "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw  # noqa
+PY
+}
+
 run_wizard() {
-  if ! pick_dialog; then
-    log "no yad/zenity dialog toolkit present - cannot render the kiosk"
-    return 1
-  fi
-  # A tiny WM so the advanced NetworkManager editor window is manageable under
-  # the bare xinit session (best-effort; the kiosk works without it too).
+  # A tiny WM so child windows (nm-connection-editor) are manageable under the
+  # bare xinit session (best-effort; the kiosk works without it too).
   if command -v openbox >/dev/null 2>&1; then
     openbox >/dev/null 2>&1 &
     sleep 1
   fi
   local fb_unit; fb_unit="$(pick_firstboot_unit)"
+
+  # Preferred: the premium GTK4 + libadwaita kiosk. It delegates every privileged
+  # step back to this script's __subcommands, so the enroll chain stays the single
+  # source of truth. Exit codes: 0=enrolled, 10=operator chose console (fail-open),
+  # anything else=could not run -> fall back to the yad notebook.
+  if gtk4_kiosk_available; then
+    "$PYTHON_BIN" "$KIOSK_APP" "$SELF"
+    local rc=$?
+    case $rc in
+      0)  return 0 ;;
+      10) log "operator chose exit-to-console in the GTK kiosk (fail-open)"; return 1 ;;
+      *)  log "GTK kiosk exited rc=${rc}; falling back to yad/zenity" ;;
+    esac
+  fi
+
+  if ! pick_dialog; then
+    log "no yad/zenity dialog toolkit present - cannot render the kiosk"
+    return 1
+  fi
   if [[ "$DIALOG" == "yad" ]]; then
     kiosk_yad "$fb_unit"
   else
@@ -305,7 +421,45 @@ case "${1:-}" in
     exit 0
     ;;
   __net-connect)
+    # yad FBTN: connect + branded popup.
     do_net_connect
+    exit 0
+    ;;
+  __net-connect-quiet)
+    # GTK kiosk: connect silently, print the new status line.
+    do_net_connect_quiet
+    exit 0
+    ;;
+  __net-status)
+    net_status_line
+    exit 0
+    ;;
+  __reachable)
+    # $2 = url; exit 0 if the control-plane answers, else 1.
+    reachable "${2:-}" && exit 0 || exit 1
+    ;;
+  __apply-optional)
+    # proxy/tskey come via env (VACTI_PROXY / VACTI_TSKEY), never argv.
+    apply_optional "${VACTI_PROXY:-}" "${VACTI_TSKEY:-}"
+    exit 0
+    ;;
+  __exchange)
+    # $2 = url; short code via env VACTI_CODE. Prints token; see resolve_exchange
+    # for the exit-code contract (0 / 44 / 41 / 42 / 1).
+    resolve_exchange "${2:-}" "${VACTI_CODE:-}"
+    exit $?
+    ;;
+  __enroll)
+    # $2 = url; full token via env VACTI_TOKEN. Writes enroll.token + runs the
+    # existing firstboot enroll chain. Exit 0 iff engine.env appeared.
+    _fb_unit="$(pick_firstboot_unit)"
+    stage_token_and_enroll "${2:-}" "${VACTI_TOKEN:-}" "$_fb_unit"
+    [[ -f "$CFG_ENV" ]] && exit 0 || exit 1
+    ;;
+  __finish)
+    # Post-success: reboot into the (now ungated) desktop login; if reboot is not
+    # permitted here, fall back to starting LightDM in place.
+    systemctl reboot 2>/dev/null || systemctl start lightdm.service 2>/dev/null || true
     exit 0
     ;;
 esac

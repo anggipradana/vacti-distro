@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+# vacti-kiosk - the PREMIUM GTK4 + libadwaita first-boot activation kiosk.
+#
+# This is the GUI front-end launched by vacti-activate's run_wizard (inside the
+# bare xinit session) when GTK4 + libadwaita are importable. It is PRESENTATION
+# ONLY: every privileged / stateful operation (network, short-code exchange,
+# enroll.token write + firstboot enroll, reboot) is delegated back to the audited
+# `vacti-activate __<subcommand>` surface so secrets stay in one place and the
+# enroll POST stays in vacti-firstboot (single source of truth). If anything here
+# fails to import or render, vacti-activate falls back to the yad notebook, then
+# zenity, then the fail-open console getty - the box is never bricked.
+#
+# Exit codes consumed by run_wizard:
+#   0  -> enrollment complete (engine.env present); hand off to the desktop
+#   10 -> operator chose "Keluar ke konsol" (fail-open to the console)
+#   other / import error -> caller falls back to the yad kiosk
+#
+# No token/code/proxy/key VALUE is ever printed or logged here; sensitive values
+# are handed to the helper subcommands via the environment, never argv.
+import os
+import re
+import sys
+import threading
+import subprocess
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GdkPixbuf  # noqa: E402
+
+# Path to the bash driver we delegate privileged work to (argv[1] overrides).
+ACTIVATE = sys.argv[1] if len(sys.argv) > 1 else "/usr/local/sbin/vacti-activate"
+CSS_PATH = "/usr/local/share/vacti-kiosk/vacti-kiosk.css"
+LOGO_CANDIDATES = [
+    "/usr/share/vacti/branding/logo/png/vacti-lockup-horizontal-light.png",
+    "/usr/share/vacti/branding/logo/png/vacti-lockup-stacked-light.png",
+    "/usr/share/vacti/branding/logo/png/vacti-logomark-128.png",
+    "/usr/share/pixmaps/vacti.svg",
+]
+
+# A short code is 8 chars from a Crockford-ish alphabet (no I/O/0/1), optionally
+# hyphenated XXXX-XXXX. Everything else is treated as a full token.
+SHORT_CODE_RE = re.compile(r"^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$")
+
+EXIT_CODE = 0
+
+
+def normalize_code(raw):
+    return re.sub(r"\s+", "", (raw or "")).upper()
+
+
+def is_short_code(raw):
+    return bool(SHORT_CODE_RE.match(normalize_code(raw)))
+
+
+def _run(subcmd_args, extra_env=None, capture=False, timeout=360):
+    """Run `vacti-activate <subcmd...>`; return (returncode, stdout_text)."""
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    try:
+        cp = subprocess.run(
+            [ACTIVATE, *subcmd_args],
+            env=env,
+            capture_output=capture,
+            text=True,
+            timeout=timeout,
+        )
+        out = (cp.stdout or "") if capture else ""
+        return cp.returncode, out.strip()
+    except Exception:
+        return 1, ""
+
+
+class KioskWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app)
+        self.set_title("vacti - Aktivasi")
+        self.set_default_size(960, 640)
+        self.fullscreen()
+
+        self.toasts = Adw.ToastOverlay()
+        self.set_content(self.toasts)
+
+        # Top-level view switch: wizard | busy | success.
+        self.root = Gtk.Stack()
+        self.root.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.toasts.set_child(self.root)
+
+        self.root.add_named(self._build_wizard(), "main")
+        self.root.add_named(self._build_busy(), "busy")
+        self.success_page = Adw.StatusPage()
+        self.root.add_named(self.success_page, "success")
+        self.root.set_visible_child_name("main")
+
+        # Live network status refresh.
+        self._refresh_status()
+        GLib.timeout_add_seconds(3, self._refresh_status)
+
+    # ---- wizard page -------------------------------------------------------
+    def _build_wizard(self):
+        clamp = Adw.Clamp(maximum_size=600, tightening_threshold=480)
+        clamp.set_margin_top(24)
+        clamp.set_margin_bottom(24)
+        clamp.set_margin_start(16)
+        clamp.set_margin_end(16)
+        clamp.set_valign(Gtk.Align.CENTER)
+
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        clamp.set_child(col)
+
+        # Hero: logo + title + subtitle.
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        hero.add_css_class("vacti-hero")
+        hero.set_halign(Gtk.Align.CENTER)
+        logo = self._logo_widget()
+        if logo:
+            hero.append(logo)
+        title = Gtk.Label(label="Aktivasi perangkat")
+        title.add_css_class("title-1")
+        hero.append(title)
+        sub = Gtk.Label(
+            label="Lengkapi jaringan, isi kode, lalu tekan Aktivasi."
+        )
+        sub.add_css_class("dim-label")
+        sub.set_wrap(True)
+        sub.set_justify(Gtk.Justification.CENTER)
+        hero.append(sub)
+        col.append(hero)
+
+        # Tabs.
+        self.stack = Adw.ViewStack()
+        switcher = Adw.ViewSwitcher()
+        switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+        switcher.set_stack(self.stack)
+        switcher.set_halign(Gtk.Align.CENTER)
+        col.append(switcher)
+
+        self.stack.add_titled(self._page_network(), "net", "Jaringan")
+        self.stack.add_titled(self._page_enroll(), "enroll", "Enrollment")
+        self.stack.add_titled(self._page_optional(), "opt", "Opsional")
+        self.stack.set_visible_child_name("enroll")
+        col.append(self.stack)
+
+        # Inline validation banner (hidden until needed).
+        self.banner = Adw.Banner()
+        self.banner.set_revealed(False)
+        col.append(self.banner)
+
+        # Live global status line.
+        self.status_lbl = Gtk.Label(label="")
+        self.status_lbl.add_css_class("caption")
+        self.status_lbl.add_css_class("dim-label")
+        self.status_lbl.set_halign(Gtk.Align.CENTER)
+        col.append(self.status_lbl)
+
+        # Primary / secondary actions.
+        self.activate_btn = Gtk.Button(label="Aktivasi")
+        self.activate_btn.add_css_class("suggested-action")
+        self.activate_btn.add_css_class("pill")
+        self.activate_btn.add_css_class("vacti-cta")
+        self.activate_btn.set_hexpand(True)
+        self.activate_btn.connect("clicked", self.on_activate)
+        col.append(self.activate_btn)
+
+        cancel = Gtk.Button(label="Keluar ke konsol")
+        cancel.add_css_class("flat")
+        cancel.set_halign(Gtk.Align.CENTER)
+        cancel.connect("clicked", self.on_cancel)
+        col.append(cancel)
+
+        return clamp
+
+    def _logo_widget(self):
+        for p in LOGO_CANDIDATES:
+            if os.path.isfile(p):
+                try:
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(p, 320, 72, True)
+                    img = Gtk.Picture.new_for_pixbuf(pb)
+                    img.set_can_shrink(True)
+                    img.set_size_request(-1, 56)
+                    img.add_css_class("vacti-logo")
+                    return img
+                except Exception:
+                    continue
+        return None
+
+    def _page_network(self):
+        grp = Adw.PreferencesGroup()
+        self.net_row = Adw.ActionRow()
+        self.net_row.set_title("Status jaringan")
+        self.net_row.set_subtitle("Memeriksa...")
+        grp.add(self.net_row)
+
+        connect_row = Adw.ActionRow()
+        connect_row.set_title("Aktifkan koneksi kabel (DHCP)")
+        connect_row.set_subtitle("Kasus paling umum di VM / NAT")
+        self.net_spinner = Gtk.Spinner()
+        connect_btn = Gtk.Button(label="Sambungkan")
+        connect_btn.add_css_class("suggested-action")
+        connect_btn.set_valign(Gtk.Align.CENTER)
+        connect_btn.connect("clicked", self.on_net_connect)
+        connect_row.add_suffix(self.net_spinner)
+        connect_row.add_suffix(connect_btn)
+        connect_row.set_activatable_widget(connect_btn)
+        grp.add(connect_row)
+
+        adv_row = Adw.ActionRow()
+        adv_row.set_title("Editor jaringan lanjutan")
+        adv_row.set_subtitle("Wi-Fi / IP statis / 802.1x")
+        adv_btn = Gtk.Button(label="Buka")
+        adv_btn.add_css_class("flat")
+        adv_btn.set_valign(Gtk.Align.CENTER)
+        adv_btn.connect("clicked", self.on_net_editor)
+        adv_row.add_suffix(adv_btn)
+        adv_row.set_activatable_widget(adv_btn)
+        grp.add(adv_row)
+        return grp
+
+    def _page_enroll(self):
+        grp = Adw.PreferencesGroup()
+        grp.set_description(
+            "Ketik kode 8-karakter dari dashboard (mis. K7PQ-3M9T). "
+            "Token lengkap juga boleh. Berlaku 3 jam, sekali pakai."
+        )
+        self.url_row = Adw.EntryRow()
+        self.url_row.set_title("URL control-plane")
+        grp.add(self.url_row)
+
+        self.code_row = Adw.EntryRow()
+        self.code_row.set_title("Kode aktivasi / Token")
+        self.code_row.add_css_class("monospace")
+        self.code_hint = Gtk.Label(label="")
+        self.code_hint.add_css_class("caption")
+        self.code_hint.set_valign(Gtk.Align.CENTER)
+        self.code_row.add_suffix(self.code_hint)
+        self.code_row.connect("changed", self.on_code_changed)
+        grp.add(self.code_row)
+        return grp
+
+    def _page_optional(self):
+        grp = Adw.PreferencesGroup()
+        grp.set_description("Kosongkan bila tidak dipakai.")
+        self.proxy_row = Adw.EntryRow()
+        self.proxy_row.set_title("Proxy HTTP(S)")
+        grp.add(self.proxy_row)
+        self.tskey_row = Adw.PasswordEntryRow()
+        self.tskey_row.set_title("Tailscale auth key")
+        grp.add(self.tskey_row)
+        return grp
+
+    # ---- busy / success pages ---------------------------------------------
+    def _build_busy(self):
+        page = Adw.StatusPage()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.set_valign(Gtk.Align.CENTER)
+        sp = Gtk.Spinner()
+        sp.set_size_request(48, 48)
+        sp.start()
+        box.append(sp)
+        self.busy_lbl = Gtk.Label(label="Memproses...")
+        self.busy_lbl.add_css_class("title-3")
+        self.busy_lbl.set_wrap(True)
+        self.busy_lbl.set_justify(Gtk.Justification.CENTER)
+        box.append(self.busy_lbl)
+        page.set_child(box)
+        return page
+
+    # ---- helpers -----------------------------------------------------------
+    def _refresh_status(self):
+        def work():
+            _, line = _run(["__net-status"], capture=True, timeout=10)
+            GLib.idle_add(self._apply_status, line)
+        threading.Thread(target=work, daemon=True).start()
+        return True  # keep the GLib timer alive
+
+    def _apply_status(self, line):
+        connected = bool(line) and "Belum" not in line
+        dot = "●"  # ●
+        text = line or "Belum terhubung ke jaringan"
+        markup_cls = "vacti-ok" if connected else "vacti-warn"
+        if hasattr(self, "net_row"):
+            self.net_row.set_subtitle(text)
+        self.status_lbl.set_text(f"{dot} {text}")
+        self.status_lbl.remove_css_class("vacti-ok")
+        self.status_lbl.remove_css_class("vacti-warn")
+        self.status_lbl.add_css_class(markup_cls)
+        return False
+
+    def on_code_changed(self, _row):
+        raw = self.code_row.get_text()
+        if not raw:
+            self.code_hint.set_text("")
+            return
+        if is_short_code(raw):
+            self.code_hint.set_text("Kode pendek")
+            self.code_hint.remove_css_class("vacti-warn")
+            self.code_hint.add_css_class("vacti-ok")
+        else:
+            self.code_hint.set_text("Token")
+            self.code_hint.remove_css_class("vacti-ok")
+            self.code_hint.add_css_class("vacti-warn")
+
+    def _banner(self, text):
+        self.banner.set_title(text)
+        self.banner.set_revealed(True)
+
+    def _toast(self, text):
+        self.toasts.add_toast(Adw.Toast.new(text))
+
+    def _busy(self, text):
+        self.busy_lbl.set_text(text)
+        self.root.set_visible_child_name("busy")
+
+    def _back_to_main(self, toast=None):
+        self.root.set_visible_child_name("main")
+        self.activate_btn.set_sensitive(True)
+        if toast:
+            self._toast(toast)
+        return False
+
+    # ---- network actions ---------------------------------------------------
+    def on_net_connect(self, _btn):
+        self.net_spinner.start()
+
+        def work():
+            _, line = _run(["__net-connect-quiet"], capture=True, timeout=40)
+            GLib.idle_add(self._net_connected, line)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _net_connected(self, line):
+        self.net_spinner.stop()
+        self._apply_status(line)
+        return False
+
+    def on_net_editor(self, _btn):
+        try:
+            subprocess.Popen(
+                ["nm-connection-editor"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            self._toast("Editor jaringan tidak tersedia.")
+
+    # ---- activation pipeline ----------------------------------------------
+    def on_activate(self, _btn):
+        self.banner.set_revealed(False)
+        url = self.url_row.get_text().strip()
+        code = self.code_row.get_text().strip()
+        proxy = self.proxy_row.get_text().strip()
+        tskey = self.tskey_row.get_text().strip()
+
+        if not url or not code:
+            self._banner("URL dan kode wajib diisi (tab Enrollment).")
+            self.stack.set_visible_child_name("enroll")
+            return
+
+        self.activate_btn.set_sensitive(False)
+        self._busy("Menyiapkan jaringan...")
+        threading.Thread(
+            target=self._pipeline, args=(url, code, proxy, tskey), daemon=True
+        ).start()
+
+    def _pipeline(self, url, code, proxy, tskey):
+        # 1. optional proxy / tailscale (secrets via env, not argv).
+        _run(
+            ["__apply-optional", url],
+            extra_env={"VACTI_PROXY": proxy, "VACTI_TSKEY": tskey},
+            timeout=60,
+        )
+        # 2. reachability.
+        rc, _ = _run(["__reachable", url], timeout=30)
+        if rc != 0:
+            GLib.idle_add(
+                self._back_to_main,
+                f"Tidak bisa menjangkau {url}. Cek tab Jaringan lalu coba lagi.",
+            )
+            return
+        # 3. resolve the short code -> full token (or pass the token through).
+        token = code
+        if is_short_code(code):
+            GLib.idle_add(self._busy, "Menukar kode aktivasi...")
+            rc, out = _run(
+                ["__exchange", url],
+                extra_env={"VACTI_CODE": normalize_code(code)},
+                capture=True,
+                timeout=40,
+            )
+            msg = {
+                44: "Kode tidak ditemukan. Periksa lalu coba lagi.",
+                41: "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 3 jam). "
+                    "Mint ulang di dashboard.",
+                42: "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi.",
+            }
+            if rc != 0:
+                GLib.idle_add(
+                    self._back_to_main,
+                    msg.get(rc, "Gangguan jaringan saat menukar kode."),
+                )
+                return
+            token = out
+            if not token:
+                GLib.idle_add(
+                    self._back_to_main, "Penukaran kode gagal (token kosong)."
+                )
+                return
+        # 4. stage enroll.token + run the existing firstboot enroll chain.
+        GLib.idle_add(
+            self._busy,
+            "Mendaftarkan perangkat... mengunduh engine (sekali, ~1-3 mnt).",
+        )
+        rc, _ = _run(
+            ["__enroll", url], extra_env={"VACTI_TOKEN": token}, timeout=360
+        )
+        if rc == 0:
+            GLib.idle_add(self._show_success)
+        else:
+            GLib.idle_add(
+                self._back_to_main,
+                "Enrollment belum selesai - token mungkin kedaluwarsa/terpakai. "
+                "Mint ulang di dashboard lalu coba lagi.",
+            )
+
+    def _show_success(self):
+        self.success_page.set_icon_name("emblem-ok-symbolic")
+        self.success_page.set_title("Aktivasi berhasil")
+        self._reboot_left = 10
+        self.success_page.set_description(
+            f"Membuka desktop - VM reboot dalam {self._reboot_left} detik."
+        )
+        self.root.set_visible_child_name("success")
+        GLib.timeout_add_seconds(1, self._tick_reboot)
+        return False
+
+    def _tick_reboot(self):
+        self._reboot_left -= 1
+        if self._reboot_left <= 0:
+            _run(["__finish"], timeout=20)
+            return False
+        self.success_page.set_description(
+            f"Membuka desktop - VM reboot dalam {self._reboot_left} detik."
+        )
+        return True
+
+    def on_cancel(self, _btn):
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Batalkan aktivasi?",
+            body="Perangkat tidak akan aktif tanpa enrollment.",
+        )
+        dialog.add_response("back", "Kembali ke aktivasi")
+        dialog.add_response("exit", "Keluar ke konsol")
+        dialog.set_response_appearance(
+            "exit", Adw.ResponseAppearance.DESTRUCTIVE
+        )
+        dialog.set_default_response("back")
+        dialog.connect("response", self._on_cancel_response)
+        dialog.present()
+
+    def _on_cancel_response(self, _dialog, response):
+        if response == "exit":
+            global EXIT_CODE
+            EXIT_CODE = 10
+            self.get_application().quit()
+
+
+class KioskApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="id.vacti.Kiosk",
+                         flags=Gio.ApplicationFlags.NON_UNIQUE)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        Adw.StyleManager.get_default().set_color_scheme(
+            Adw.ColorScheme.FORCE_DARK
+        )
+        if os.path.isfile(CSS_PATH):
+            try:
+                provider = Gtk.CssProvider()
+                provider.load_from_path(CSS_PATH)
+                display = Gdk.Display.get_default()
+                if display is not None:
+                    Gtk.StyleContext.add_provider_for_display(
+                        display,
+                        provider,
+                        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+                    )
+            except Exception:
+                pass
+
+    def do_activate(self):
+        win = KioskWindow(self)
+        win.present()
+
+
+def main():
+    app = KioskApp()
+    app.run(None)
+    return EXIT_CODE
+
+
+if __name__ == "__main__":
+    sys.exit(main())
