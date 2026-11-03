@@ -20,11 +20,11 @@ on:
       full_arsenal:
         description: "Bake the full arsenal (1) or lean web+infra (0)"
         required: false
-        default: "0"
+        default: "1"
       ctf_arsenal:
         description: "Also bake the CTF tool set (1) or not (0)"
         required: false
-        default: "0"
+        default: "1"
       forms:
         description: "Which image forms to build"
         required: false
@@ -50,14 +50,19 @@ permissions:
 
 env:
   VACTI_RELEASE: ${{ github.event.inputs.release || github.event.client_payload.release || '0.1.0' }}
-  VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '0' }}
+  # Default 1 (full): published artifacts MUST ship the full 110-pkg arsenal
+  # (grant+core+verticals+ctf) on EVERY trigger - manual dispatch, tag push, and
+  # the automated engine-deb-published rebuild alike - so an auto-rebuild never
+  # silently reverts the published :latest/:0.1.0 to the lean set. A lean build is
+  # an explicit opt-in: dispatch with full_arsenal=0 (a non-empty "0" input wins
+  # over this default via the `||` short-circuit).
+  VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '1' }}
   # CTF tool set toggle. Honored by build-golden.sh (via vacti-appliance.env,
   # which reads VACTI_CTF_ARSENAL from the environment) for the OVA/cloud forms
-  # and fed to the Dockerfile as a build-arg for the container form, so a single
-  # dispatch with full_arsenal=1 + ctf_arsenal=1 bakes the ENTIRE arsenal (core
-  # superset incl. mobile/ios/re verticals + the CTF apt set) into every surface.
-  # Default 0 keeps the lean-by-default images unchanged.
-  VACTI_CTF_ARSENAL: ${{ github.event.inputs.ctf_arsenal || '0' }}
+  # and fed to the Dockerfile as a build-arg for the container form, so with both
+  # defaults at 1 every surface bakes the ENTIRE arsenal (core superset incl.
+  # mobile/ios/re verticals + the CTF apt set). Pass ctf_arsenal=0 to opt out.
+  VACTI_CTF_ARSENAL: ${{ github.event.inputs.ctf_arsenal || '1' }}
   # Pinned engine ref the image builds against + the arsenal manifest the sync
   # guard checks. Empty = floating latest (historical behavior). The engine-deb-
   # published dispatch feeds the just-published version in via client_payload.release.
