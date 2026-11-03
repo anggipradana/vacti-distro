@@ -64,6 +64,17 @@ COPY distro/golden-image/docker-entrypoint.sh /usr/local/sbin/vacti-docker-entry
 # not executed) - no chmod +x needed.
 COPY distro/enroll/common/pairing-exchange.sh /usr/local/lib/vacti/pairing-exchange.sh
 
+# apt-pool signing keyring (ed25519 OpenPGP, fingerprint
+# 1240992D7986141C461AEC4B1F971D5D47DBFA8F). BAKED into the base image so the
+# container-start thin-bootstrap can pin the engine apt source to signed-by= (apt
+# cryptographically verifies the repo InRelease) instead of [trusted=yes], closing
+# a TLS-intercepting proxy serving a forged vacti-engine.deb. Public verification
+# key ONLY (no secret), safe on a published image. The engine .deb is NEVER baked
+# (thin-bootstrap IP protection); only this public key ships, to the same path the
+# engine's own postinst uses. It is streamed into the final layer by the FINALIZE
+# tar (it is under /usr/share, which is not excluded).
+COPY --chown=root:root --chmod=0644 distro/branding/vacti-apt.gpg /usr/share/keyrings/vacti-apt.gpg
+
 # --- base deps + public package sources (Kali pinned prio 100, NodeSource 22) --
 # No credential here, so this layer is cacheable and public. policy-rc.d blocks
 # postinst from trying to START services (there is no running init in a build);

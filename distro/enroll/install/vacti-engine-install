@@ -33,11 +33,26 @@ CFG_ENV="${CFG_DIR}/engine.env"
 TOKEN_FILE="${VACTI_ENROLL_FILE:-${CFG_DIR}/enroll.token}"
 APT_AUTH="/etc/apt/auth.conf.d/vacti-engine.conf"
 APT_SRC="/etc/apt/sources.list.d/vacti-engine.list"
+# apt-pool signing keyring, BAKED into the appliance base image (see
+# distro/golden-image/build-golden.sh). Present => pin the source to signed-by=.
+APT_KEYRING="/usr/share/keyrings/vacti-apt.gpg"
 ENGINE_PKG="${VACTI_ENGINE_PKG:-vacti-engine}"
 ENGINE_MARKER="/usr/lib/vacti-engine/dist/runner/cli.js"
 
 log() { echo "[vacti-engine-install] $*"; }
 die() { echo "[vacti-engine-install][FATAL] $*" >&2; exit 1; }
+
+# vacti_apt_keyring_valid PATH -> 0 if PATH is a non-empty, parseable OpenPGP
+# keyring. apt's own gpgv enforces the actual signature at `apt-get update`; this
+# is the pre-flight probe that decides signed-by vs the fail-closed refusal.
+vacti_apt_keyring_valid() {
+  local kr="$1"
+  [[ -s "$kr" ]] || return 1
+  if command -v gpg >/dev/null 2>&1; then
+    gpg --no-default-keyring --keyring "$kr" --list-keys >/dev/null 2>&1 || return 1
+  fi
+  return 0
+}
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -90,9 +105,35 @@ umask 077
 printf 'machine %s login vacti password %s\n' "${APT_MACHINE}" "${ENROLL_TOKEN}" > "$APT_AUTH"
 chmod 0600 "$APT_AUTH"
 umask 022
-printf '# Written at first boot by vacti-engine-install from the enrollment URL.\n# Public source line (no credential); the token lives only in %s.\ndeb [trusted=yes] %s/apt ./\n' \
-  "$APT_AUTH" "${BASE}" > "$APT_SRC"
-log "apt source + auth wired for ${BASE}/apt (token not logged)"
+# --- apt source line: verify the repo SIGNATURE via the baked keyring ----------
+# The appliance base image bakes the public apt-pool keyring at $APT_KEYRING
+# (ed25519 OpenPGP, fp 1240992D7986141C461AEC4B1F971D5D47DBFA8F). Pin the source
+# to signed-by= so apt verifies the repo InRelease before it installs the engine
+# .deb as root - closing a TLS-intercepting proxy that serves a forged .deb.
+#   - VACTI_APT_SIGNED=0 : operator escape hatch -> legacy [trusted=yes] + loud warn
+#   - keyring present+valid: [signed-by=$APT_KEYRING]
+#   - keyring MISSING/invalid (no kill-switch): FAIL-CLOSED (die). On an appliance a
+#     baked keyring is either present or the base image was tampered/corrupted, so
+#     refusing to install an unverified root package is correct (Jev fail_closed p=1.0).
+if [[ "${VACTI_APT_SIGNED:-1}" == "0" ]]; then
+  log "WARNING: VACTI_APT_SIGNED=0 - apt signature verification DISABLED by operator; writing legacy [trusted=yes] for ${BASE}/apt"
+  {
+    printf '# Written at first boot by vacti-engine-install from the enrollment URL.\n'
+    printf '# Public source line (no credential); the token lives only in %s.\n' "$APT_AUTH"
+    printf '# WARNING: signature verification disabled via VACTI_APT_SIGNED=0.\n'
+    printf 'deb [trusted=yes] %s/apt ./\n' "${BASE}"
+  } > "$APT_SRC"
+elif vacti_apt_keyring_valid "$APT_KEYRING"; then
+  {
+    printf '# Written at first boot by vacti-engine-install from the enrollment URL.\n'
+    printf '# Public source line (no credential); the token lives only in %s.\n' "$APT_AUTH"
+    printf '# Repo signature verified by apt against the baked keyring.\n'
+    printf 'deb [signed-by=%s] %s/apt ./\n' "$APT_KEYRING" "${BASE}"
+  } > "$APT_SRC"
+  log "apt source wired with signed-by=${APT_KEYRING} for ${BASE}/apt (token not logged)"
+else
+  die "apt signing keyring ${APT_KEYRING} is missing or invalid - the appliance base image is tampered or corrupted. Refusing to install ${ENGINE_PKG} from an unverified apt source. To override on a trusted network, re-run with VACTI_APT_SIGNED=0."
+fi
 
 # --- pull the engine .deb -----------------------------------------------------
 log "apt-get update + install ${ENGINE_PKG} (engine not baked into the public image)"
