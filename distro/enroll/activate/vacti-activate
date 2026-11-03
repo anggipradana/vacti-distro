@@ -37,6 +37,150 @@
 # is the GUI SKU only and does not implement a TUI branch.
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# i18n (EN/ID). A tiny self-contained string table - no gettext, no new deps.
+# Default is Indonesian. The language is chosen (highest precedence first) by the
+# --lang en|id flag, the VACTI_LANG env var (the GTK kiosk forwards its choice
+# this way), ~/.config/vacti/lang or /etc/vacti/lang, then the inherited $LANG
+# locale. A key missing in the chosen language falls back to EN (warning on
+# stderr, never fatal). Strings use "{}" as a value placeholder.
+# ---------------------------------------------------------------------------
+VACTI_LANG_FLAG=""
+_vacti_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lang) VACTI_LANG_FLAG="${2:-}"; shift 2 || shift ;;
+    --lang=*) VACTI_LANG_FLAG="${1#--lang=}"; shift ;;
+    *) _vacti_args+=("$1"); shift ;;
+  esac
+done
+set -- ${_vacti_args[@]+"${_vacti_args[@]}"}
+
+_resolve_uilang() {
+  local v="" home_lang="${HOME:-/root}/.config/vacti/lang"
+  if   [[ -n "${VACTI_LANG_FLAG:-}" ]]; then v="$VACTI_LANG_FLAG"
+  elif [[ -n "${VACTI_LANG:-}"      ]]; then v="$VACTI_LANG"
+  elif [[ -r "$home_lang"           ]]; then v="$(cat "$home_lang" 2>/dev/null)"
+  elif [[ -r /etc/vacti/lang        ]]; then v="$(cat /etc/vacti/lang 2>/dev/null)"
+  elif [[ "${LANG:-}" == id* || "${LC_ALL:-}" == id* ]]; then v="id"
+  elif [[ -n "${LANG:-}${LC_ALL:-}" ]]; then v="en"
+  fi
+  v="${v,,}"; v="${v//[[:space:]]/}"
+  case "$v" in en) echo en ;; id) echo id ;; *) echo id ;; esac
+}
+VACTI_UILANG="$(_resolve_uilang)"
+# Forward the resolved language to the GTK kiosk (and anything else we exec) so
+# the whole activation surface speaks one language.
+export VACTI_LANG="$VACTI_UILANG"
+
+declare -A VT_EN=(
+  [net_connected]="Connected to the network: {}"
+  [net_not_connected]="Not connected to a network"
+  [title_activation]="vacti - Activation"
+  [title_network]="vacti - Network"
+  [tab_net]="Network"
+  [tab_enroll]="Enrollment"
+  [tab_opt]="Optional"
+  [f_net_status]="Current network status"
+  [btn_net_connect]="Bring up wired connection (DHCP - most common)"
+  [btn_net_editor]="Open the advanced network editor (Wi-Fi / static IP / 802.1x)"
+  [f_url]="Control-plane URL"
+  [f_token]="Enrollment token (license)"
+  [lbl_token_hint]="Paste the token from the dashboard. Valid 3 hours, single-use."
+  [f_proxy]="HTTP(S) proxy (optional)"
+  [f_tskey]="Tailscale auth key (optional)"
+  [lbl_opt_hint]="Leave blank if you are not using a proxy / Tailscale."
+  [hdr_text]="<b>vacti</b> - Activate device\nSet up the network, enter the token, then press Activate."
+  [btn_cancel]="Cancel"
+  [btn_activate]="Activate"
+  [cancel_prompt]="Cancel activation? The device will not be active without enrollment."
+  [btn_back_activation]="Back to activation"
+  [btn_exit_console]="Exit to console"
+  [err_required_full]="The control-plane URL and the enrollment token are required (Enrollment tab)."
+  [err_unreachable_net]="Cannot reach {}. Check the Network tab (bring up the connection / proxy / Tailscale) and try again."
+  [ok_activated]="Activation complete. Opening the desktop..."
+  [err_enroll_detail]="Enrollment did not finish (the token may be expired or single-use - valid 3h). Re-mint it in the dashboard and try again.\nDetail: journalctl -u {}"
+  [err_notfound]="Code not found. Check it and try again."
+  [err_gone]="Code already used or expired (single-use, 10 minutes). Re-mint it in the dashboard."
+  [err_rate]="Too many attempts. Wait a moment and try again."
+  [err_exchange_net]="Network error while exchanging the code. Try again."
+  [z_net_info]="Set up the network. The NetworkManager editor will open for Wi-Fi / wired / static IP. Close the editor when done."
+  [z_proxy_title]="Proxy (optional)"
+  [z_proxy_text]="HTTP(S) proxy URL, or leave blank"
+  [z_url_text]="Control-plane URL"
+  [z_token_text]="8-character activation code (e.g. K7PQ-3M9T) or a full token"
+  [z_required]="URL and code/token are required."
+  [z_unreachable]="Cannot reach {}. Check the network and try again."
+  [z_enroll_failed]="Enrollment did not finish (the token may be expired). Try again."
+)
+declare -A VT_ID=(
+  [net_connected]="Terhubung ke jaringan: {}"
+  [net_not_connected]="Belum terhubung ke jaringan"
+  [title_activation]="vacti - Aktivasi"
+  [title_network]="vacti - Jaringan"
+  [tab_net]="Jaringan"
+  [tab_enroll]="Enrollment"
+  [tab_opt]="Opsional"
+  [f_net_status]="Status jaringan saat ini"
+  [btn_net_connect]="Aktifkan koneksi kabel (DHCP - paling umum)"
+  [btn_net_editor]="Buka editor jaringan lanjutan (Wi-Fi / IP statis / 802.1x)"
+  [f_url]="URL control-plane"
+  [f_token]="Token enrollment (lisensi)"
+  [lbl_token_hint]="Tempel token dari dashboard. Berlaku 3 jam, sekali pakai."
+  [f_proxy]="Proxy HTTP(S) (opsional)"
+  [f_tskey]="Tailscale auth key (opsional)"
+  [lbl_opt_hint]="Kosongkan bila tidak memakai proxy / Tailscale."
+  [hdr_text]="<b>vacti</b> - Aktivasi perangkat\nLengkapi jaringan, isi token, lalu tekan Aktivasi."
+  [btn_cancel]="Batal"
+  [btn_activate]="Aktivasi"
+  [cancel_prompt]="Batalkan aktivasi? Perangkat tidak akan aktif tanpa enrollment."
+  [btn_back_activation]="Kembali ke aktivasi"
+  [btn_exit_console]="Keluar ke konsol"
+  [err_required_full]="URL control-plane dan token enrollment wajib diisi (tab Enrollment)."
+  [err_unreachable_net]="Tidak bisa menjangkau {}. Cek tab Jaringan (aktifkan koneksi / proxy / Tailscale) lalu coba lagi."
+  [ok_activated]="Aktivasi berhasil. Membuka desktop..."
+  [err_enroll_detail]="Enrollment belum selesai (token mungkin kedaluwarsa atau sekali pakai - berlaku 3 jam). Mint ulang di dashboard lalu coba lagi.\nDetail: journalctl -u {}"
+  [err_notfound]="Kode tidak ditemukan. Periksa lalu coba lagi."
+  [err_gone]="Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit). Mint ulang di dashboard."
+  [err_rate]="Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi."
+  [err_exchange_net]="Gangguan jaringan saat menukar kode. Coba lagi."
+  [z_net_info]="Siapkan jaringan. Editor NetworkManager akan terbuka untuk Wi-Fi / kabel / IP statis. Tutup editor bila sudah."
+  [z_proxy_title]="Proxy (opsional)"
+  [z_proxy_text]="URL proxy HTTP(S), atau kosongkan"
+  [z_url_text]="URL control-plane"
+  [z_token_text]="Kode aktivasi 8-karakter (mis. K7PQ-3M9T) atau token lengkap"
+  [z_required]="URL dan kode/token wajib diisi."
+  [z_unreachable]="Tidak bisa menjangkau {}. Cek jaringan lalu coba lagi."
+  [z_enroll_failed]="Enrollment belum selesai (token mungkin kedaluwarsa). Coba lagi."
+)
+
+_lookup() { # key
+  local key="$1" val=""
+  if [[ "$VACTI_UILANG" == "en" ]]; then
+    val="${VT_EN[$key]-}"
+  else
+    val="${VT_ID[$key]-}"
+    if [[ -z "$val" && -n "${VT_EN[$key]-}" ]]; then
+      echo "[vacti-activate] i18n key '$key' missing for id; using en" >&2
+      val="${VT_EN[$key]}"
+    fi
+  fi
+  if [[ -z "$val" ]]; then
+    [[ -z "${VT_EN[$key]-}" ]] && echo "[vacti-activate] missing i18n key: $key" >&2
+    val="${VT_EN[$key]-$key}"
+  fi
+  printf '%s' "$val"
+}
+
+# _t KEY [ARG...] -> the translated string with each "{}" replaced by an ARG.
+_t() {
+  local key="$1"; shift || true
+  local val; val="$(_lookup "$key")"
+  local a
+  for a in "$@"; do val="${val/"{}"/$a}"; done
+  printf '%s' "$val"
+}
+
 CFG_DIR="/etc/vacti-engine"
 CFG_ENV="${CFG_DIR}/engine.env"
 TOKEN_FILE="${CFG_DIR}/enroll.token"
@@ -82,9 +226,9 @@ net_status_line() {
   local ip
   ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
   if [[ -n "$ip" ]]; then
-    echo "Terhubung ke jaringan: ${ip}"
+    _t net_connected "$ip"; echo
   else
-    echo "Belum terhubung ke jaringan"
+    _t net_not_connected; echo
   fi
 }
 
@@ -109,7 +253,7 @@ _net_connect_core() {
 do_net_connect() {
   _net_connect_core
   local line; line="$(net_status_line)"
-  local args=(--title="vacti - Jaringan" --text="${line}" --button="OK:0" --width=380 --center)
+  local args=(--title="$(_t title_network)" --text="${line}" --button="OK:0" --width=380 --center)
   [[ -n "$LOGO" ]] && args+=(--image="$LOGO")
   yad "${args[@]}" 2>/dev/null || true
 }
@@ -224,33 +368,33 @@ kiosk_yad() { # fb_unit
 
     # Tab 1 - Jaringan: status snapshot + live action buttons (no captured output).
     yad --plug="$key" --tabnum=1 --form --columns=1 \
-      --field="Status jaringan saat ini:LBL" "" \
+      --field="$(_t f_net_status):LBL" "" \
       --field=":RO" "$status" \
-      --field="Aktifkan koneksi kabel (DHCP - paling umum):FBTN" "$SELF __net-connect" \
-      --field="Buka editor jaringan lanjutan (Wi-Fi / IP statis / 802.1x):FBTN" "nm-connection-editor" \
+      --field="$(_t btn_net_connect):FBTN" "$SELF __net-connect" \
+      --field="$(_t btn_net_editor):FBTN" "nm-connection-editor" \
       >/dev/null 2>&1 &
 
     # Tab 2 - Enrollment: control-plane URL + token (prefilled on re-open).
     yad --plug="$key" --tabnum=2 --form \
-      --field="URL control-plane":TEXT "$def_url" \
-      --field="Token enrollment (lisensi)":H "$def_token" \
-      --field="Tempel token dari dashboard. Berlaku 3 jam, sekali pakai.:LBL" "" \
+      --field="$(_t f_url)":TEXT "$def_url" \
+      --field="$(_t f_token)":H "$def_token" \
+      --field="$(_t lbl_token_hint):LBL" "" \
       > "${tmp}/2" 2>/dev/null &
 
     # Tab 3 - Opsional: proxy + Tailscale auth key.
     yad --plug="$key" --tabnum=3 --form \
-      --field="Proxy HTTP(S) (opsional)":TEXT "$def_proxy" \
-      --field="Tailscale auth key (opsional)":H "$def_tskey" \
-      --field="Kosongkan bila tidak memakai proxy / Tailscale.:LBL" "" \
+      --field="$(_t f_proxy)":TEXT "$def_proxy" \
+      --field="$(_t f_tskey)":H "$def_tskey" \
+      --field="$(_t lbl_opt_hint):LBL" "" \
       > "${tmp}/3" 2>/dev/null &
 
     # Parent notebook: logo header + tabs + single Aktivasi button.
     local nb=(--notebook --key="$key" --tab-pos=top \
-      --tab="Jaringan" --tab="Enrollment" --tab="Opsional" \
-      --text="<b>vacti</b> - Aktivasi perangkat\nLengkapi jaringan, isi token, lalu tekan Aktivasi." \
-      --text-align=center --title="vacti - Aktivasi" \
+      --tab="$(_t tab_net)" --tab="$(_t tab_enroll)" --tab="$(_t tab_opt)" \
+      --text="$(_t hdr_text)" \
+      --text-align=center --title="$(_t title_activation)" \
       --width=640 --height=480 --center --fixed --undecorated \
-      --button="Batal:1" --button="Aktivasi:0")
+      --button="$(_t btn_cancel):1" --button="$(_t btn_activate):0")
     if [[ -n "$LOGO" ]]; then nb+=(--image="$LOGO" --image-on-top --window-icon="$LOGO"); fi
     yad "${nb[@]}" 2>/dev/null
     ret=$?
@@ -259,8 +403,8 @@ kiosk_yad() { # fb_unit
     if [[ $ret -ne 0 ]]; then
       # Batal -> confirm. Confirmed exit fails OPEN to the fallback console.
       local cargs=(--title="vacti" --width=460 --center \
-        --text="Batalkan aktivasi? Perangkat tidak akan aktif tanpa enrollment." \
-        --button="Kembali ke aktivasi:1" --button="Keluar ke konsol:0")
+        --text="$(_t cancel_prompt)" \
+        --button="$(_t btn_back_activation):1" --button="$(_t btn_exit_console):0")
       [[ -n "$LOGO" ]] && cargs+=(--image="$LOGO")
       if yad "${cargs[@]}" 2>/dev/null; then
         rm -rf "$tmp"
@@ -279,11 +423,11 @@ kiosk_yad() { # fb_unit
     apply_optional "$def_proxy" "$def_tskey"
 
     if [[ -z "$def_url" || -z "$def_token" ]]; then
-      yad_msg "URL control-plane dan token enrollment wajib diisi (tab Enrollment)."
+      yad_msg "$(_t err_required_full)"
       continue
     fi
     if ! reachable "$def_url"; then
-      yad_msg "Tidak bisa menjangkau ${def_url}. Cek tab Jaringan (aktifkan koneksi / proxy / Tailscale) lalu coba lagi."
+      yad_msg "$(_t err_unreachable_net "$def_url")"
       continue
     fi
 
@@ -295,10 +439,10 @@ kiosk_yad() { # fb_unit
       real_token="$(resolve_exchange "$def_url" "$def_token")"; xrc=$?
       if [[ $xrc -ne 0 ]]; then
         case $xrc in
-          44) yad_msg "Kode tidak ditemukan. Periksa lalu coba lagi." ;;
-          41) yad_msg "Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit). Mint ulang di dashboard." ;;
-          42) yad_msg "Terlalu banyak percobaan. Tunggu sebentar lalu coba lagi." ;;
-          *)  yad_msg "Gangguan jaringan saat menukar kode. Coba lagi." ;;
+          44) yad_msg "$(_t err_notfound)" ;;
+          41) yad_msg "$(_t err_gone)" ;;
+          42) yad_msg "$(_t err_rate)" ;;
+          *)  yad_msg "$(_t err_exchange_net)" ;;
         esac
         continue
       fi
@@ -306,16 +450,16 @@ kiosk_yad() { # fb_unit
 
     stage_token_and_enroll "$def_url" "$real_token" "$fb_unit"
     if [[ -f "$CFG_ENV" ]]; then
-      yad_msg "Aktivasi berhasil. Membuka desktop..."
+      yad_msg "$(_t ok_activated)"
       return 0
     fi
-    yad_msg "Enrollment belum selesai (token mungkin kedaluwarsa atau sekali pakai - berlaku 3 jam). Mint ulang di dashboard lalu coba lagi.\nDetail: journalctl -u ${fb_unit}"
+    yad_msg "$(_t err_enroll_detail "$fb_unit")"
   done
   return 0
 }
 
 yad_msg() { # text
-  local args=(--title="vacti - Aktivasi" --text="$1" --button="OK:0" --width=460 --center)
+  local args=(--title="$(_t title_activation)" --text="$1" --button="OK:0" --width=460 --center)
   [[ -n "$LOGO" ]] && args+=(--image="$LOGO")
   yad "${args[@]}" 2>/dev/null || true
 }
@@ -324,21 +468,21 @@ yad_msg() { # text
 # default; this keeps the kiosk functional if it is ever stripped).
 kiosk_zenity() { # fb_unit
   local fb_unit="$1"
-  zenity --info --title="vacti - Aktivasi" \
-    --text="Siapkan jaringan. Editor NetworkManager akan terbuka untuk Wi-Fi / kabel / IP statis. Tutup editor bila sudah." 2>/dev/null || true
+  zenity --info --title="$(_t title_activation)" \
+    --text="$(_t z_net_info)" 2>/dev/null || true
   command -v nm-connection-editor >/dev/null 2>&1 && nm-connection-editor 2>/dev/null || true
-  local px; px="$(zenity --entry --title="Proxy (opsional)" --text="URL proxy HTTP(S), atau kosongkan" 2>/dev/null || true)"
+  local px; px="$(zenity --entry --title="$(_t z_proxy_title)" --text="$(_t z_proxy_text)" 2>/dev/null || true)"
   apply_optional "$px" ""
   while [[ ! -f "$CFG_ENV" ]]; do
     local url token
-    url="$(zenity --entry --title="vacti - Aktivasi" --text="URL control-plane" 2>/dev/null || true)"
-    token="$(zenity --entry --title="vacti - Aktivasi" --text="Kode aktivasi 8-karakter (mis. K7PQ-3M9T) atau token lengkap" 2>/dev/null || true)"
+    url="$(zenity --entry --title="$(_t title_activation)" --text="$(_t z_url_text)" 2>/dev/null || true)"
+    token="$(zenity --entry --title="$(_t title_activation)" --text="$(_t z_token_text)" 2>/dev/null || true)"
     if [[ -z "$url" || -z "$token" ]]; then
-      zenity --error --text="URL dan kode/token wajib diisi." 2>/dev/null || true
+      zenity --error --text="$(_t z_required)" 2>/dev/null || true
       continue
     fi
     if ! reachable "$url"; then
-      zenity --error --text="Tidak bisa menjangkau ${url}. Cek jaringan lalu coba lagi." 2>/dev/null || true
+      zenity --error --text="$(_t z_unreachable "$url")" 2>/dev/null || true
       continue
     fi
     local real_token="$token"
@@ -347,20 +491,20 @@ kiosk_zenity() { # fb_unit
       real_token="$(resolve_exchange "$url" "$token")"; xrc=$?
       if [[ $xrc -ne 0 ]]; then
         case $xrc in
-          44) zenity --error --text="Kode tidak ditemukan." 2>/dev/null || true ;;
-          41) zenity --error --text="Kode sudah dipakai atau kedaluwarsa (sekali pakai, 10 menit)." 2>/dev/null || true ;;
-          42) zenity --error --text="Terlalu banyak percobaan. Tunggu sebentar." 2>/dev/null || true ;;
-          *)  zenity --error --text="Gangguan jaringan saat menukar kode." 2>/dev/null || true ;;
+          44) zenity --error --text="$(_t err_notfound)" 2>/dev/null || true ;;
+          41) zenity --error --text="$(_t err_gone)" 2>/dev/null || true ;;
+          42) zenity --error --text="$(_t err_rate)" 2>/dev/null || true ;;
+          *)  zenity --error --text="$(_t err_exchange_net)" 2>/dev/null || true ;;
         esac
         continue
       fi
     fi
     stage_token_and_enroll "$url" "$real_token" "$fb_unit"
     if [[ -f "$CFG_ENV" ]]; then
-      zenity --info --text="Aktivasi berhasil. Membuka desktop..." 2>/dev/null || true
+      zenity --info --text="$(_t ok_activated)" 2>/dev/null || true
       return 0
     fi
-    zenity --error --text="Enrollment belum selesai (token mungkin kedaluwarsa). Coba lagi." 2>/dev/null || true
+    zenity --error --text="$(_t z_enroll_failed)" 2>/dev/null || true
   done
   return 0
 }
