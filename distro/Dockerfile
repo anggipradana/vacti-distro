@@ -116,17 +116,43 @@ RUN set -eu; \
       /opt/vacti-build/packages/gen-live-build-list.sh /opt/vacti-build/arsenal.list \
       || echo "[docker][warn] arsenal list generation reported an issue"; \
     PKGS="$(grep -vE '^[[:space:]]*(#|$)' /opt/vacti-build/arsenal.list 2>/dev/null || true)"; \
+    MANIFEST=/opt/vacti-build/packages/arsenal-manifest.json; \
+    : > /tmp/arsenal-failed.list; \
     if [ -n "${PKGS}" ]; then \
-      echo "[docker] installing arsenal (best-effort)"; \
-      apt-get install -y --no-install-recommends ${PKGS} || { \
+      echo "[docker] installing arsenal (bulk)"; \
+      if ! apt-get install -y --no-install-recommends ${PKGS}; then \
         echo "[docker] bulk arsenal install hit a snag; retrying per-package"; \
         for p in ${PKGS}; do \
           apt-get install -y --no-install-recommends "$p" \
-            || echo "[docker][warn] $p not installable here (runtime self-heal covers it)"; \
+            || { echo "[docker][warn] $p did not install on the bulk or per-package attempt"; printf '%s\n' "$p" >> /tmp/arsenal-failed.list; }; \
         done; \
-      }; \
+      fi; \
     else \
       echo "[docker][warn] arsenal list empty; relying on runtime self-heal"; \
+    fi; \
+    : > /tmp/arsenal-gate-failed.list; \
+    if [ -s /tmp/arsenal-failed.list ]; then \
+      echo "[docker] classifying still-failed packages against the engine manifest (jq)"; \
+      while IFS= read -r p; do \
+        if [ -z "$p" ]; then continue; fi; \
+        if jq -e --arg p "$p" '(([.apt.verticals[][], .apt.ctf[]] | index($p)) != null) and (([.apt.grant[], .apt.core[]] | index($p)) == null)' "$MANIFEST" >/dev/null 2>&1; then \
+          echo "[docker][warn] optional (verticals/ctf) tool unavailable on this arch: $p (allowed to be arch-divergent)"; \
+          continue; \
+        fi; \
+        cand="$(apt-cache policy "$p" 2>/dev/null | awk -F': ' '/Candidate:/{print $2; exit}')"; \
+        if [ -z "$cand" ] || [ "$cand" = "(none)" ]; then \
+          echo "[docker][warn] required tool $p has no apt package on this base (engine runtime self-heal provisions it)"; \
+        else \
+          echo "[docker][error] required tool $p has an apt candidate ($cand) but FAILED to install - real breakage"; \
+          printf '%s\n' "$p" >> /tmp/arsenal-gate-failed.list; \
+        fi; \
+      done < /tmp/arsenal-failed.list; \
+    fi; \
+    if [ -s /tmp/arsenal-gate-failed.list ]; then \
+      echo "[docker][error] FAIL-LOUD: required grant/core package(s) with an apt candidate failed to install on this arch:"; \
+      sed 's/^/[docker][error]   - /' /tmp/arsenal-gate-failed.list; \
+      echo "[docker][error] aborting the build so a broken required tool is never shipped silently."; \
+      exit 1; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
