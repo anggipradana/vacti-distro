@@ -91,6 +91,8 @@ STRINGS = {
         "opt_desc": "Kosongkan bila tidak dipakai.",
         "proxy_title": "Proxy HTTP(S)",
         "tskey_title": "Tailscale auth key",
+        "tskey_advanced": "Lanjutan: ganti auth key Tailscale",
+        "tskey_advanced_sub": "Biasanya otomatis dari kode pairing. Isi hanya bila ingin key berbeda.",
         "busy_default": "Memproses...",
         "busy_net": "Menyiapkan jaringan...",
         "busy_exchange": "Menukar kode aktivasi...",
@@ -144,6 +146,8 @@ STRINGS = {
         "opt_desc": "Leave blank if unused.",
         "proxy_title": "HTTP(S) proxy",
         "tskey_title": "Tailscale auth key",
+        "tskey_advanced": "Advanced: override Tailscale key",
+        "tskey_advanced_sub": "Usually auto-filled from the pairing code. Set only to use a different key.",
         "busy_default": "Processing...",
         "busy_net": "Setting up the network...",
         "busy_exchange": "Exchanging the activation code...",
@@ -538,9 +542,18 @@ class KioskWindow(Adw.ApplicationWindow):
         self.proxy_row = Adw.EntryRow()
         self._reg(self.proxy_row.set_title, "proxy_title")
         grp.add(self.proxy_row)
+        # The Tailscale auth key is now auto-populated: the CP delivers the operator's stored key on
+        # the pairing-code exchange response (option A) and vacti-activate joins the tailnet with it.
+        # So the manual field is hidden by default inside a collapsed "Advanced: override" expander,
+        # for the edge case where the operator wants a DIFFERENT key than the workspace default.
+        ts_exp = Adw.ExpanderRow()
+        self._reg(ts_exp.set_title, "tskey_advanced")
+        self._reg(ts_exp.set_subtitle, "tskey_advanced_sub")
+        ts_exp.set_expanded(False)
         self.tskey_row = Adw.PasswordEntryRow()
         self._reg(self.tskey_row.set_title, "tskey_title")
-        grp.add(self.tskey_row)
+        ts_exp.add_row(self.tskey_row)
+        grp.add(ts_exp)
         return grp
 
     # ---- busy / success pages ---------------------------------------------
