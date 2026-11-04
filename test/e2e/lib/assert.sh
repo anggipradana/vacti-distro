@@ -66,6 +66,50 @@ assert_http_status() { # got want checkpoint
   esac
 }
 
+# image_has_file IMAGE PATH - non-failing probe (NO checkpoint side effects) for
+# whether PATH exists inside a qcow2/raw disk IMAGE, via libguestfs (read-only).
+# Return: 0 present, 1 absent, 2 cannot determine (no libguestfs / unreadable image).
+# Used to AUTO-DETECT the image form (fat vs thin) so a scenario stays correct for
+# both without an env flag, and never breaks the pre-existing thin expectation.
+image_has_file() { # image path
+  local image="$1" path="$2"
+  [[ -f "$image" ]] || return 2
+  if command -v guestfish >/dev/null 2>&1; then
+    local out; out="$(guestfish --ro -a "$image" -i exists "$path" 2>/dev/null)" || return 2
+    [[ "$out" =~ ^true ]] && return 0 || return 1
+  elif command -v virt-ls >/dev/null 2>&1; then
+    local dir base; dir="$(dirname "$path")"; base="$(basename "$path")"
+    local listing; listing="$(virt-ls -a "$image" "$dir" 2>/dev/null)" || return 2
+    grep -qx "$base" <<<"$listing" && return 0 || return 1
+  fi
+  return 2
+}
+
+# assert_image_has_file IMAGE PATH CHECKPOINT - static, read-only check that PATH
+# exists INSIDE a qcow2/raw disk IMAGE, using libguestfs. Used to prove the FAT-OVA
+# bake (the engine marker is on disk BEFORE first boot). Soft-skips with a warning -
+# NOT a failure - when no libguestfs tool (guestfish/virt-ls) is installed, so the
+# harness still runs on a host without libguestfs. Never prints file contents.
+assert_image_has_file() { # image path checkpoint
+  local image="$1" path="$2" name="$3"
+  [[ -f "$image" ]] || cp_fail "$name" "image '$image' not found"
+  if command -v guestfish >/dev/null 2>&1; then
+    if guestfish --ro -a "$image" -i exists "$path" 2>/dev/null | grep -qi '^true'; then
+      cp_pass "$name ($path present)"
+    else
+      cp_fail "$name" "$path absent inside $image"
+    fi
+  elif command -v virt-ls >/dev/null 2>&1; then
+    if virt-ls -a "$image" "$(dirname "$path")" 2>/dev/null | grep -qx "$(basename "$path")"; then
+      cp_pass "$name ($path present)"
+    else
+      cp_fail "$name" "$path absent inside $image"
+    fi
+  else
+    e2e_warn "libguestfs (guestfish/virt-ls) not installed; SKIPPING static image check '$name' ($path)"
+  fi
+}
+
 # require_cmd CMD... - fail-closed if a required command is missing.
 require_cmd() { # cmd...
   local c missing=0

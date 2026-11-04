@@ -42,11 +42,16 @@ fi
 
 command -v virt-customize >/dev/null 2>&1 || die "virt-customize not found (apt-get install libguestfs-tools)"
 command -v qemu-img       >/dev/null 2>&1 || die "qemu-img not found (apt-get install qemu-utils)"
-# THIN-BOOTSTRAP: the vacti-engine package is NOT installed at build time (it is
-# pulled at first boot by vacti-engine-install.service). The arsenal comes entirely
-# from public sources (Debian + the pinned Kali repo + NodeSource), so no private
-# apt repo and no VACTI_APT_PRODUCER_TOKEN are needed here, and there is no private
-# repo to preflight.
+# FAT-OVA (VACTI_FAT_OVA=1, default): the vacti-engine app .deb + the
+# vacti-engine-chromium .deb are BAKED into the golden disk at virt-customize time
+# (staged below from ENGINE_DEBS_DIR, installed inside provision.sh), so first boot
+# is pure enrollment with no apt pull. The arsenal itself still comes from public
+# sources (Debian + the pinned Kali repo + NodeSource). The baked .debs are fetched
+# by the CI host from the private apt pool / CP (never a public mirror) and copied
+# in locally, so no private apt repo is wired INSIDE the guest and no engine-serving
+# credential is baked. Set VACTI_FAT_OVA=0 (or leave ENGINE_DEBS_DIR unset) to keep
+# the THIN-BOOTSTRAP form: the engine .deb is pulled at first boot by
+# vacti-engine-install.service using the enrollment token.
 
 mkdir -p "$WORK" "$CACHE" "$OUT"
 
@@ -177,6 +182,25 @@ chmod 0755 "${STAGE}/opt/vacti-build/install-ghidra.sh"
 # rm -rf's it), so only its effects ship, not the installer.
 cp -a "${HERE}/install-engine-extras.sh" "${STAGE}/opt/vacti-build/install-engine-extras.sh"
 chmod 0755 "${STAGE}/opt/vacti-build/install-engine-extras.sh"
+# FAT-OVA: stage the engine + chromium .debs for a build-time bake. The CI host
+# fetches them from the private apt pool / CP into ${ENGINE_DEBS_DIR}; we copy them
+# under /opt/vacti-build/engine-debs (FINALIZE rm -rf's that whole tree, so the
+# .debs themselves never ship - only their INSTALLED effect) and provision.sh
+# installs them (chromium first, then the engine). Gracefully falls back to the
+# THIN-BOOTSTRAP path when VACTI_FAT_OVA is off OR no .debs are supplied, so an
+# unconfigured local build (no ENGINE_DEBS_DIR) still produces a valid thin image.
+if [[ "${VACTI_FAT_OVA:-1}" =~ ^(1|true|yes|on)$ ]]; then
+  if [[ -n "${ENGINE_DEBS_DIR:-}" ]] && compgen -G "${ENGINE_DEBS_DIR}/vacti-engine_"*.deb >/dev/null 2>&1; then
+    log "FAT-OVA: staging baked engine + chromium .debs from ${ENGINE_DEBS_DIR}"
+    install -d "${STAGE}/opt/vacti-build/engine-debs"
+    cp -a "${ENGINE_DEBS_DIR}"/*.deb "${STAGE}/opt/vacti-build/engine-debs/"
+    ls -l "${STAGE}/opt/vacti-build/engine-debs/" | sed 's/^/[golden]   /'
+  else
+    log "FAT-OVA requested but no engine .debs found in ENGINE_DEBS_DIR='${ENGINE_DEBS_DIR:-<unset>}' - falling back to THIN bootstrap (engine pulled at first boot)"
+  fi
+else
+  log "VACTI_FAT_OVA=0 - THIN bootstrap (engine .deb pulled at first boot, not baked)"
+fi
 # CTF arsenal (opt-in): stage the installer + its apt list; provision.sh runs it
 # only when VACTI_CTF_ARSENAL=1. Both live under /opt/vacti-build, which FINALIZE
 # rm -rf's, so no CTF tool manifest/installer is left on the shipped image.
@@ -193,10 +217,14 @@ chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/va
            "${STAGE}/opt/vacti-build/apply-branding.sh"
 
 # --- 4. the provisioning script that runs INSIDE the guest --------------------
-# THIN-BOOTSTRAP: no private apt repo is wired here and the vacti-engine package is
-# NOT installed. The arsenal is installed from public sources only (Debian + the
-# pinned Kali repo + NodeSource); the engine .deb is pulled at first boot by
-# vacti-engine-install.service using the enrollment token.
+# FAT-OVA: no private apt repo is wired INSIDE the guest; the engine + chromium
+# .debs staged above (copy-in under /opt/vacti-build/engine-debs) are installed
+# offline from local files with `apt-get install ./*.deb`, resolving nodejs>=22
+# (NodeSource) + ca-certificates/curl/jq from the already-configured apt cache.
+# The arsenal is installed from public sources only (Debian + the pinned Kali repo
+# + NodeSource). When no engine .debs were staged (VACTI_FAT_OVA=0 or ENGINE_DEBS_DIR
+# unset), provision.sh skips the bake and the THIN-BOOTSTRAP path applies: the engine
+# .deb is pulled at first boot by vacti-engine-install.service using the enroll token.
 cat > "${WORK}/provision.sh" <<PROV
 #!/usr/bin/env bash
 set -euo pipefail
@@ -275,9 +303,12 @@ if [[ -d /opt/vacti-build/kali-repo ]]; then
   install -m0644 /opt/vacti-build/kali-repo/kali-pin.pref /etc/apt/preferences.d/kali-pin
 fi
 
-# THIN-BOOTSTRAP: no vacti private apt source / credential is wired at build time.
-# The engine .deb is pulled at first boot (vacti-engine-install.service) from the
-# private repo using the enrollment token. Only public sources are used below.
+# FAT-OVA: no vacti private apt source / credential is wired at build time. When
+# the engine + chromium .debs were staged (VACTI_FAT_OVA=1), they are installed
+# OFFLINE from local files further below (after NodeSource 22 is added, before
+# install-engine-extras.sh). When they were NOT staged, this stays a THIN build:
+# the engine .deb is pulled at first boot (vacti-engine-install.service) from the
+# private repo using the enrollment token. Only public sources are used for the arsenal.
 
 # Node.js 22 from NodeSource (Debian trixie ships 20, engine requires >= 22)
 echo "[prov] adding NodeSource Node.js 22.x repo"
@@ -343,12 +374,47 @@ if [[ -x /opt/vacti-build/install-ghidra.sh ]]; then
     /opt/vacti-build/install-ghidra.sh || echo "[prov][warn] Ghidra install partial (runtime self-heal/minting covers it)"
 fi
 
+# --- FAT-OVA: bake the engine + chromium from the staged local .debs ----------
+# Runs AFTER NodeSource 22 + the arsenal (so nodejs>=22, ca-certificates, curl, jq
+# are present and dpkg Depends resolve offline from the configured apt cache) and
+# BEFORE install-engine-extras.sh (so the vacti-engine system user created by the
+# engine postinst exists and Caido lands in its home, not the /opt fallback). Only
+# runs when build-golden.sh staged the .debs (VACTI_FAT_OVA=1 + ENGINE_DEBS_DIR);
+# otherwise this is a no-op and the THIN first-boot install path applies. Install
+# chromium FIRST so the engine postinst browser self-heal (ensure-browser.sh) finds
+# it. The engine postinst's step-5 start is gated on a real VACTI_URL/VACTI_TOKEN in
+# engine.env (absent here), so at bake time it only creates the user + enables the
+# update timer; it does NOT start the service. FINALIZE removes the template
+# engine.env so first-boot enroll writes the real one.
+if compgen -G "/opt/vacti-build/engine-debs/vacti-engine_"*.deb >/dev/null 2>&1; then
+  echo "[prov] FAT-OVA: installing baked vacti-engine + vacti-engine-chromium from local .debs"
+  apt-get install -y /opt/vacti-build/engine-debs/vacti-engine-chromium_*.deb \
+                     /opt/vacti-build/engine-debs/vacti-engine_*.deb \
+    || { echo "[prov] bulk engine bake hit a snag; retrying per-package"
+         apt-get install -y /opt/vacti-build/engine-debs/vacti-engine-chromium_*.deb || echo "[prov][warn] chromium bake failed (runtime self-heal covers it)"
+         apt-get install -y /opt/vacti-build/engine-debs/vacti-engine_*.deb        || echo "[prov][FATAL] engine bake failed"; }
+  if [ -e /usr/lib/vacti-engine/dist/runner/cli.js ]; then
+    echo "[prov] FAT-OVA: engine marker present (/usr/lib/vacti-engine/dist/runner/cli.js) - bake OK"
+    # Drop a build-form marker so ONLY a fat image's first boot kicks the immediate
+    # update convergence (vacti-firstboot reads it). Absent on thin images, so the
+    # thin first-boot path is byte-for-byte unchanged. Survives FINALIZE (which only
+    # removes engine.env + enroll.token from /etc/vacti-engine). No secret.
+    install -d -m0755 /etc/vacti-engine
+    printf '# vacti FAT-OVA build marker: engine + chromium were baked at build time.\n' > /etc/vacti-engine/fat-ova
+  else
+    echo "[prov][warn] FAT-OVA: engine marker MISSING after bake; first-boot vacti-engine-install.service will self-heal"
+  fi
+else
+  echo "[prov] THIN bootstrap: no engine .debs staged; engine .deb will be pulled at first boot"
+fi
+
 # Engine MANDATORY-by-default non-apt extras (web3 slither+Foundry, interactsh-client,
 # gau, jwt_tool, Caido): baked on every image (BASE bake, not VACTI_FULL_ARSENAL-gated).
-# Runs after the arsenal install so go/pipx/git/curl exist. Thin-bootstrap: the
-# vacti-engine USER is not present yet (the engine .deb is first-boot), so the
-# installer falls back to /opt/vacti-engine for Caido; the engine relocates/self-heals
-# Caido after enrollment. The other extras land in /usr/local/bin + /opt regardless.
+# Runs after the arsenal install so go/pipx/git/curl exist. FAT-OVA: the vacti-engine
+# USER was created by the engine postinst above, so Caido installs into its home;
+# THIN: the user is not present yet (engine .deb is first-boot), so the installer
+# falls back to /opt/vacti-engine and the engine relocates/self-heals Caido after
+# enrollment. The other extras land in /usr/local/bin + /opt regardless.
 if [[ -x /opt/vacti-build/install-engine-extras.sh ]]; then
   echo "[prov] installing engine mandatory extras (web3 + interactsh/gau + jwt_tool + Caido)"
   VACTI_INTERACTSH_VERSION="${VACTI_INTERACTSH_VERSION}" VACTI_GAU_VERSION="${VACTI_GAU_VERSION}" \
