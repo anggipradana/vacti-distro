@@ -4,11 +4,13 @@
 # Checkpoints (fail on first miss):
 #   c1 OVA downloaded from HF
 #   c2 OVA -> qcow2 converted
+#   c2b (FAT-OVA) engine baked into the image BEFORE firstboot (ENGINE_MARKER on disk)
 #   c3 VM boots (qemu up, VNC reachable)
 #   c4 GUI kiosk window appears (VNC capture succeeds within 300s)
 #   c5 CP URL + short code typed into the kiosk and submitted
 #   c6 mock CP received the exchange POST (short code -> full token)
-#   c7 mock CP served the engine .deb over apt with the EXCHANGED token
+#   c7 THIN: mock CP served the engine .deb over apt with the EXCHANGED token;
+#      FAT-OVA: NO first-boot .deb pull (engine served from the baked image)
 #   c8 mock CP received the enroll POST (engine handshake)
 #
 # Reuses run-e2e.sh exports: E2E_LIB, E2E_WORK, E2E_EVIDENCE, MOCK_* , PAIRING_CODE,
@@ -45,6 +47,33 @@ qcow2="${E2E_WORK}/s1-gui.qcow2"
 bash "${E2E_LIB}/boot-vm.sh" convert "$ova" "$qcow2"
 cp_pass "c2 qcow2 ready"
 
+# Resolve the image form (fat vs thin). Precedence: explicit E2E_FAT_OVA, then the
+# build's VACTI_FAT_OVA, then AUTO-DETECT from the converted image (a baked image
+# already carries the engine marker). When none of these can decide (no env, no
+# libguestfs to probe) default to THIN so the pre-existing s1 expectation is preserved
+# exactly - this keeps the fat assertions strictly additive, never a regression.
+ENGINE_MARKER="/usr/lib/vacti-engine/dist/runner/cli.js"
+if [[ -n "${E2E_FAT_OVA:-}" ]]; then
+  :
+elif [[ -n "${VACTI_FAT_OVA:-}" ]]; then
+  E2E_FAT_OVA="$VACTI_FAT_OVA"
+else
+  image_has_file "$qcow2" "$ENGINE_MARKER"; probe=$?
+  case "$probe" in
+    0) E2E_FAT_OVA=1; e2e_log "auto-detected FAT-OVA (engine baked into the image)" ;;
+    1) E2E_FAT_OVA=0; e2e_log "auto-detected THIN image (engine not baked; first-boot install expected)" ;;
+    *) E2E_FAT_OVA=0; e2e_warn "cannot probe image form (no libguestfs); assuming THIN (pre-existing behavior)" ;;
+  esac
+fi
+
+# c2b: FAT-OVA bake assertion. When the image is fat, the engine must ALREADY be baked
+# in before first boot (proves build-golden.sh baked it). Fat-only; thin images install
+# the engine at first boot (covered by c7 below).
+if [[ "$E2E_FAT_OVA" =~ ^(1|true|yes|on)$ ]]; then
+  assert_image_has_file "$qcow2" "$ENGINE_MARKER" \
+    "c2b engine baked into OVA before firstboot (ENGINE_MARKER)"
+fi
+
 # c3: boot
 bash "${E2E_LIB}/boot-vm.sh" boot "$qcow2" "$VNC_PORT" "$PTY_LINK" "$PIDFILE"
 sleep 2
@@ -80,8 +109,19 @@ done
 assert_contains "$state" '"kind": "exchange"' "c6 exchange POST received by CP"
 assert_contains "$state" '"result": 200'     "c6b exchange returned 200"
 
-# c7: apt pull with exchanged token
-assert_contains "$state" '"is_deb": true' "c7 engine .deb pulled over apt"
+# c7: engine availability.
+#  - THIN: the engine .deb is pulled over apt at first boot with the exchanged token.
+#  - FAT:  the engine is already baked (asserted at c2b), so NO first-boot apt pull is
+#          expected; assert it did NOT happen so a silent regression to thin is caught.
+if [[ "$E2E_FAT_OVA" =~ ^(1|true|yes|on)$ ]]; then
+  if echo "$state" | grep -q '"is_deb": true'; then
+    cp_fail "c7-fat" "FAT-OVA image unexpectedly pulled the engine .deb at first boot (bake regressed to thin?)"
+  else
+    cp_pass "c7 FAT-OVA: engine served from the baked image, no first-boot apt pull"
+  fi
+else
+  assert_contains "$state" '"is_deb": true' "c7 engine .deb pulled over apt"
+fi
 
 # c8: enroll POST seen
 assert_contains "$state" '"kind": "enroll"' "c8 enroll POST received by CP"

@@ -139,5 +139,14 @@ rm -f /run/vacti-enroll.out
 # --- 4. start the engine + disable this unit ---
 log "engine.env written; starting vacti-engine and disabling ${SELF_UNIT}"
 systemctl start vacti-engine.service 2>/dev/null || log "vacti-engine start deferred to its own unit"
+# FAT-OVA ONLY: a baked engine may be older than the current release; converge now
+# instead of waiting for the update timer's OnBootSec. Gated STRICTLY on the fat-OVA
+# build marker (written only when the engine was baked at build time), so a THIN image's
+# first boot is byte-for-byte unchanged - the timer handles its first pull either way.
+# Idle-gated + fail-open inside the unit; --no-block so it never delays enrollment.
+if [[ -f "${CFG_DIR}/fat-ova" ]]; then
+  log "FAT-OVA: kicking an immediate engine update to converge the baked engine"
+  systemctl start --no-block vacti-engine-update.service 2>/dev/null || true
+fi
 systemctl disable "${SELF_UNIT}" 2>/dev/null || true
 log "first-boot enrollment complete"
