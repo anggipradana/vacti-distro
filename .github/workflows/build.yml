@@ -530,7 +530,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test (FAT: engine baked + arsenal present + ZERO baked credential)
+      - name: "Smoke test (FAT - engine baked, arsenal present, ZERO baked credential)"
         # Non-blocking: pulls the just-pushed manifest (docker auto-selects the
         # runner's amd64 child). FAT_IMAGE=1: the engine .deb is baked at build
         # time, so the published image MUST contain the vacti-engine package and
