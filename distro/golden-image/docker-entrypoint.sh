@@ -187,7 +187,10 @@ if [[ -n "$PAIRING_CODE" ]]; then
   [[ -n "$ENROLL_TOKEN" ]] || die "$(_t err_pairing_empty)"
 fi
 
-# THIN-BOOTSTRAP: the engine package is NOT baked into the published image (no
+# FAT image (FAT_IMAGE=1, the build default): the engine is already baked at
+# ${APP}/dist/runner/cli.js, so the marker check below returns early ("engine
+# already present") and NO apt pull happens; the enroll POST handshake further
+# down still runs. THIN image (FAT_IMAGE=0): the engine package is NOT baked (no
 # /usr/lib/vacti-engine, no prompt-bundle, no skill-bundle - the plain-text IP
 # never rides a public image). Pull the engine .deb now, from the private apt repo,
 # authenticated with HTTP Basic (login vacti, password = the enrollment token, or
