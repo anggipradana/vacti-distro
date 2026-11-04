@@ -8,18 +8,23 @@
 # tools, NodeSource Node 22, then the arsenal DERIVED from the vendored engine
 # manifest snapshot.
 #
-# THIN-BOOTSTRAP: the vacti-engine package is NOT baked into the image. The engine
-# .deb (dist + prompt-bundle + skill-bundle = the real IP, plus its bundled
-# Chromium) is pulled at CONTAINER START by the entrypoint from the private apt
-# repo, using the per-run enrollment token. A published image therefore carries NO
-# engine code and NO plain-text methodology for anyone to inspect.
+# ENGINE BAKE MODE (FAT_IMAGE, default 1): the FAT image installs the vacti-engine
+# .deb (dist + prompt-bundle + skill-bundle, plus vacti-engine-chromium) at BUILD
+# time, so `docker run` starts instantly with no per-run engine pull. This is the
+# operator-requested default, parallel to the OVA fat golden image. Build with
+# FAT_IMAGE=0 to restore the THIN bootstrap, where the engine .deb is instead
+# pulled at CONTAINER START by the entrypoint from the private apt repo using the
+# per-run enrollment token (a thin image carries no engine code).
 #
-# NO SECRET AND NO PRIVATE HOST ARE BAKED. The arsenal comes entirely from public
-# sources (Debian + the pinned Kali repo + NodeSource), so the build needs neither
-# the private apt repo nor its credential: there is no secret mount and no private
-# source line in any layer. The enrollment token (and the control-plane URL) are
-# supplied per-run at "docker run", never on disk. The image is inert without a
-# live vacti enrollment.
+# NO SECRET AND NO PRIVATE HOST ARE BAKED, in either mode. The arsenal comes
+# entirely from public sources (Debian + the pinned Kali repo + NodeSource). The
+# FAT engine install authenticates to the private apt repo with a BuildKit SECRET
+# MOUNT (never a build-arg/ENV); the auth.conf and private source line are written,
+# used, then deleted within that one RUN, and the published Stage-2 image is built
+# by streaming the builder's finalized root filesystem - so `docker history` never
+# shows the credential and the final layers contain no token and no private apt
+# host. The enrollment/control-plane values are still supplied per-run at
+# "docker run"; a thin image is inert without a live vacti enrollment.
 #
 # Multi-arch: debian:trixie-slim publishes linux/amd64 and linux/arm64, and the
 # flat vacti apt repo serves a native .deb for each (dpkg resolves the right arch
@@ -186,11 +191,75 @@ RUN set -eu; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
+# --- FAT image: bake vacti-engine + vacti-engine-chromium at BUILD time --------
+# Operator-requested FAT variant (parallel to the OVA fat golden image). When
+# FAT_IMAGE=1 (the default) the engine .deb is installed HERE, at image build
+# time, instead of by the entrypoint at container start - so a `docker run` is
+# instant and needs no per-run engine pull. FAT_IMAGE=0 restores the thin
+# bootstrap (nothing engine-related is installed; the entrypoint pulls it).
+#
+# TOKEN CONFINEMENT (the whole point of the two-stage layout): the private-apt
+# credential is supplied ONLY as a BuildKit secret mount (type=secret,
+# id=vacti_apt_token) - never a build-arg, never an ENV, never echoed. The secret
+# lives on a tmpfs at /run/secrets for the duration of THIS RUN only; /run is
+# additionally excluded from the Stage-2 tar transfer. The auth.conf and the
+# private apt source line are written under /etc, used, then DELETED inside this
+# same RUN, so the finalized builder root that Stage 2 streams carries neither the
+# token nor the private apt host. `docker history` of the published image shows
+# only Stage 2's tar-ingest layer, never this RUN's command string. Net result:
+# the FAT image ships the engine (intended), and ZERO build-time credentials.
+#
+# The repo signature is verified against the public keyring baked at
+# /usr/share/keyrings/vacti-apt.gpg (signed-by=), identical to the runtime
+# thin-bootstrap, so a TLS-intercepting proxy serving a forged .deb is rejected.
+# VACTI_APT_SIGNED=0 is the operator escape hatch (legacy [trusted=yes] + warn).
+ARG FAT_IMAGE="1"
+ARG VACTI_APT_SIGNED="1"
+# hadolint ignore=DL3008,DL3015,SC2086
+RUN --mount=type=secret,id=vacti_apt_token,required=false \
+    set -eu; \
+    if [ "${FAT_IMAGE}" != "1" ]; then \
+      echo "[docker] FAT_IMAGE=${FAT_IMAGE}: thin-bootstrap - engine NOT baked (pulled at container start)"; \
+    else \
+      APT_TOKEN=""; \
+      [ -r /run/secrets/vacti_apt_token ] && APT_TOKEN="$(cat /run/secrets/vacti_apt_token)"; \
+      [ -n "${APT_TOKEN}" ] || { echo "[docker][error] FAT_IMAGE=1 requires the vacti_apt_token BuildKit secret (--secret id=vacti_apt_token,...)"; exit 1; }; \
+      [ -n "${VACTI_APT_URL}" ] || { echo "[docker][error] FAT_IMAGE=1 requires --build-arg VACTI_APT_URL=..."; exit 1; }; \
+      BASE="${VACTI_APT_URL%/}"; \
+      APT_KEYRING=/usr/share/keyrings/vacti-apt.gpg; \
+      APT_MACHINE="$(printf '%s/apt' "${BASE}" | sed -E 's#^[a-z]+://##')"; \
+      install -d -m0755 /etc/apt/auth.conf.d /etc/apt/sources.list.d; \
+      ( umask 077; printf 'machine %s login vacti password %s\n' "${APT_MACHINE}" "${APT_TOKEN}" > /etc/apt/auth.conf.d/vacti-engine.conf ); \
+      chmod 0600 /etc/apt/auth.conf.d/vacti-engine.conf; \
+      if [ "${VACTI_APT_SIGNED}" = "0" ]; then \
+        echo "[docker][warn] VACTI_APT_SIGNED=0 - apt signature verification DISABLED by operator; legacy [trusted=yes] for ${BASE}/apt"; \
+        printf '# WARNING: signature verification disabled via VACTI_APT_SIGNED=0.\ndeb [trusted=yes] %s/apt ./\n' "${BASE}" > /etc/apt/sources.list.d/vacti-engine.list; \
+      elif [ -s "${APT_KEYRING}" ] && gpg --no-default-keyring --keyring "${APT_KEYRING}" --list-keys >/dev/null 2>&1; then \
+        printf '# Repo signature verified by apt against the baked keyring.\ndeb [signed-by=%s] %s/apt ./\n' "${APT_KEYRING}" "${BASE}" > /etc/apt/sources.list.d/vacti-engine.list; \
+        echo "[docker] FAT bake: apt source wired with signed-by=${APT_KEYRING} for ${BASE}/apt"; \
+      else \
+        rm -f /etc/apt/auth.conf.d/vacti-engine.conf; \
+        echo "[docker][error] apt signing keyring ${APT_KEYRING} missing/invalid - refusing to bake an unverified engine .deb (set VACTI_APT_SIGNED=0 to override on a trusted network)"; \
+        exit 1; \
+      fi; \
+      echo "[docker] FAT bake: installing vacti-engine-chromium + ${VACTI_ENGINE_PKG} from ${BASE}/apt (token not logged)"; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends vacti-engine-chromium "${VACTI_ENGINE_PKG}"; \
+      MARKER=/usr/lib/vacti-engine/dist/runner/cli.js; \
+      [ -e "${MARKER}" ] || { rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] engine install reported success but ${MARKER} is missing"; exit 1; }; \
+      echo "[docker] FAT bake: engine present at ${MARKER}"; \
+    fi; \
+    rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; \
+    rm -rf /var/lib/apt/lists/*
+
 # --- FINALIZE identity + housekeeping (no credential in this layer) ------------
 # Zero the machine identity so every container start is a fresh engine, drop the
 # build-only staging tree and any methodology that must never ship, and prepare
 # the state volume. Mirrors the golden image FINALIZE block. Runs in the builder
 # so the transferred root filesystem is already finalized and clean.
+# FAT note: the vacti-engine tree under /usr/lib/vacti-engine (the intended baked
+# payload) is retained; only the build-time apt credential/source (removed above)
+# and build-time claude config are stripped.
 RUN set -eu; \
     rm -rf /opt/vacti-build; \
     rm -rf /root/.claude /etc/vacti-engine/.claude 2>/dev/null || true; \
