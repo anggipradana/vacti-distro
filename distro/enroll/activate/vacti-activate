@@ -203,7 +203,7 @@ done
 KIOSK_APP="/usr/local/share/vacti-kiosk/vacti-kiosk"
 PYTHON_BIN="$(command -v python3 || true)"
 
-log() { echo "[vacti-activate] $*"; }
+log() { echo "[vacti-activate] $*" >&2; }  # stderr: stdout is a DATA channel for subcmds (__exchange prints the token on stdout, kiosk captures it); a log line on stdout contaminates the captured value and the firstboot enroll.token file (fat-OVA enroll bug 2026-11-04: captured="<log>\n<token>" -> line1 became log, line2 became token, firstboot read line2 as VACTI_URL -> POST <token>/api/pentest/enroll HTTP 000).
 
 # The existing first-boot enroll unit is named vacti-firstrun.service on the
 # installed/live ISO and vacti-firstboot.service on the cloud/VM golden. Drive
