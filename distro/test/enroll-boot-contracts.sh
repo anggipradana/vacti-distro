@@ -99,6 +99,27 @@ check "firstboot early-exit uses engine_env_ready (not bare -f)" \
 check "vacti-activate early-exit uses engine_env_ready (not bare -f)" \
   has "$ACTIVATE_SH" 'if engine_env_ready; then'
 
+echo "== kiosk-stuck: enroll handoff is non-blocking + poll is content-aware =="
+# Root cause (fat-OVA kiosk stuck on "Enrolling device..." after ENV_WRITTEN):
+# stage_token_and_enroll used a BLOCKING `systemctl start` on the Type=oneshot
+# firstboot unit, so it could not reach its engine.env poll until firstboot fully
+# exited (past the engine.env write, into the slow `systemctl start vacti-engine`).
+# The fix fires the unit with --no-block and polls the content-aware predicate.
+check "stage_token_and_enroll starts firstboot with --no-block (non-blocking handoff)" \
+  has "$ACTIVATE_SH" '^[[:space:]]*systemctl start --no-block "\$fb_unit"'
+check "no BLOCKING plain 'systemctl start \"\$fb_unit\"' remains" \
+  bash -c '! grep -Eq "systemctl start \"\\\$fb_unit\"" "'"$ACTIVATE_SH"'"'
+check "enroll poll loop uses engine_env_ready, not bare -f" \
+  has "$ACTIVATE_SH" '^[[:space:]]*engine_env_ready && break'
+check "no bare -f \"\$CFG_ENV\" enrollment-complete check survives in the kiosk" \
+  bash -c '! grep -Eq "\[\[ !? ?-f \"\\\$CFG_ENV\" \]\]" "'"$ACTIVATE_SH"'"'
+# Consistency: the shell poll ceiling (150*2s=300s) must stay <= the Python kiosk
+# subprocess timeout (360s) so the shell loop, not the subprocess timeout, decides.
+check "shell poll ceiling (seq 1 150, sleep 2 = 300s) is present" \
+  has "$ACTIVATE_SH" '^[[:space:]]*for _ in \$\(seq 1 150\); do'
+check "kiosk subprocess __enroll timeout is 360s (>= shell 300s ceiling, with margin)" \
+  has "${ENR}/activate/vacti-kiosk" 'timeout=360'
+
 echo "== case 5: predicate behaviour (functional, the real engine_env_ready) =="
 # Source the exact engine_env_ready() shipped in vacti-activate and exercise it
 # against crafted engine.env files, so the test tracks the real predicate.

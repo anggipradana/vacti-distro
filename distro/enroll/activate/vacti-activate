@@ -392,10 +392,22 @@ stage_token_and_enroll() { # url token fb_unit
   chmod 0600 "$TOKEN_FILE"
   umask 022
   log "token staged; starting ${fb_unit} (token not logged)"
-  systemctl start "$fb_unit" 2>/dev/null || true
+  # --no-block is REQUIRED: vacti-firstboot is a Type=oneshot unit, so a plain
+  # `systemctl start` BLOCKS until the whole ExecStart finishes - which continues
+  # PAST the engine.env write (ENV_WRITTEN) into `systemctl start vacti-engine.service`
+  # (vacti-firstboot step 4), a slow engine boot. That stranded the kiosk on the
+  # "Enrolling device..." busy page for minutes AFTER engine.env was already present,
+  # because this function could not reach the poll loop below until firstboot fully
+  # exited. Firing the job in the background lets the poll return the instant
+  # enrollment is content-ready, exactly as the wide window below was designed to do.
+  systemctl start --no-block "$fb_unit" 2>/dev/null || true
+  # Poll on the CONTENT-aware predicate, not a bare -f: the file must exist AND carry
+  # a populated KEY=value before we call enrollment done (a zero-byte/partial remnant
+  # is not enrolled - case 5). Ceiling 150*2s=300s stays below the kiosk subprocess
+  # timeout (360s) so the shell loop, not the Python timeout, decides the outcome.
   local _
   for _ in $(seq 1 150); do
-    [[ -f "$CFG_ENV" ]] && break
+    engine_env_ready && break
     sleep 2
   done
 }
@@ -416,7 +428,7 @@ pick_dialog() {
 kiosk_yad() { # fb_unit
   local fb_unit="$1"
   local def_url="" def_token="" def_proxy="" def_tskey=""
-  while [[ ! -f "$CFG_ENV" ]]; do
+  while ! engine_env_ready; do
     local tmp key status ret
     tmp="$(mktemp -d)"
     key="$RANDOM"
@@ -505,7 +517,7 @@ kiosk_yad() { # fb_unit
     fi
 
     stage_token_and_enroll "$def_url" "$real_token" "$fb_unit"
-    if [[ -f "$CFG_ENV" ]]; then
+    if engine_env_ready; then
       yad_msg "$(_t ok_activated)"
       return 0
     fi
@@ -529,7 +541,7 @@ kiosk_zenity() { # fb_unit
   command -v nm-connection-editor >/dev/null 2>&1 && nm-connection-editor 2>/dev/null || true
   local px; px="$(zenity --entry --title="$(_t z_proxy_title)" --text="$(_t z_proxy_text)" 2>/dev/null || true)"
   apply_optional "$px" ""
-  while [[ ! -f "$CFG_ENV" ]]; do
+  while ! engine_env_ready; do
     local url token
     url="$(zenity --entry --title="$(_t title_activation)" --text="$(_t z_url_text)" 2>/dev/null || true)"
     token="$(zenity --entry --title="$(_t title_activation)" --text="$(_t z_token_text)" 2>/dev/null || true)"
@@ -556,7 +568,7 @@ kiosk_zenity() { # fb_unit
       fi
     fi
     stage_token_and_enroll "$url" "$real_token" "$fb_unit"
-    if [[ -f "$CFG_ENV" ]]; then
+    if engine_env_ready; then
       zenity --info --text="$(_t ok_activated)" 2>/dev/null || true
       return 0
     fi
@@ -654,7 +666,7 @@ case "${1:-}" in
     # existing firstboot enroll chain. Exit 0 iff engine.env appeared.
     _fb_unit="$(pick_firstboot_unit)"
     stage_token_and_enroll "${2:-}" "${VACTI_TOKEN:-}" "$_fb_unit"
-    [[ -f "$CFG_ENV" ]] && exit 0 || exit 1
+    engine_env_ready && exit 0 || exit 1
     ;;
   __finish)
     # Post-success: reboot into the (now ungated) desktop login; if reboot is not
@@ -706,7 +718,7 @@ else
   exit 1
 fi
 
-if [[ -f "$CFG_ENV" ]]; then
+if engine_env_ready; then
   log "enrollment complete - starting LightDM"
   systemctl start lightdm.service 2>/dev/null || true
   exit 0
