@@ -188,6 +188,15 @@ PROXY_ENV="${CFG_DIR}/proxy.env"
 XLOG="/var/log/vacti-activate.xorg.log"
 SELF="$0"
 
+# engine.env counts as enrolled ONLY when it exists AND is non-empty AND carries at
+# least one populated KEY=value. A zero-byte / partial remnant is a half-enrolled
+# state (case 5): keep the kiosk up instead of handing off to LightDM on an inert
+# engine. firstboot's writer is atomic so this can only ever be a legacy remnant.
+engine_env_ready() {
+  [[ -s "$CFG_ENV" ]] || return 1
+  grep -Eq '^[A-Za-z_][A-Za-z0-9_]*=.+' "$CFG_ENV"
+}
+
 # Branding logo for the kiosk header. Copied into the rootfs by build-golden
 # (branding logo/ dir) long before this runs; referenced only if present so a
 # stripped image still renders the dialog (fail-soft, works-everywhere).
@@ -659,9 +668,10 @@ esac
 # boot destination (not a bare login). Harmless in production.
 echo "VACTI_ACTIVATE_KIOSK=start" > /dev/console 2>/dev/null || true
 
-# Already enrolled? Nothing to do - let LightDM take over immediately.
-if [[ -f "$CFG_ENV" ]]; then
-  log "engine.env present - handing off to the desktop login"
+# Already enrolled? Nothing to do - let LightDM take over immediately. A present but
+# empty/partial engine.env is NOT enrolled (case 5): fall through and run the kiosk.
+if engine_env_ready; then
+  log "engine.env present and populated - handing off to the desktop login"
   systemctl start lightdm.service 2>/dev/null || true
   exit 0
 fi
