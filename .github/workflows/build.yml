@@ -412,8 +412,11 @@ jobs:
   # the apt repo: an engine-deb-published dispatch fires only AFTER the upstream
   # engine release-deb pipeline has published the .deb, and the pre-build resolve
   # step below confirms the engine version is present for both arches before the
-  # buildx legs pull it. No baked secret: the apt producer token is a BuildKit
-  # secret mount, and the enrollment token is supplied per-run at "docker run".
+  # buildx legs pull it. FAT_IMAGE=1 bakes the engine .deb at build time. The apt
+  # producer token stays a BuildKit SECRET MOUNT (never a build-arg/ENV/layer): it
+  # is used by the one FAT RUN and deleted within it, and the published image is
+  # streamed from the finalized builder root, so no credential rides a layer. The
+  # enrollment token is still supplied per-run at "docker run" for the enroll POST.
   docker-publish-ghcr:
     # workflow_dispatch and the engine-deb-published dispatch always build; a bare
     # tag push builds ONLY this job (the VM/ISO matrix is skipped at lint).
@@ -489,6 +492,7 @@ jobs:
           provenance: false   # keep a clean 2-arch manifest list
           tags: ${{ steps.ver.outputs.tags }}
           build-args: |
+            FAT_IMAGE=1
             VACTI_APT_URL=${{ env.VACTI_APT_URL }}
             VACTI_ENGINE_PKG=vacti-engine
             VACTI_ENGINE_REF=${{ steps.ver.outputs.version }}
@@ -499,28 +503,41 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test (pull the published tag + assert the engine is NOT baked)
+      - name: Smoke test (FAT: engine baked + arsenal present + ZERO baked credential)
         # Non-blocking: pulls the just-pushed manifest (docker auto-selects the
-        # runner's amd64 child). THIN-BOOTSTRAP: the engine .deb is pulled at
-        # container start, never baked, so the published image must contain NO
-        # vacti-engine package and NO /usr/lib/vacti-engine, while the arsenal is
-        # present.
+        # runner's amd64 child). FAT_IMAGE=1: the engine .deb is baked at build
+        # time, so the published image MUST contain the vacti-engine package and
+        # the /usr/lib/vacti-engine tree, alongside the arsenal. Critically it must
+        # ALSO contain ZERO build-time credentials: no apt auth.conf, no private
+        # apt source, no token in env, and no "password" string in docker history.
         continue-on-error: true
         env:
           IMAGE: ${{ steps.ver.outputs.image }}
           ENGINE_VER: ${{ steps.ver.outputs.version }}
         run: |
           docker pull "${IMAGE}:${ENGINE_VER}"
-          echo "[smoke] asserting the vacti-engine package is ABSENT (thin-bootstrap)"
+          echo "[smoke] asserting the vacti-engine package IS baked (FAT)"
           got="$(docker run --rm --entrypoint dpkg-query "${IMAGE}:${ENGINE_VER}" \
                    -W -f='${Version}' vacti-engine 2>/dev/null || true)"
-          if [ -z "$got" ]; then echo "[smoke] OK: no vacti-engine package baked"; \
-            else echo "[smoke][warn] vacti-engine ${got} is baked (IP-strip regression)"; fi
-          echo "[smoke] asserting /usr/lib/vacti-engine is ABSENT from the image"
+          if [ -n "$got" ]; then echo "[smoke] OK: vacti-engine ${got} baked"; \
+            else echo "[smoke][warn] vacti-engine package MISSING (FAT bake regression)"; fi
+          echo "[smoke] asserting the engine marker /usr/lib/vacti-engine/dist/runner/cli.js is present"
           docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
-            -c 'test ! -e /usr/lib/vacti-engine' \
-            && echo "[smoke] OK: no engine tree baked" || echo "[smoke][warn] /usr/lib/vacti-engine present (IP-strip regression)"
+            -c 'test -e /usr/lib/vacti-engine/dist/runner/cli.js' \
+            && echo "[smoke] OK: engine tree baked" || echo "[smoke][warn] engine marker absent (FAT bake regression)"
           echo "[smoke] asserting the arsenal is present (e.g. nuclei/sqlmap/nmap)"
           docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
             -c 'command -v nuclei >/dev/null || command -v sqlmap >/dev/null || command -v nmap >/dev/null' \
             && echo "[smoke] OK: arsenal present" || echo "[smoke][warn] arsenal missing (build regression)"
+          echo "[smoke] IP-exposure gate: assert NO build-time credential/source baked"
+          docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
+            -c 'test ! -e /etc/apt/auth.conf.d/vacti-engine.conf && test ! -e /etc/apt/sources.list.d/vacti-engine.list' \
+            && echo "[smoke] OK: no apt credential/source file baked" || echo "[smoke][ERROR] apt credential/source LEAKED into image"
+          echo "[smoke] asserting no token-bearing env var is set on the image"
+          if docker image inspect "${IMAGE}:${ENGINE_VER}" --format '{{json .Config.Env}}' | grep -Eiq 'TOKEN|PASSWORD|SECRET'; then \
+            echo "[smoke][ERROR] a TOKEN/PASSWORD/SECRET env var is baked into the image"; \
+          else echo "[smoke] OK: no credential env var baked"; fi
+          echo "[smoke] asserting docker history has no 'password' in any layer command"
+          if docker history --no-trunc "${IMAGE}:${ENGINE_VER}" | grep -iq 'password'; then \
+            echo "[smoke][ERROR] docker history contains 'password' (credential leak into layer metadata)"; \
+          else echo "[smoke] OK: docker history clean (no password string)"; fi
