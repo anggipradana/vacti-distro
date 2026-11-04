@@ -31,6 +31,13 @@
 # automatically), so a single buildx invocation produces one manifest list with
 # both arch children.
 
+# Default (empty) source for the `engine_debs` build-context the FAT bake bind-mounts.
+# A THIN build (FAT_IMAGE=0) stages no .debs and passes no --build-context, so the mount
+# resolves to this empty stage and /debs is simply empty (the thin branch never reads it)
+# - keeping the non-FAT path working with no extra inputs. The FAT CI build overrides this
+# name with the staged chromium dir via `--build-context engine_debs=engine-debs`.
+FROM scratch AS engine_debs
+
 # =============================================================================
 # Stage 1 (builder): the full install, INCLUDING the private-apt transaction.
 # This stage is never published; its history may name the private apt host.
@@ -215,8 +222,18 @@ RUN set -eu; \
 # VACTI_APT_SIGNED=0 is the operator escape hatch (legacy [trusted=yes] + warn).
 ARG FAT_IMAGE="1"
 ARG VACTI_APT_SIGNED="1"
+# vacti-engine-chromium is NOT in the apt pool: the ~250MB .deb exceeds the upstream
+# 100MB request-body cap, so the engine release-deb pipeline tolerates its 413 and
+# ships it ONLY as a GitHub Release asset (the fleet self-heals the browser via
+# ensure-browser.sh). It is therefore staged at workflow time (ci/fetch-engine-debs.sh,
+# exactly as the OVA bake does: signed apt pool preferred, GitHub Release fallback) and
+# bind-mounted here as the `engine_debs` build-context, so this FAT RUN installs the
+# arch-matched chromium .deb locally while vacti-engine itself still comes from the
+# signed, keyring-verified apt pool. The mount is a tmpfs-style bind (not a COPY), so no
+# .deb ever rides a published layer.
 # hadolint ignore=DL3008,DL3015,SC2086
 RUN --mount=type=secret,id=vacti_apt_token,required=false \
+    --mount=type=bind,from=engine_debs,target=/debs \
     set -eu; \
     if [ "${FAT_IMAGE}" != "1" ]; then \
       echo "[docker] FAT_IMAGE=${FAT_IMAGE}: thin-bootstrap - engine NOT baked (pulled at container start)"; \
@@ -242,9 +259,12 @@ RUN --mount=type=secret,id=vacti_apt_token,required=false \
         echo "[docker][error] apt signing keyring ${APT_KEYRING} missing/invalid - refusing to bake an unverified engine .deb (set VACTI_APT_SIGNED=0 to override on a trusted network)"; \
         exit 1; \
       fi; \
-      echo "[docker] FAT bake: installing vacti-engine-chromium + ${VACTI_ENGINE_PKG} from ${BASE}/apt (token not logged)"; \
+      DEB_ARCH="$(dpkg --print-architecture)"; \
+      CHROMIUM_DEB="$(ls -1 /debs/vacti-engine-chromium_*_"${DEB_ARCH}".deb 2>/dev/null | head -n1 || true)"; \
+      [ -n "${CHROMIUM_DEB}" ] || { rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] FAT_IMAGE=1 needs the vacti-engine-chromium .deb for ${DEB_ARCH} in the engine_debs build-context (stage it with ci/fetch-engine-debs.sh ${DEB_ARCH}); chromium is not in the apt pool (exceeds the upstream 100MB upload cap) so it must be fetched at workflow time like the OVA bake"; exit 1; }; \
+      echo "[docker] FAT bake: installing ${VACTI_ENGINE_PKG} (signed apt pool) + vacti-engine-chromium (${DEB_ARCH} local .deb) [token not logged]"; \
       apt-get update; \
-      apt-get install -y --no-install-recommends vacti-engine-chromium "${VACTI_ENGINE_PKG}"; \
+      apt-get install -y --no-install-recommends "${VACTI_ENGINE_PKG}" "${CHROMIUM_DEB}"; \
       MARKER=/usr/lib/vacti-engine/dist/runner/cli.js; \
       [ -e "${MARKER}" ] || { rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] engine install reported success but ${MARKER} is missing"; exit 1; }; \
       echo "[docker] FAT bake: engine present at ${MARKER}"; \

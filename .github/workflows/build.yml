@@ -501,6 +501,33 @@ jobs:
             fi
           done
 
+      - name: Stage vacti-engine-chromium .debs (amd64 + arm64) for the FAT bake
+        # The chromium package is NOT in the apt pool: the ~250MB .deb exceeds the
+        # upstream 100MB request-body cap, so the engine release-deb pipeline tolerates
+        # its 413 and ships it ONLY as a GitHub Release asset (the fleet self-heals the
+        # browser via ensure-browser.sh). The OVA golden bake already stages it with
+        # ci/fetch-engine-debs.sh (signed apt pool preferred, GitHub Release fallback);
+        # the multi-arch Docker FAT bake needs the same for BOTH arches, because one
+        # buildx invocation builds amd64 + arm64 and each leg dpkg-installs the arch-
+        # matched .deb locally (vacti-engine itself still installs from the signed apt
+        # pool inside the build). VACTI_ENGINE_REF is intentionally NOT pinned here:
+        # chromium is a build-number package independent of the engine release, and the
+        # Docker FAT bake installs vacti-engine as latest-in-pool, so the latest release
+        # asset is the right chromium.
+        env:
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+          GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p engine-debs
+          ci/fetch-engine-debs.sh amd64 engine-debs
+          ci/fetch-engine-debs.sh arm64 engine-debs
+          for a in amd64 arm64; do
+            ls engine-debs/vacti-engine-chromium_*_"${a}".deb >/dev/null 2>&1 \
+              || { echo "::error::no vacti-engine-chromium .deb for ${a} (apt pool + GitHub release both missed); cannot bake the FAT image"; exit 1; }
+          done
+          echo "[docker] staged chromium .debs for the FAT bake:"
+          ls -1 engine-debs/vacti-engine-chromium_*.deb
+
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -525,6 +552,8 @@ jobs:
             VACTI_ENGINE_REF=${{ steps.ver.outputs.version }}
             VACTI_FULL_ARSENAL=${{ env.VACTI_FULL_ARSENAL }}
             VACTI_CTF_ARSENAL=${{ env.VACTI_CTF_ARSENAL }}
+          build-contexts: |
+            engine_debs=engine-debs
           secrets: |
             vacti_apt_token=${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
           cache-from: type=gha
