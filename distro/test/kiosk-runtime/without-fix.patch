@@ -1,0 +1,19 @@
+--- a/vacti-activate
++++ b/vacti-activate
+@@ -400,14 +400,14 @@
+   # because this function could not reach the poll loop below until firstboot fully
+   # exited. Firing the job in the background lets the poll return the instant
+   # enrollment is content-ready, exactly as the wide window below was designed to do.
+-  systemctl start --no-block "$fb_unit" 2>/dev/null || true
++  systemctl start "$fb_unit" 2>/dev/null || true
+   # Poll on the CONTENT-aware predicate, not a bare -f: the file must exist AND carry
+   # a populated KEY=value before we call enrollment done (a zero-byte/partial remnant
+   # is not enrolled - case 5). Ceiling 150*2s=300s stays below the kiosk subprocess
+   # timeout (360s) so the shell loop, not the Python timeout, decides the outcome.
+   local _
+   for _ in $(seq 1 150); do
+-    engine_env_ready && break
++    [[ -f "$CFG_ENV" ]] && break
+     sleep 2
+   done
+ }

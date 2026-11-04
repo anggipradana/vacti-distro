@@ -60,5 +60,21 @@ else
   echo "  distro/test/enroll-boot-contracts.sh missing; skipping"
 fi
 
+echo "== kiosk-stuck runtime test (container) =="
+# EMPIRICAL runtime proof that --no-block (vacti-activate:403) + the content-aware
+# engine_env_ready poll (vacti-activate:410) actually change observable behaviour:
+# it sources the real activate script and times stage_token_and_enroll under a
+# Type=oneshot systemctl stub. Needs Docker to isolate from host systemd; LOUD SKIP
+# when Docker is absent so `make lint` stays runnable anywhere.
+if command -v docker >/dev/null 2>&1; then
+  if [[ -x distro/test/kiosk-runtime/run.sh ]]; then
+    bash distro/test/kiosk-runtime/run.sh || rc=1
+  else
+    echo "  distro/test/kiosk-runtime/run.sh missing; skipping"
+  fi
+else
+  echo "  !!! SKIP: docker not available - kiosk-stuck runtime test NOT executed !!!"
+fi
+
 [[ $rc -eq 0 ]] && echo "== lint PASS ==" || echo "== lint FAIL ==" >&2
 exit $rc
