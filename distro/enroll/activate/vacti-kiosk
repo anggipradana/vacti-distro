@@ -46,6 +46,24 @@ SHORT_CODE_RE = re.compile(r"^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$")
 # word in any one language).
 IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 
+# Shared progress log written by vacti-firstboot + vacti-engine-install. We tail its
+# last line into the busy pane so the operator SEES which enrollment phase is running
+# (or stuck) without SSH - the appliance has no tailscale key typed in. Read-only,
+# fail-soft (the file may not exist until the enroll chain starts).
+PROGRESS_LOG = os.environ.get(
+    "VACTI_PROGRESS_LOG", "/var/log/vacti-firstboot-progress.log"
+)
+
+
+def _last_progress_line():
+    """Return the last non-empty line of the shared progress log, or '' (fail-soft)."""
+    try:
+        with open(PROGRESS_LOG, "r", errors="replace") as fh:
+            lines = [ln.strip() for ln in fh.readlines() if ln.strip()]
+        return lines[-1] if lines else ""
+    except Exception:
+        return ""
+
 EXIT_CODE = 0
 
 # ---------------------------------------------------------------------------
@@ -570,6 +588,16 @@ class KioskWindow(Adw.ApplicationWindow):
         self.busy_lbl.set_wrap(True)
         self.busy_lbl.set_justify(Gtk.Justification.CENTER)
         box.append(self.busy_lbl)
+        # Live per-phase detail, tailed from the shared firstboot progress log, so the
+        # operator can SEE where a long/stuck enroll is (e.g. "ENROLL_HTTP http=000")
+        # without SSH. Dim + monospace; empty until the enroll chain writes a line.
+        self.busy_detail = Gtk.Label(label="")
+        self.busy_detail.add_css_class("dim-label")
+        self.busy_detail.add_css_class("caption")
+        self.busy_detail.set_wrap(True)
+        self.busy_detail.set_justify(Gtk.Justification.CENTER)
+        self.busy_detail.set_selectable(True)
+        box.append(self.busy_detail)
         page.set_child(box)
         return page
 
@@ -621,12 +649,46 @@ class KioskWindow(Adw.ApplicationWindow):
     def _busy(self, text):
         self.busy_lbl.set_text(text)
         self.root.set_visible_child_name("busy")
+        # Start tailing the shared progress log so the operator sees the live phase.
+        self._start_progress_tail()
+
+    def _start_progress_tail(self):
+        if getattr(self, "_progress_timer", None):
+            return
+        self._tail_progress()  # paint immediately
+        self._progress_timer = GLib.timeout_add_seconds(2, self._tail_progress)
+
+    def _stop_progress_tail(self):
+        tid = getattr(self, "_progress_timer", None)
+        if tid:
+            GLib.source_remove(tid)
+            self._progress_timer = None
+
+    def _tail_progress(self):
+        line = _last_progress_line()
+        if line:
+            self.busy_detail.set_text(line)
+        return True  # keep the timer alive while busy
 
     def _back_to_main(self, toast=None):
+        self._stop_progress_tail()
         self.root.set_visible_child_name("main")
         self.activate_btn.set_sensitive(True)
         if toast:
             self._toast(toast)
+        return False
+
+    def _enroll_failed(self, base_msg):
+        # Persistent (not a transient toast) so the operator can read the diagnostic.
+        # Append the last progress line - it names the exact stuck/failed phase.
+        self._stop_progress_tail()
+        last = _last_progress_line()
+        msg = base_msg
+        if last:
+            msg = "{}  [{}]".format(base_msg, last)
+        self.root.set_visible_child_name("main")
+        self.activate_btn.set_sensitive(True)
+        self._banner(msg)
         return False
 
     # ---- network actions ---------------------------------------------------
@@ -725,12 +787,11 @@ class KioskWindow(Adw.ApplicationWindow):
         if rc == 0:
             GLib.idle_add(self._show_success)
         else:
-            GLib.idle_add(
-                self._back_to_main,
-                t("err_enroll"),
-            )
+            # Persist the failure + the exact stuck/failed phase from the progress log.
+            GLib.idle_add(self._enroll_failed, t("err_enroll"))
 
     def _show_success(self):
+        self._stop_progress_tail()
         self.success_page.set_icon_name("emblem-ok-symbolic")
         self.success_page.set_title(t("success_title"))
         self._reboot_left = 10
