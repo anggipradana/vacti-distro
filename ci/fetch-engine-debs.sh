@@ -107,7 +107,32 @@ fetch_from_github() {
      --dir "$OUTDIR" --clobber 2>/dev/null || return 1
 }
 
-# --- 3. GHCR chromium backfill (public OCI artifact; NO token) ----------------
+# --- 3. local chromium build from the engine's OWN bundled playwright-core -----
+# Preferred chromium source: BUILD the vacti-engine-chromium .deb right here, with no cross-repo auth
+# and no secret. chromium is the open-source Playwright-pinned build, downloaded anonymously from the
+# PUBLIC Playwright CDN; the vacti-engine app .deb fetched above bundles playwright-core, whose
+# browsers.json pins the exact revision, so the built chromium is version-locked to the baked engine.
+# ci/build-chromium-deb.sh extracts ONLY playwright-core (no methodology IP), installs the pinned
+# chromium (cross-arch via PLAYWRIGHT_HOST_PLATFORM_OVERRIDE when the runner arch differs), and packages
+# it. This needs the engine .deb already present; it runs AFTER have_engine. Fails soft -> GHCR tier.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+build_chromium_local() {
+  have_engine || { warn "no engine .deb present yet; cannot build chromium locally"; return 1; }
+  command -v node >/dev/null 2>&1 || { warn "node unavailable; skipping local chromium build"; return 1; }
+  local builder="${SCRIPT_DIR}/build-chromium-deb.sh" engine_deb
+  [[ -x "$builder" || -f "$builder" ]] || { warn "ci/build-chromium-deb.sh missing"; return 1; }
+  # Prefer the arch-matched engine .deb; playwright-core is pure JS so any engine .deb also works.
+  engine_deb="$(ls -1 "${OUTDIR}"/vacti-engine_*_"${ARCH}".deb 2>/dev/null | head -n1 || true)"
+  [[ -n "$engine_deb" ]] || engine_deb="$(ls -1 "${OUTDIR}"/vacti-engine_*.deb 2>/dev/null | head -n1 || true)"
+  [[ -n "$engine_deb" ]] || { warn "could not locate an engine .deb in ${OUTDIR}"; return 1; }
+  log "building chromium locally from $(basename "$engine_deb") (public Playwright CDN; no secret)"
+  bash "$builder" --engine-deb "$engine_deb" --arch "$ARCH" --out "$OUTDIR" \
+    || { warn "local chromium build failed; falling back to the GHCR backfill"; return 1; }
+  have_chromium
+}
+
+# --- 4. GHCR chromium backfill (public OCI artifact; NO token) ----------------
 # The chromium .deb is STRUCTURALLY absent from the apt pool: its ~226MB (amd64) / ~285MB (arm64)
 # body exceeds the upstream 100MB (Cloudflare free-plan) request-body cap, so the engine's apt-pool
 # upload takes a tolerated HTTP 413 and chromium never lands in the pool (the fleet self-heals the
@@ -150,9 +175,14 @@ if fetch_from_pool && have_engine && have_chromium; then
   log "fetched engine + chromium from the private apt pool"
 elif fetch_from_github && have_engine && have_chromium; then
   log "fetched engine + chromium from the GitHub release fallback"
-elif have_engine && fetch_chromium_from_ghcr; then
+elif have_engine && build_chromium_local; then
   # Steady state for this build: the apt pool serves vacti-engine but NOT chromium (chromium is over
-  # the upstream 100MB upload cap), so chromium is backfilled ALONE from the public GHCR artifact.
+  # the upstream 100MB upload cap), so chromium is BUILT here from the engine's own pinned playwright-core
+  # (public Playwright CDN, no secret, no cross-repo auth, cross-arch on one runner).
+  log "fetched engine (apt pool) + chromium (built locally from the engine's pinned playwright-core)"
+elif have_engine && fetch_chromium_from_ghcr; then
+  # Last-resort fallback kept for continuity: pull chromium from the public GHCR OCI artifact if the
+  # local build could not run (e.g. no node on the runner). Only works if that package is public.
   log "fetched engine (apt pool) + chromium (GHCR backfill)"
 else
   warn "could not obtain both .debs (engine=$(have_engine && echo yes || echo no), chromium=$(have_chromium && echo yes || echo no)); build-golden.sh will fall back to THIN bootstrap"
