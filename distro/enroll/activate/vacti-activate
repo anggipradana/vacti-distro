@@ -290,6 +290,15 @@ resolve_exchange() { # url code
     200)
       tok="$(jq -r '.token // empty' "$out" 2>/dev/null)"
       [[ -z "$tok" ]] && tok="$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$out" | head -n1)"
+      # OPTION A: the CP may auto-deliver the operator's stored Tailscale auth key on the SAME
+      # exchange response so the clipboard-less appliance only needs the short code. Parse it and
+      # join the tailnet HERE (the key stays in this function, is never printed to stdout - only the
+      # token is - and never touches a persisted file). Absent/empty => appliance stays off-tailnet
+      # unless a manual key was entered, exactly as before.
+      local ts
+      ts="$(jq -r '.tsAuthKey // empty' "$out" 2>/dev/null)"
+      [[ -z "$ts" ]] && ts="$(sed -n 's/.*"tsAuthKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$out" | head -n1)"
+      [[ -n "$ts" ]] && ts_join_auto "$ts"
       if [[ -n "$tok" ]]; then printf '%s' "$tok"; rc=0; else rc=1; fi
       ;;
     404) rc=44 ;;
@@ -307,6 +316,47 @@ reachable() { # url
   curl -sS -o /dev/null --connect-timeout 10 --max-time 15 -I "${base}/" >/dev/null 2>&1
 }
 
+# Best-effort join the tailnet with an auth key. Single source of truth for the
+# `tailscale up` call so the manual Opsional-tab key AND the auth key auto-delivered
+# on the exchange response (option A) both go through the exact same path. The key
+# value is NEVER logged and never placed on a persisted file.
+ts_join() { # tskey
+  local ts="${1:-}"
+  if [[ -n "$ts" ]] && command -v tailscale >/dev/null 2>&1; then
+    tailscale up --authkey="$ts" --accept-routes >/dev/null 2>&1 || true
+    log "tailscale up attempted (key not logged)"
+  fi
+}
+
+# True if the node is already on the tailnet (BackendState Running + a 100.x IP). Used to guard the
+# AUTO join below so an operator-entered manual override key (applied earlier via apply_optional) is
+# never clobbered by the key the CP auto-delivers on the exchange response. Never throws.
+ts_connected() {
+  command -v tailscale >/dev/null 2>&1 || return 1
+  if command -v jq >/dev/null 2>&1; then
+    local js; js="$(tailscale status --json 2>/dev/null || true)"
+    [[ -n "$js" ]] || return 1
+    [[ "$(printf '%s' "$js" | jq -r '.BackendState // empty' 2>/dev/null)" == "Running" ]] \
+      && printf '%s' "$js" | jq -e '.Self.TailscaleIPs // [] | map(select(startswith("100."))) | length > 0' >/dev/null 2>&1
+  else
+    # No jq: a self tailnet IP in the CGNAT 100.64.0.0/10 range is the authoritative "already joined"
+    # signal (tailscale ip emits ONLY the node's own addresses, so this cannot false-match a peer).
+    tailscale ip -4 2>/dev/null | grep -Eq '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'
+  fi
+}
+
+# Auto-join from the exchange-delivered key: a no-op when a manual override key already brought the
+# node onto the tailnet (ts_connected), so the operator's explicit override always wins.
+ts_join_auto() { # tskey
+  local ts="${1:-}"
+  [[ -z "$ts" ]] && return 0
+  if ts_connected; then
+    log "tailscale already connected; keeping the existing (manual) key"
+    return 0
+  fi
+  ts_join "$ts"
+}
+
 # Persist optional proxy (for the enroll curl AND the engine) and best-effort
 # bring up Tailscale if an auth key was supplied. Neither value is logged.
 apply_optional() { # proxy tskey
@@ -319,10 +369,7 @@ apply_optional() { # proxy tskey
     export HTTPS_PROXY="$px" HTTP_PROXY="$px" https_proxy="$px" http_proxy="$px"
     log "proxy saved to ${PROXY_ENV}"
   fi
-  if [[ -n "$ts" ]] && command -v tailscale >/dev/null 2>&1; then
-    tailscale up --authkey="$ts" --accept-routes >/dev/null 2>&1 || true
-    log "tailscale up attempted (key not logged)"
-  fi
+  ts_join "$ts"
 }
 
 # Hand the URL+token to the EXISTING enroll chain and wait for engine.env. The
