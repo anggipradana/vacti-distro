@@ -51,5 +51,14 @@ else
   echo "  ci/arsenal-sync-check.sh missing; skipping"
 fi
 
+echo "== enroll boot-chain contracts =="
+# Static contract test: guarantees the activation kiosk reappears after any reboot
+# that happens before enrollment completes (no systemd needed; safe offline).
+if [[ -x distro/test/enroll-boot-contracts.sh ]]; then
+  bash distro/test/enroll-boot-contracts.sh || rc=1
+else
+  echo "  distro/test/enroll-boot-contracts.sh missing; skipping"
+fi
+
 [[ $rc -eq 0 ]] && echo "== lint PASS ==" || echo "== lint FAIL ==" >&2
 exit $rc
