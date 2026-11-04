@@ -18,6 +18,21 @@ SELF_UNIT="${VACTI_FIRSTBOOT_UNIT:-vacti-firstboot.service}"
 log()  { echo "[vacti-firstboot] $*"; }
 die()  { echo "[vacti-firstboot][FATAL] $*" >&2; exit 1; }
 
+# Shared, operator-visible progress log. The pre-login kiosk tails this file so an
+# operator can SEE which enrollment phase is running (or stuck) WITHOUT SSH - on the
+# appliance no tailscale key is typed in, so the journal is otherwise unreachable.
+# vacti-engine-install writes to the SAME file, so the tail shows the whole chain
+# (engine bake/pull -> enroll POST). Best-effort + world-readable; never fatal.
+PROGRESS_LOG="${VACTI_PROGRESS_LOG:-/var/log/vacti-firstboot-progress.log}"
+progress() { # PHASE message...
+  local phase="${1:-STEP}"; shift || true
+  log "${phase} $*"
+  { printf '%s [vacti-firstboot] %s %s\n' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)" "$phase" "$*" \
+      >> "$PROGRESS_LOG"; } 2>/dev/null || true
+  chmod 0644 "$PROGRESS_LOG" 2>/dev/null || true
+}
+
 # Ensure sshd is up for operator access (tailscale SSH) BEFORE any early-exit or
 # die below, so the box stays reachable even when enrollment is skipped (engine.env
 # already present) or fails (no live token). openssh-server is baked and the golden
@@ -65,20 +80,53 @@ Mint a FRESH single-use token in the dashboard and supply it via a cidata.iso se
 NO long-lived fallback is baked - this image is inert without a live enrollment."
 [[ -n "$VACTI_URL" ]] || die "enroll token present but no control-plane URL (set vacti_url in the seed)"
 
-# --- 2. exchange the token for the scoped engine tokens ---
+# --- 2. exchange the token for the scoped engine tokens -----------------------
 BASE="${VACTI_URL%/}"
-log "enrolling engine_id=${ENGINE_ID} at ${BASE}/api/pentest/enroll (token not logged)"
-http_code="$(curl -sS -o /run/vacti-enroll.out -w '%{http_code}' \
-  --connect-timeout 10 --max-time 60 \
-  -H "Authorization: Bearer ${ENROLL_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -X POST "${BASE}/api/pentest/enroll" \
-  -d "{\"engine_id\":\"${ENGINE_ID}\"}" || echo "000")"
+progress TOKEN_OK "enroll token located; control-plane=${BASE}"
 
-[[ "$http_code" == "200" ]] || {
+# BOUNDED RETRY + BACKOFF. A single-shot POST made the appliance fragile to a cold
+# TLS/DNS warm-up, a transient 5xx, or a per-IP 429 window right after the exchange.
+# Retry only the TRANSIENT codes (000 no-connection / 5xx / 429); a hard client error
+# (dead/used/invalid token) will never recover, so fail fast + loud on those. Every
+# attempt and its HTTP code is written to the progress log the kiosk tails.
+ENROLL_MAX_ATTEMPTS="${VACTI_ENROLL_ATTEMPTS:-6}"
+http_code="000"
+attempt=1
+backoff=2
+while (( attempt <= ENROLL_MAX_ATTEMPTS )); do
+  progress ENROLL_POST "attempt ${attempt}/${ENROLL_MAX_ATTEMPTS} -> POST ${BASE}/api/pentest/enroll (engine_id=${ENGINE_ID}, token not logged)"
+  http_code="$(curl -sS -o /run/vacti-enroll.out -w '%{http_code}' \
+    --connect-timeout 10 --max-time 60 \
+    -H "Authorization: Bearer ${ENROLL_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -X POST "${BASE}/api/pentest/enroll" \
+    -d "{\"engine_id\":\"${ENGINE_ID}\"}" || echo "000")"
+  progress ENROLL_HTTP "attempt ${attempt}/${ENROLL_MAX_ATTEMPTS} http=${http_code}"
+  case "$http_code" in
+    200) break ;;
+    400|401|403|404|409|410)
+      body="$(cat /run/vacti-enroll.out 2>/dev/null || true)"; rm -f /run/vacti-enroll.out
+      progress ENROLL_FATAL "HTTP ${http_code} - token rejected (expired/used/invalid); re-mint in the dashboard"
+      die "enroll rejected (HTTP ${http_code}). Token likely expired/used (single-use, 3h TTL). Re-mint and retry. Response: ${body:-none}"
+      ;;
+    *)
+      # 000 (no connection) / 5xx / 429 / any transient: back off and retry.
+      if (( attempt < ENROLL_MAX_ATTEMPTS )); then
+        progress ENROLL_RETRY "HTTP ${http_code} - retrying in ${backoff}s"
+        sleep "$backoff"
+        backoff=$(( backoff * 2 )); (( backoff > 30 )) && backoff=30
+      fi
+      ;;
+  esac
+  attempt=$(( attempt + 1 ))
+done
+
+if [[ "$http_code" != "200" ]]; then
   body="$(cat /run/vacti-enroll.out 2>/dev/null || true)"; rm -f /run/vacti-enroll.out
-  die "enroll failed (HTTP ${http_code}). The token may be expired/used (single-use, 3h TTL). Re-mint and retry. Response: ${body:-none}"
-}
+  progress ENROLL_FATAL "all ${ENROLL_MAX_ATTEMPTS} attempts failed (last HTTP ${http_code})"
+  die "enroll failed after ${ENROLL_MAX_ATTEMPTS} attempts (last HTTP ${http_code}). Check CP reachability / token. Response: ${body:-none}"
+fi
+progress ENROLL_OK "HTTP 200 - scoped tokens received; writing engine.env"
 
 # --- 3. write engine.env (0600). The actual field parsing is the engine's job;
 #     we hand the response to the engine's own enroll writer if present, else
@@ -137,7 +185,7 @@ rm -f /run/vacti-enroll.out
 [[ -f "$TOKEN_FILE" ]] && shred -u "$TOKEN_FILE" 2>/dev/null || rm -f "$TOKEN_FILE" 2>/dev/null || true
 
 # --- 4. start the engine + disable this unit ---
-log "engine.env written; starting vacti-engine and disabling ${SELF_UNIT}"
+progress ENV_WRITTEN "engine.env written; starting vacti-engine and disabling ${SELF_UNIT}"
 systemctl start vacti-engine.service 2>/dev/null || log "vacti-engine start deferred to its own unit"
 # FAT-OVA ONLY: a baked engine may be older than the current release; converge now
 # instead of waiting for the update timer's OnBootSec. Gated STRICTLY on the fat-OVA
@@ -149,4 +197,4 @@ if [[ -f "${CFG_DIR}/fat-ova" ]]; then
   systemctl start --no-block vacti-engine-update.service 2>/dev/null || true
 fi
 systemctl disable "${SELF_UNIT}" 2>/dev/null || true
-log "first-boot enrollment complete"
+progress DONE "first-boot enrollment complete"

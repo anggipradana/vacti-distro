@@ -42,6 +42,20 @@ ENGINE_MARKER="/usr/lib/vacti-engine/dist/runner/cli.js"
 log() { echo "[vacti-engine-install] $*"; }
 die() { echo "[vacti-engine-install][FATAL] $*" >&2; exit 1; }
 
+# Shared, operator-visible progress log. The pre-login kiosk tails this file so an
+# operator can SEE which enrollment phase is running (or stuck) WITHOUT SSH - the
+# appliance has no tailscale key typed in, so the journal is otherwise unreachable.
+# Best-effort + world-readable; never fatal under 'set -e'.
+PROGRESS_LOG="${VACTI_PROGRESS_LOG:-/var/log/vacti-firstboot-progress.log}"
+progress() { # PHASE message...
+  local phase="${1:-STEP}"; shift || true
+  log "${phase} $*"
+  { printf '%s [vacti-engine-install] %s %s\n' \
+      "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)" "$phase" "$*" \
+      >> "$PROGRESS_LOG"; } 2>/dev/null || true
+  chmod 0644 "$PROGRESS_LOG" 2>/dev/null || true
+}
+
 # vacti_apt_keyring_valid PATH -> 0 if PATH is a non-empty, parseable OpenPGP
 # keyring. apt's own gpgv enforces the actual signature at `apt-get update`; this
 # is the pre-flight probe that decides signed-by vs the fail-closed refusal.
@@ -56,9 +70,25 @@ vacti_apt_keyring_valid() {
 
 export DEBIAN_FRONTEND=noninteractive
 
+progress START "thin-bootstrap engine provisioning check"
+
 # Already enrolled, or the engine is already on disk: nothing to do.
-[[ -f "$CFG_ENV" ]] && { log "engine.env present - engine already provisioned"; exit 0; }
-[[ -e "$ENGINE_MARKER" ]] && { log "engine already installed (${ENGINE_MARKER}) - nothing to do"; exit 0; }
+[[ -f "$CFG_ENV" ]] && { progress SKIP "engine.env present - engine already provisioned"; exit 0; }
+
+# FAT-OVA FAST PATH: the engine + chromium were baked at build time. The build marker
+# /etc/vacti-engine/fat-ova is written by build-golden.sh ONLY on a fat build, so this
+# never fires on a thin image (byte-identical control flow there). Short-circuit BEFORE
+# any apt call: a fat image must NEVER block on `apt-get update` (first-boot apt-daily
+# lock / unreachable private repo) - that hang is ordered BEFORE the enroll POST
+# (vacti-firstboot After=this unit) and is the appliance's "downloading the engine
+# forever" stall. Guard on the marker, not just the engine binary, so even a PARTIAL
+# bake (engine .deb half-installed) still skips apt; the runtime update timer self-heals.
+if [[ -f "${CFG_DIR}/fat-ova" ]]; then
+  progress FAT_OVA "fat-ova build marker present - engine baked at build time; skipping apt pull"
+  exit 0
+fi
+
+[[ -e "$ENGINE_MARKER" ]] && { progress SKIP "engine already installed (${ENGINE_MARKER}) - nothing to do"; exit 0; }
 
 # --- locate the per-boot enroll token + control-plane URL --------------------
 # Same precedence as vacti-firstboot so the headless/seed path works too. NONE of
@@ -89,7 +119,7 @@ if [[ -z "$ENROLL_TOKEN" ]] && grep -q 'vacti.enroll_token=' /proc/cmdline 2>/de
 fi
 
 if [[ -z "$ENROLL_TOKEN" || -z "$VACTI_URL" ]]; then
-  log "no per-boot enroll token/url located yet - deferring (vacti-firstboot handles the missing-token path)"
+  progress DEFER "no per-boot enroll token/url located yet - deferring (vacti-firstboot handles the missing-token path)"
   exit 0
 fi
 
@@ -136,12 +166,37 @@ else
 fi
 
 # --- pull the engine .deb -----------------------------------------------------
-log "apt-get update + install ${ENGINE_PKG} (engine not baked into the public image)"
-apt-get update || die "apt-get update failed against ${BASE}/apt (check network / enrollment token)"
-apt-get install -y --no-install-recommends "${ENGINE_PKG}" \
-  || die "apt-get install ${ENGINE_PKG} failed (token may be expired/invalid, or the repo is unreachable)"
+# BOUNDED so the thin-bootstrap path can NEVER hang the enroll chain forever. apt
+# otherwise waits indefinitely on the first-boot apt-daily/unattended-upgrades dpkg
+# lock and has no network ceiling of its own; cap all three:
+#   - DPkg::Lock::Timeout : wait at most this long for the frontend lock, then fail
+#   - Acquire::*::Timeout + Retries : bounded network attempts
+#   - outer `timeout` : a hard wall-clock ceiling per apt invocation (coreutils, baked)
+# On a timeout/failure we die LOUDLY (exit 1). Because vacti-firstboot only Wants=
+# (not Requires=) this unit, that failure does NOT block firstboot: it still fires the
+# enroll POST + writes engine.env, and the engine's own update timer converges the .deb.
+APT_LOCK_WAIT="${VACTI_APT_LOCK_WAIT:-120}"
+APT_CMD_TIMEOUT="${VACTI_APT_CMD_TIMEOUT:-300}"
+APT_OPTS=(-o "DPkg::Lock::Timeout=${APT_LOCK_WAIT}"
+          -o 'Acquire::http::Timeout=30' -o 'Acquire::https::Timeout=30'
+          -o 'Acquire::Retries=2')
+apt_bounded() { # apt-get subcommand + args
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${APT_CMD_TIMEOUT}" apt-get "$@" "${APT_OPTS[@]}"
+  else
+    apt-get "$@" "${APT_OPTS[@]}"
+  fi
+}
+
+progress APT_UPDATE "apt-get update against ${BASE}/apt (bounded: lock=${APT_LOCK_WAIT}s, cmd=${APT_CMD_TIMEOUT}s)"
+apt_bounded update \
+  || die "apt-get update failed/timed out against ${BASE}/apt (check network / enrollment token / apt lock). firstboot still enrolls; the engine update timer will retry the pull."
+progress APT_INSTALL "apt-get install ${ENGINE_PKG}"
+apt_bounded install -y --no-install-recommends "${ENGINE_PKG}" \
+  || die "apt-get install ${ENGINE_PKG} failed/timed out (token may be expired/invalid, or the repo is unreachable). firstboot still enrolls; the engine update timer will retry the pull."
 
 [[ -e "$ENGINE_MARKER" ]] || die "install reported success but ${ENGINE_MARKER} is missing - refusing to continue"
+progress APT_OK "engine package installed (${ENGINE_MARKER} present)"
 
 # Keep the .list + auth.conf in place: the engine's own update path re-uses the
 # private apt source. vacti-firstboot now runs next (After=), does the enroll POST,
