@@ -18,6 +18,8 @@
 #   VACTI_ENGINE_REF           optional: pin the vacti-engine version; empty = latest
 #   VACTI_ENGINE_REPO          GH fallback repo (default anggipradana/vacti-pentest-engine)
 #   GH_TOKEN                   token with read access to the engine repo (GH fallback)
+#   VACTI_CHROMIUM_GHCR        GHCR repo for the chromium OCI artifact
+#                              (default ghcr.io/anggipradana/vacti-engine-chromium)
 set -euo pipefail
 
 ARCH="${1:?usage: fetch-engine-debs.sh <arch> <outdir>}"
@@ -105,10 +107,53 @@ fetch_from_github() {
      --dir "$OUTDIR" --clobber 2>/dev/null || return 1
 }
 
+# --- 3. GHCR chromium backfill (public OCI artifact; NO token) ----------------
+# The chromium .deb is STRUCTURALLY absent from the apt pool: its ~226MB (amd64) / ~285MB (arm64)
+# body exceeds the upstream 100MB (Cloudflare free-plan) request-body cap, so the engine's apt-pool
+# upload takes a tolerated HTTP 413 and chromium never lands in the pool (the fleet self-heals the
+# browser at runtime via ensure-browser.sh). The engine GH Release has it, but that is a PRIVATE
+# cross-repo release this CI cannot read without a PAT the operator will not add. So the engine
+# release pipeline also mirrors chromium to GHCR as a PUBLIC OCI artifact (packaging/publish-chromium-
+# ghcr.sh, same owner, built-in GITHUB_TOKEN), which is pulled here anonymously - no secret needed.
+# This backfills ONLY chromium; vacti-engine itself still comes from the signed apt pool above.
+GHCR_REPO="${VACTI_CHROMIUM_GHCR:-ghcr.io/anggipradana/vacti-engine-chromium}"
+
+ensure_oras() {
+  command -v oras >/dev/null 2>&1 && return 0
+  local ver="${ORAS_VERSION:-1.3.6}" tmp url
+  tmp="$(mktemp -d)" || return 1
+  url="https://github.com/oras-project/oras/releases/download/v${ver}/oras_${ver}_linux_amd64.tar.gz"
+  warn "oras not found; installing ${ver}"
+  curl -fsSL "$url" -o "${tmp}/oras.tgz" || { rm -rf "$tmp"; return 1; }
+  tar -C "$tmp" -xzf "${tmp}/oras.tgz" oras || { rm -rf "$tmp"; return 1; }
+  # Keep the binary OUT of OUTDIR so it never rides the docker build-context / OVA stage dir.
+  chmod 0755 "${tmp}/oras" || { rm -rf "$tmp"; return 1; }
+  export PATH="${tmp}:${PATH}"
+  command -v oras >/dev/null 2>&1
+}
+
+fetch_chromium_from_ghcr() {
+  ensure_oras || { warn "could not obtain the oras CLI; skipping GHCR chromium backfill"; return 1; }
+  # If the package is private rather than public, an anonymous pull 401s; a GH token (if present) is
+  # used best-effort so an operator who GRANTED the package to this repo instead of making it public
+  # also works. A public package needs no auth at all.
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    printf '%s' "${GH_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR:-x-access-token}" --password-stdin >/dev/null 2>&1 || true
+  fi
+  local oci_tag="latest-${ARCH}"
+  log "GHCR backfill: ${GHCR_REPO}:${oci_tag} -> ${OUTDIR}"
+  oras pull "${GHCR_REPO}:${oci_tag}" -o "${OUTDIR}" >/dev/null 2>&1 || { warn "oras pull ${GHCR_REPO}:${oci_tag} failed (package public? pushed?)"; return 1; }
+  have_chromium
+}
+
 if fetch_from_pool && have_engine && have_chromium; then
   log "fetched engine + chromium from the private apt pool"
 elif fetch_from_github && have_engine && have_chromium; then
   log "fetched engine + chromium from the GitHub release fallback"
+elif have_engine && fetch_chromium_from_ghcr; then
+  # Steady state for this build: the apt pool serves vacti-engine but NOT chromium (chromium is over
+  # the upstream 100MB upload cap), so chromium is backfilled ALONE from the public GHCR artifact.
+  log "fetched engine (apt pool) + chromium (GHCR backfill)"
 else
   warn "could not obtain both .debs (engine=$(have_engine && echo yes || echo no), chromium=$(have_chromium && echo yes || echo no)); build-golden.sh will fall back to THIN bootstrap"
 fi
