@@ -18,6 +18,18 @@ SELF_UNIT="${VACTI_FIRSTBOOT_UNIT:-vacti-firstboot.service}"
 log()  { echo "[vacti-firstboot] $*"; }
 die()  { echo "[vacti-firstboot][FATAL] $*" >&2; exit 1; }
 
+# engine.env counts as "enrolled" ONLY when it exists AND is non-empty AND carries
+# at least one populated KEY=value. A zero-byte / truncated remnant (an interrupted
+# write on a pre-fix image, or an external writer that produced nothing) is NOT an
+# enrolled state: honouring it would strand the operator at a login greeter on an
+# inert engine (case 5). Treat such a remnant as absent so enrollment re-runs and
+# the kiosk reappears. The atomic publish below guarantees this can never be created
+# going forward; this predicate is the belt-and-suspenders read side.
+engine_env_ready() {
+  [[ -s "$CFG_ENV" ]] || return 1
+  grep -Eq '^[A-Za-z_][A-Za-z0-9_]*=.+' "$CFG_ENV"
+}
+
 # Shared, operator-visible progress log. The pre-login kiosk tails this file so an
 # operator can SEE which enrollment phase is running (or stuck) WITHOUT SSH - on the
 # appliance no tailscale key is typed in, so the journal is otherwise unreachable.
@@ -40,7 +52,10 @@ progress() { # PHASE message...
 # Non-fatal (|| true) so it can never block enrollment under 'set -e'.
 systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
 
-[[ -f "$CFG_ENV" ]] && { log "engine.env already present - nothing to do"; exit 0; }
+if engine_env_ready; then log "engine.env already present and populated - nothing to do"; exit 0; fi
+# Present-but-empty/partial engine.env is a half-enrolled remnant (case 5): remove it
+# so the enroll POST below re-runs instead of skipping on a file that looks enrolled.
+[[ -e "$CFG_ENV" ]] && { log "engine.env present but empty/partial - removing and re-enrolling"; rm -f "$CFG_ENV" 2>/dev/null || true; }
 
 # --- 1. locate the per-boot token + CP url (first channel that yields a token) ---
 # cloud-init writes NoCloud/provider user-data to /run or /var/lib/cloud; we also
@@ -133,9 +148,19 @@ progress ENROLL_OK "HTTP 200 - scoped tokens received; writing engine.env"
 #     write the scoped tokens the API returned. Token VALUES are never logged. ---
 install -d -m0755 "$CFG_DIR"
 umask 077
+# CASE 5 (reboot mid-write): engine.env must NEVER exist in a partial/zero-byte
+# state. A half-written file would satisfy ConditionPathExists=!engine.env's inverse
+# on the next boot (the kiosk unit AND the LightDM gate both key on mere existence),
+# silently dropping the operator at a login greeter on an inert engine. The inline
+# writer therefore writes to a temp file on the SAME directory, validates it, then
+# atomically renames it into place: a power loss mid-write leaves only the orphan
+# temp and engine.env stays absent, so the kiosk reappears. The external writer path
+# is covered by the uniform zero-byte backstop after the branch.
 if command -v vacti-engine-write-env >/dev/null 2>&1; then
   vacti-engine-write-env --url "$BASE" --from /run/vacti-enroll.out
 else
+  ENV_TMP="$(mktemp "${CFG_ENV}.tmp.XXXXXX")" || die "cannot create temp env file in ${CFG_DIR}"
+  chmod 0600 "$ENV_TMP"
   # Minimal inline writer: the enroll response is JSON with the three scoped
   # tokens plus the OPTIONAL edge shared secret. Use jq if present, else node
   # (both ship in the arsenal/.deb).
@@ -175,7 +200,26 @@ else
         w("VACTI_ENGINE_SHARED_SECRET", j.engineSharedSecret || j.engine_shared_secret);
       ' 2>/dev/null || true
     fi
-  } > "$CFG_ENV"
+  } > "$ENV_TMP"
+  # Validate the inline-written file BEFORE publishing: the scoped producer token must
+  # be present and non-empty, else the engine would be inert behind an enrolled-looking
+  # engine.env. Fail loud (temp discarded, engine.env never appears) so the next boot
+  # re-enrolls and the kiosk returns.
+  if ! grep -Eq '^VACTI_PRODUCER_TOKEN=.+' "$ENV_TMP"; then
+    rm -f "$ENV_TMP"
+    progress ENROLL_FATAL "enroll response missing scoped producer token; not publishing engine.env"
+    die "enroll response had no producer token; engine.env not written. Re-mint and retry; the kiosk will reappear on next boot."
+  fi
+  # Atomic publish: rename is atomic on the same filesystem, so engine.env is only
+  # ever observed fully written.
+  mv -f "$ENV_TMP" "$CFG_ENV"
+fi
+# CASE 5 backstop (covers the external vacti-engine-write-env path too): never leave a
+# zero-byte / partial engine.env that would look enrolled on the next boot.
+if [[ ! -s "$CFG_ENV" ]]; then
+  rm -f "$CFG_ENV"
+  progress ENROLL_FATAL "engine.env empty/partial after write; removed so the kiosk reappears on next boot"
+  die "engine.env was empty after the writer ran; removed it. Re-mint and retry."
 fi
 chmod 0600 "$CFG_ENV"
 umask 022
