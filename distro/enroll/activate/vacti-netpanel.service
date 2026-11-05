@@ -1,0 +1,54 @@
+# vacti-netpanel.service - the POST-ENROLL network-settings console (GUI SKU).
+#
+# Mirror image of vacti-activate.service. Once the box IS enrolled
+# (/etc/vacti-engine/engine.env present and populated), this unit owns tty1 BEFORE
+# the desktop login and runs a NetworkManager settings kiosk (static IP / Wi-Fi /
+# proxy / DNS via nm-connection-editor) so an operator can reconfigure the network
+# without first logging into a full XFCE desktop. A clear "go to the desktop login"
+# exit is always one click away, so this is NOT a one-way trap and NOT a regression
+# for operators who do want the desktop.
+#
+# Arbitration with LightDM uses the SAME proven lever as the pre-enroll gate - a
+# ConditionPathExists, never a Conflicts= on lightdm (which would race the greeter).
+# ExecStartPre drops a runtime flag (/run/vacti-netpanel.active); the ADDITIVE
+# drop-in 15-vacti-netpanel.conf makes lightdm.service defer while that flag exists.
+# The flag lives on tmpfs (cleared every boot) and is removed by ExecStopPost, so a
+# crash can NEVER leave the desktop login permanently withheld. The engine.env GATE
+# (10-vacti-gate.conf) is UNTOUCHED - this unit never weakens the enrolled gate.
+#
+# FAIL-OPEN: Restart=no + OnFailure=lightdm.service. If the panel's X session cannot
+# start (broken/absent GPU, missing toolkit), the operator lands on exactly the
+# LightDM desktop login they would have gotten before this change. Never a brick,
+# never a regression.
+[Unit]
+Description=vacti post-enroll network-settings console (before the desktop login)
+After=systemd-user-sessions.service NetworkManager.service
+Wants=NetworkManager.service
+Conflicts=getty@tty1.service
+Before=lightdm.service
+OnFailure=lightdm.service
+# Only AFTER enrollment, and only on the GUI SKU (LightDM installed).
+ConditionPathExists=/etc/vacti-engine/engine.env
+ConditionPathExists=/etc/lightdm
+# Operator opt-out latch: once they choose "always go to the desktop login", this
+# file exists and the panel steps aside permanently (desktop-login fall-through).
+ConditionPathExists=!/var/lib/vacti/netpanel-optout
+
+[Service]
+Type=simple
+# Defer LightDM: drop the runtime flag BEFORE lightdm (ordered After= us via the
+# 15-vacti-netpanel.conf drop-in) evaluates its condition.
+ExecStartPre=/bin/sh -c 'echo 1 > /run/vacti-netpanel.active 2>/dev/null || true'
+# Dismiss any retained boot splash before taking tty1 (best-effort).
+ExecStartPre=-/bin/sh -c 'plymouth quit 2>/dev/null || true'
+ExecStart=/usr/local/sbin/vacti-netpanel
+# Always clear the defer flag on exit/crash so lightdm can never stay withheld.
+ExecStopPost=/bin/sh -c 'rm -f /run/vacti-netpanel.active 2>/dev/null || true'
+Restart=no
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=graphical.target

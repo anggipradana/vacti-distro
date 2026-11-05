@@ -112,6 +112,16 @@ install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate-fallback.service
   "${HERE}/config/includes.chroot/etc/systemd/system/vacti-activate-fallback.service"
 install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-activate-polkit.rules" \
   "${HERE}/config/includes.chroot/etc/polkit-1/rules.d/49-vacti-activate.rules"
+# POST-ENROLL network panel: once enrolled, land on a NetworkManager settings
+# console before the desktop login (GUI), or nmtui on the console (headless NM).
+# The GUI unit is enabled by the 0100-branding hook (GUI SKU); the lightdm defer
+# drop-in (15-vacti-netpanel.conf) is installed by apply-branding.sh.
+install -D -m0755 "${DISTRO_DIR}/enroll/activate/vacti-netpanel" \
+  "${HERE}/config/includes.chroot/usr/local/sbin/vacti-netpanel"
+install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-netpanel.service" \
+  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-netpanel.service"
+install -D -m0644 "${DISTRO_DIR}/enroll/activate/vacti-netpanel-headless.service" \
+  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-netpanel-headless.service"
 install -D -m0755 "${DISTRO_DIR}/enroll/netsetup/vacti-netsetup" \
   "${HERE}/config/includes.chroot/usr/local/sbin/vacti-netsetup"
 
@@ -137,6 +147,12 @@ if [[ "${VACTI_HEADLESS_NM:-0}" =~ ^(1|true|yes|on)$ && "$SKU" == "headless" ]];
   install -d "${HERE}/config/includes.chroot/etc/cloud/cloud.cfg.d"
   printf 'system_info:\n  network:\n    renderers: [NetworkManager]\n' \
     > "${HERE}/config/includes.chroot/etc/cloud/cloud.cfg.d/99-vacti-nm.cfg"
+  # POST-ENROLL nmtui console panel for the headless-NM SKU (graceful degradation of
+  # the GUI panel). Enable it via a wants/ symlink that travels in the squashfs. The
+  # unit is gated engine.env + !/etc/lightdm + no opt-out, so it is inert until the
+  # box is enrolled; OnFailure=getty@tty1 keeps it fail-open.
+  ln -sf /etc/systemd/system/vacti-netpanel-headless.service \
+    "${HERE}/config/includes.chroot/etc/systemd/system/multi-user.target.wants/vacti-netpanel-headless.service"
 else
   rm -f "${HERE}/config/package-lists/vacti-nm.list.chroot" 2>/dev/null || true
 fi

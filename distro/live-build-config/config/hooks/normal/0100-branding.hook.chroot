@@ -16,6 +16,10 @@ systemctl enable vacti-firstrun.service 2>/dev/null || true
 # travel in the squashfs so Calamares carries them into the installed system.
 if [ -d /etc/lightdm ] || command -v lightdm >/dev/null 2>&1; then
   systemctl enable vacti-activate.service 2>/dev/null || true
+  # POST-ENROLL network panel: own tty1 and present NetworkManager settings before
+  # the desktop login once the box is enrolled. Gated on engine.env + /etc/lightdm +
+  # no opt-out latch, ordered Before=lightdm; OnFailure=lightdm keeps it fail-open.
+  systemctl enable vacti-netpanel.service 2>/dev/null || true
   systemctl enable lightdm.service 2>/dev/null || true
   systemctl set-default graphical.target 2>/dev/null || true
 fi
