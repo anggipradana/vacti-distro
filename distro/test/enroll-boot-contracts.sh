@@ -99,6 +99,17 @@ check "firstboot early-exit uses engine_env_ready (not bare -f)" \
 check "vacti-activate early-exit uses engine_env_ready (not bare -f)" \
   has "$ACTIVATE_SH" 'if engine_env_ready; then'
 
+echo "== post-enroll reboot: firstboot enables the engine unit so it auto-starts =="
+# On the second boot the firstboot/firstrun/install units are all
+# ConditionPathExists=!engine.env (and firstboot is disabled on success), so the ONLY
+# thing that can start vacti-engine.service is its own enablement symlink. firstboot must
+# ENABLE the engine unit (live system, every channel) before it starts it, so the symlink
+# is guaranteed on the enrolled image regardless of the .deb postinst build-chroot enable.
+check "firstboot enables vacti-engine.service" \
+  has "$FIRSTBOOT_SH" '^systemctl enable vacti-engine\.service'
+check "firstboot enables the engine BEFORE disabling itself" \
+  bash -c 'awk "/^systemctl enable vacti-engine\.service/{e=NR} /systemctl disable/{d=NR} END{exit !(e&&d&&e<d)}" "'"$FIRSTBOOT_SH"'"'
+
 echo "== kiosk-stuck: enroll handoff is non-blocking + poll is content-aware =="
 # Root cause (fat-OVA kiosk stuck on "Enrolling device..." after ENV_WRITTEN):
 # stage_token_and_enroll used a BLOCKING `systemctl start` on the Type=oneshot

@@ -230,6 +230,16 @@ rm -f /run/vacti-enroll.out
 
 # --- 4. start the engine + disable this unit ---
 progress ENV_WRITTEN "engine.env written; starting vacti-engine and disabling ${SELF_UNIT}"
+# ENABLE before start. This firstboot unit is the ONE component that is guaranteed to run
+# post-enroll on EVERY channel (VM/cloud firstboot, ISO firstrun, GUI kiosk) on the LIVE
+# system with a running systemd, so enabling the engine HERE guarantees its
+# multi-user.target.wants symlink exists on the enrolled image and the daemon comes up ON
+# ITS OWN after the operator first reboot. Previously the enablement symlink was created
+# ONLY by the engine .deb postinst; on a FAT-OVA that postinst runs in the build chroot and
+# nothing in build-golden.sh enables the unit explicitly, so a chroot where the postinst
+# enable did not persist shipped an enrolled image whose engine never auto-starts after a
+# reboot (heartbeat never fires). Idempotent no-op when already enabled; never blocks start.
+systemctl enable vacti-engine.service 2>/dev/null || log "vacti-engine enable deferred (unit not installed yet?)"
 systemctl start vacti-engine.service 2>/dev/null || log "vacti-engine start deferred to its own unit"
 # FAT-OVA ONLY: a baked engine may be older than the current release; converge now
 # instead of waiting for the update timer's OnBootSec. Gated STRICTLY on the fat-OVA
