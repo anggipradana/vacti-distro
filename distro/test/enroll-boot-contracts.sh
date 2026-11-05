@@ -226,10 +226,17 @@ check "vacti-netpanel launches vacti-kiosk in --mode=network as the preferred GU
   has "$NETPANEL_SH" '\--mode=network'
 check "vacti-netpanel keeps nm-connection-editor only as a yad-menu fallback" \
   has "$NETPANEL_SH" 'nm-connection-editor'
-check "vacti-netpanel maps kiosk exit 0 -> desktop login (one-shot)" \
-  bash -c 'grep -Eq "0\\)[[:space:]]+return 2 ;;.*#.*desktop" "'"$NETPANEL_SH"'"'
-check "vacti-netpanel maps kiosk exit 10 -> opt-out latch" \
-  bash -c 'grep -Eq "10\\)[[:space:]]*return 3 ;;" "'"$NETPANEL_SH"'"'
+# Appliance-only policy: no "desktop login" exit, no "always desktop" opt-out.
+# The ONLY explicit exit is Reboot (exit code 42 from the kiosk -> rc=4 ->
+# systemctl reboot). Anything else relaunches the kiosk; the surface loops forever.
+check "vacti-netpanel maps kiosk exit 42 -> reboot" \
+  has "$NETPANEL_SH" '42\) return 4 ;;.*reboot'
+check "vacti-netpanel does NOT expose a desktop-login button exit path" \
+  bash -c '! grep -Eq "(one-shot: desktop login|always desktop login)" "'"$NETPANEL_SH"'"'
+check "vacti-netpanel does NOT write the opt-out latch" \
+  bash -c '! grep -Eq "OPTOUT=.*netpanel-optout|: > \"\\\$OPTOUT\"" "'"$NETPANEL_SH"'"'
+check "vacti-netpanel GUI main loops the kiosk forever (relaunch, not fall-through)" \
+  has "$NETPANEL_SH" 'relaunching \(appliance-only'
 
 echo "== vacti-kiosk --mode=network reuses the libadwaita shell with hidden enroll/opt tabs =="
 KIOSK_SH="${ENR}/activate/vacti-kiosk"
@@ -243,10 +250,12 @@ check "vacti-kiosk network-mode hides the optional tab" \
   has "$KIOSK_SH" 'p_opt\.set_visible\(False\)'
 check "vacti-kiosk gates the tab-hide on MODE == \"network\"" \
   has "$KIOSK_SH" 'MODE == "network":'
-check "vacti-kiosk network-mode primary button is net_mode_done (not activate)" \
-  has "$KIOSK_SH" 'net_mode_done'
-check "vacti-kiosk network-mode on-done handler exits cleanly (EXIT_CODE=0)" \
-  has "$KIOSK_SH" 'def on_net_mode_done'
+check "vacti-kiosk network-mode shows a Reboot button (no desktop path)" \
+  has "$KIOSK_SH" 'net_mode_reboot'
+check "vacti-kiosk network-mode has an on-reboot handler (EXIT_CODE=42)" \
+  has "$KIOSK_SH" 'def on_net_mode_reboot'
+check "vacti-kiosk network-mode does NOT ship a 'Done' / 'always desktop' button" \
+  bash -c '! grep -Eq "net_mode_done|net_mode_always_desktop" "'"$KIOSK_SH"'"'
 
 echo "== install/enable wiring ships the panel on both build drivers =="
 BG="${ROOT}/distro/golden-image/build-golden.sh"

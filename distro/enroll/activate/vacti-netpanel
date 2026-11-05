@@ -27,7 +27,8 @@ HEADLESS=0
 [[ "${1:-}" == "--headless" ]] && { HEADLESS=1; shift || true; }
 
 CFG_ENV="/etc/vacti-engine/engine.env"
-OPTOUT="/var/lib/vacti/netpanel-optout"
+# Appliance-only policy: no "always desktop" opt-out. The latch file is no longer
+# written nor honored; a stale latch from an older image is IGNORED.
 FLAG="/run/vacti-netpanel.active"
 XLOG="/var/log/vacti-netpanel.xorg.log"
 SELF="$0"
@@ -42,6 +43,9 @@ engine_env_ready() {
   grep -Eq '^[A-Za-z_][A-Za-z0-9_]*=.+' "$CFG_ENV"
 }
 
+# Appliance-only policy: no desktop/getty escape. These helpers remain as
+# last-resort recovery only, invoked by the fail-OPEN paths below when the panel
+# cannot render at all - a dark tty is worse than a desktop/getty temporarily.
 start_lightdm() {
   rm -f "$FLAG" 2>/dev/null || true
   systemctl start lightdm.service 2>/dev/null || true
@@ -49,6 +53,11 @@ start_lightdm() {
 
 start_getty() {
   systemctl start --no-block getty@tty1.service 2>/dev/null || true
+}
+
+do_reboot() {
+  rm -f "$FLAG" 2>/dev/null || true
+  systemctl reboot 2>/dev/null || true
 }
 
 # A usable graphical display must exist for the GUI panel, or we fail OPEN to the
@@ -82,8 +91,12 @@ done
 # PYTHON_BIN missing), fall through to yad, then zenity, then a bare desktop login
 # - exactly the pre-change fall-through contract.
 #
-# Exit codes consumed by main: 2=desktop login (one-shot), 3=always desktop login
-# (latch), 4=reboot, anything else=fall through to the desktop login (no trap).
+# Appliance-only policy (IP protection): the panel loops the premium vacti-kiosk
+# shell forever and never exits to a shell/desktop. The ONE explicit exit is the
+# Reboot button: kiosk EXIT_CODE=42 -> this helper returns rc=4 -> main does
+# systemctl reboot. Any other exit (window closed, X crash, Python missing)
+# relaunches the kiosk. Fallbacks (yad -> nm-connection-editor) also stay
+# network-only; no desktop/getty escape path from the GUI main loop.
 # ---------------------------------------------------------------------------
 KIOSK_APP="/usr/local/share/vacti-kiosk/vacti-kiosk"
 PYTHON_BIN="$(command -v python3 || true)"
@@ -103,19 +116,33 @@ run_session() {
     sleep 1
   fi
 
-  # Preferred: the premium vacti-kiosk shell in --mode=network. Its own exit codes:
-  #   0  -> operator pressed "Done" / closed the window  -> one-shot desktop login
-  #   10 -> operator pressed "Always desktop login"      -> opt-out latch
-  # Any non-{0,10} is the kiosk failing to render; fall through to yad/zenity.
-  local krc=1
-  run_kiosk_network
-  krc=$?
-  case "$krc" in
-    0)  return 2 ;;  # done -> one-shot desktop login
-    10) return 3 ;;  # latch -> always desktop login
-  esac
+  # The appliance is APPLIANCE-ONLY by operator policy: once enrolled, the console
+  # NEVER exposes a shell/desktop (IP protection - all operator needs are served
+  # through the control plane). Loop the premium vacti-kiosk shell in --mode=network
+  # forever: a crash or the operator closing the window re-launches it. The only
+  # explicit exit the kiosk offers is the Reboot button (exit code 42) which
+  # systemctl-reboots the box. Fallbacks (yad -> nm-connection-editor only) keep
+  # the surface network-only; no desktop/getty path.
+  local krc=0
+  while :; do
+    if run_kiosk_network; then
+      krc=0
+    else
+      krc=$?
+    fi
+    case "$krc" in
+      42) return 4 ;;  # operator confirmed reboot
+      *)  : ;;         # anything else: relaunch
+    esac
+    # Rate-limit a crash-loop (missing python / broken GTK) with a short backoff.
+    sleep 1
+    # If the premium kiosk cannot start at all, fall through to the lightweight
+    # network editor loop below (also appliance-only - no desktop escape).
+    [[ -f "$KIOSK_APP" && -n "$PYTHON_BIN" ]] || break
+  done
 
-  # Fallback: yad notebook -> zenity question -> bare fall-through (unchanged).
+  # Lightweight fallback (premium kiosk unavailable): nm-connection-editor only.
+  # No "desktop login" buttons - appliance stays appliance-only.
   local editor=""
   command -v nm-connection-editor >/dev/null 2>&1 && editor="nm-connection-editor"
 
@@ -124,36 +151,20 @@ run_session() {
       "$editor" >/dev/null 2>&1 || true
     fi
 
-    local choice
+    local choice=0
     if command -v yad >/dev/null 2>&1; then
       local yargs=(--title="vacti - Network" --width=480 --center --borders=12 --fixed \
-        --text="<b>vacti</b> - Network settings\nConfigure static IP / Wi-Fi / proxy / DNS, then continue to the desktop login." \
+        --text="<b>vacti</b> - Network settings\nConfigure static IP / Wi-Fi / proxy / DNS. The appliance stays on this surface - all operator needs are served through the control plane." \
         --button="Network settings:0" \
-        --button="Desktop login:2" \
-        --button="Always desktop login:3" \
         --button="Reboot:4")
       [[ -n "$LOGO" ]] && yargs+=(--image="$LOGO" --image-on-top)
       yad "${yargs[@]}" >/dev/null 2>&1
       choice=$?
-    elif command -v zenity >/dev/null 2>&1; then
-      if zenity --question --title="vacti - Network" \
-          --text="Open the desktop login now? (Choose No to re-open network settings.)" \
-          --ok-label="Desktop login" --cancel-label="Network settings" >/dev/null 2>&1; then
-        choice=2
-      else
-        choice=0
-      fi
-    else
-      # No dialog toolkit at all: do not trap the operator - fall through.
-      choice=2
     fi
 
     case "$choice" in
-      0)  continue ;;    # re-open the network editor
-      2)  return 2 ;;    # one-shot: desktop login
-      3)  return 3 ;;    # latch: always desktop login
-      4)  return 4 ;;    # reboot
-      *)  return 2 ;;    # window closed / cancel -> desktop login, never a trap
+      4)  return 4 ;;  # reboot
+      *)  continue ;;  # anything else: re-open the editor; never fall to desktop/getty
     esac
   done
 }
@@ -173,18 +184,20 @@ if [[ "$HEADLESS" == "1" ]]; then
     log "engine.env not ready - nothing to do on the headless console"
     exit 0
   fi
-  if [[ -e "$OPTOUT" ]]; then
-    log "operator opt-out latch present - leaving the console to getty"
-    start_getty
-    exit 0
-  fi
+  # Appliance-only policy: headless loops nmtui forever. No getty escape from an
+  # enrolled box; a human who needs a shell SSHes in over tailscale, not the
+  # console. If nmtui is genuinely missing, fail OPEN to a getty (dark tty is
+  # worse than a login prompt), with a loud log.
   if command -v nmtui >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
-    log "launching nmtui for post-enroll network setup (headless)"
-    nmtui 2>/dev/null || true
+    while :; do
+      log "launching nmtui for post-enroll network setup (headless)"
+      nmtui 2>/dev/null || true
+      sleep 1   # backoff against a crash-loop
+    done
   else
-    log "nmtui / NetworkManager unavailable - handing back to the console login"
+    log "nmtui / NetworkManager unavailable - fail-open to the console getty"
+    start_getty
   fi
-  start_getty
   exit 0
 fi
 
@@ -199,14 +212,9 @@ if ! engine_env_ready; then
   exit 0
 fi
 
-# Operator opted out permanently -> straight to the desktop login.
-if [[ -e "$OPTOUT" ]]; then
-  log "operator opt-out latch present - going straight to the desktop login"
-  start_lightdm
-  exit 0
-fi
-
-# No usable display -> fail open to the desktop login (exactly the old behaviour).
+# No usable display -> fail OPEN to the desktop login (dark tty is worse than
+# a login prompt; this is recovery, not escape). An appliance with a working
+# display never reaches this branch.
 if ! graphical_possible; then
   log "no usable graphical display - failing open to the desktop login"
   start_lightdm
@@ -221,25 +229,23 @@ if ! command -v xinit >/dev/null 2>&1; then
   exit 0
 fi
 
-rc=0
-xinit "$SELF" __session -- :0 vt1 -keeptty -nolisten tcp > "$XLOG" 2>&1 || rc=$?
-# xinit's exit status is the session client's: 2=desktop, 3=always-desktop,
-# 4=reboot, anything else=fall through to the desktop login.
-case "$rc" in
-  3)
-    log "operator chose: always go to the desktop login (writing opt-out latch)"
-    install -d -m0755 "$(dirname "$OPTOUT")" 2>/dev/null || true
-    : > "$OPTOUT" 2>/dev/null || true
-    start_lightdm
-    ;;
-  4)
-    log "operator chose: reboot"
-    rm -f "$FLAG" 2>/dev/null || true
-    systemctl reboot 2>/dev/null || start_lightdm
-    ;;
-  *)
-    log "network panel finished (rc=${rc}) - handing off to the desktop login"
-    start_lightdm
-    ;;
-esac
-exit 0
+# Loop the X session FOREVER. Every rc except Reboot (4) re-launches the kiosk.
+# The appliance is APPLIANCE-ONLY by operator policy; the console never exposes
+# a shell/desktop (IP protection). A rare non-X failure (xinit non-zero) is
+# considered the same as a kiosk close: relaunch. A short sleep rate-limits a
+# crash-loop so a broken image does not spin the tty at 100%.
+while :; do
+  rc=0
+  xinit "$SELF" __session -- :0 vt1 -keeptty -nolisten tcp > "$XLOG" 2>&1 || rc=$?
+  case "$rc" in
+    4)
+      log "operator chose: reboot"
+      do_reboot
+      exit 0
+      ;;
+    *)
+      log "network panel session ended (rc=${rc}); relaunching (appliance-only, no desktop escape)"
+      sleep 1
+      ;;
+  esac
+done
