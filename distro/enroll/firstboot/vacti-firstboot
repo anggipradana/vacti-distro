@@ -179,8 +179,16 @@ else
   {
     echo "VACTI_URL=${BASE}"
     if command -v jq >/dev/null 2>&1; then
+      # KEY NAME: the engine's config.ts (Zod schema) reads the producer token as
+      # VACTI_TOKEN, not VACTI_PRODUCER_TOKEN. The terminal installer at
+      # engine/packaging/bootstrap-apt.sh:2415 already writes VACTI_TOKEN. The firstboot
+      # writer diverged (used VACTI_PRODUCER_TOKEN) when the shared-secret line landed,
+      # which made the engine's Zod parse throw "Required: VACTI_TOKEN" at startup
+      # under Type=notify, so systemd never got READY=1, the daemon crash-looped on
+      # Restart=on-failure, and the appliance stayed offline even after v0.1.7 made
+      # sure the unit was enabled. Keep this in lockstep with bootstrap-apt.sh.
       jq -r '
-        "VACTI_PRODUCER_TOKEN=\(.producer_token // .producer // "")",
+        "VACTI_TOKEN=\(.producer_token // .producer // "")",
         "VACTI_VERIFIER_TOKEN=\(.verifier_token // .verifier // "")",
         "VACTI_GATEKEEPER_TOKEN=\(.gatekeeper_token // .gatekeeper // "")"
       ' /run/vacti-enroll.out
@@ -194,7 +202,7 @@ else
         const fs = require("fs");
         const j = JSON.parse(fs.readFileSync("/run/vacti-enroll.out", "utf8"));
         const w = (k, v) => { if (v) process.stdout.write(k + "=" + v + "\n"); };
-        w("VACTI_PRODUCER_TOKEN", j.producer_token || j.producer);
+        w("VACTI_TOKEN", j.producer_token || j.producer);
         w("VACTI_VERIFIER_TOKEN", j.verifier_token || j.verifier);
         w("VACTI_GATEKEEPER_TOKEN", j.gatekeeper_token || j.gatekeeper);
         w("VACTI_ENGINE_SHARED_SECRET", j.engineSharedSecret || j.engine_shared_secret);
@@ -205,7 +213,7 @@ else
   # be present and non-empty, else the engine would be inert behind an enrolled-looking
   # engine.env. Fail loud (temp discarded, engine.env never appears) so the next boot
   # re-enrolls and the kiosk returns.
-  if ! grep -Eq '^VACTI_PRODUCER_TOKEN=.+' "$ENV_TMP"; then
+  if ! grep -Eq '^VACTI_TOKEN=.+' "$ENV_TMP"; then
     rm -f "$ENV_TMP"
     progress ENROLL_FATAL "enroll response missing scoped producer token; not publishing engine.env"
     die "enroll response had no producer token; engine.env not written. Re-mint and retry; the kiosk will reappear on next boot."
