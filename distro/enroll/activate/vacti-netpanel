@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/vacti-netpanel - POST-ENROLL network-settings console.
+#
+# Runs AFTER enrollment (engine.env present), BEFORE the desktop login. It presents
+# a NetworkManager settings UI on tty1 so an operator can configure static IP /
+# Wi-Fi / proxy / DNS WITHOUT first logging into a full XFCE desktop:
+#
+#   GUI SKU  (default): a bare Xorg + openbox session running nm-connection-editor,
+#                       with a branded fall-through menu (yad -> zenity).
+#   headless (--headless, VACTI_HEADLESS_NM images only): nmtui on the console.
+#
+# FALL-THROUGH (not a trap, not a regression): the GUI menu always offers
+# "Desktop login" (one-shot) and "Always desktop login" (writes an opt-out latch so
+# the panel steps aside permanently). Either way the operator reaches the normal
+# LightDM desktop login. The headless twin returns to a getty console login.
+#
+# FAIL-OPEN: any inability to render the panel -> start the desktop login (GUI) or a
+# getty (headless) and exit 0, i.e. EXACTLY the pre-change behaviour. The units also
+# carry Restart=no + OnFailure=lightdm.service / getty@tty1.service as a backstop.
+#
+# This script NEVER enrolls, never writes engine.env, and never touches the enroll
+# chain or the engine.env gate (10-vacti-gate.conf). It is a post-enroll UX surface
+# only.
+set -uo pipefail
+
+HEADLESS=0
+[[ "${1:-}" == "--headless" ]] && { HEADLESS=1; shift || true; }
+
+CFG_ENV="/etc/vacti-engine/engine.env"
+OPTOUT="/var/lib/vacti/netpanel-optout"
+FLAG="/run/vacti-netpanel.active"
+XLOG="/var/log/vacti-netpanel.xorg.log"
+SELF="$0"
+
+log() { echo "[vacti-netpanel] $*" >&2; }
+
+# Same content-aware predicate as vacti-activate's engine_env_ready: engine.env must
+# exist AND carry a populated KEY=value, else this box is not really enrolled and the
+# panel must not pretend it is. Kept byte-identical in spirit to the activate copy.
+engine_env_ready() {
+  [[ -s "$CFG_ENV" ]] || return 1
+  grep -Eq '^[A-Za-z_][A-Za-z0-9_]*=.+' "$CFG_ENV"
+}
+
+start_lightdm() {
+  rm -f "$FLAG" 2>/dev/null || true
+  systemctl start lightdm.service 2>/dev/null || true
+}
+
+start_getty() {
+  systemctl start --no-block getty@tty1.service 2>/dev/null || true
+}
+
+# A usable graphical display must exist for the GUI panel, or we fail OPEN to the
+# desktop login (which is itself the pre-change behaviour). Mirrors vacti-activate.
+graphical_possible() {
+  command -v Xorg >/dev/null 2>&1 || command -v X >/dev/null 2>&1 || return 1
+  local f
+  for f in /dev/dri/card*; do
+    [[ -e "$f" ]] && return 0
+  done
+  [[ -e /dev/fb0 ]] && return 0
+  return 1
+}
+
+# Branding logo for the menu header (fail-soft; absent on a stripped image).
+LOGO=""
+for _l in /usr/share/vacti/branding/logo/png/vacti-logomark-128.png \
+          /usr/share/vacti/branding/logo/png/vacti-logomark-256.png \
+          /usr/share/pixmaps/vacti.svg; do
+  [[ -f "$_l" ]] && { LOGO="$_l"; break; }
+done
+
+# ---------------------------------------------------------------------------
+# The X session client, re-exec'd under xinit (GUI SKU). Opens the NetworkManager
+# editor; when the operator closes it, shows the fall-through menu and loops.
+# Exit codes consumed by main: 2=desktop login (one-shot), 3=always desktop login
+# (latch), 4=reboot, anything else=fall through to the desktop login (no trap).
+# ---------------------------------------------------------------------------
+run_session() {
+  if command -v openbox >/dev/null 2>&1; then
+    openbox >/dev/null 2>&1 &
+    sleep 1
+  fi
+  local editor=""
+  command -v nm-connection-editor >/dev/null 2>&1 && editor="nm-connection-editor"
+
+  while :; do
+    if [[ -n "$editor" ]]; then
+      "$editor" >/dev/null 2>&1 || true
+    fi
+
+    local choice
+    if command -v yad >/dev/null 2>&1; then
+      local yargs=(--title="vacti - Network" --width=480 --center --borders=12 --fixed \
+        --text="<b>vacti</b> - Network settings\nConfigure static IP / Wi-Fi / proxy / DNS, then continue to the desktop login." \
+        --button="Network settings:0" \
+        --button="Desktop login:2" \
+        --button="Always desktop login:3" \
+        --button="Reboot:4")
+      [[ -n "$LOGO" ]] && yargs+=(--image="$LOGO" --image-on-top)
+      yad "${yargs[@]}" >/dev/null 2>&1
+      choice=$?
+    elif command -v zenity >/dev/null 2>&1; then
+      if zenity --question --title="vacti - Network" \
+          --text="Open the desktop login now? (Choose No to re-open network settings.)" \
+          --ok-label="Desktop login" --cancel-label="Network settings" >/dev/null 2>&1; then
+        choice=2
+      else
+        choice=0
+      fi
+    else
+      # No dialog toolkit at all: do not trap the operator - fall through.
+      choice=2
+    fi
+
+    case "$choice" in
+      0)  continue ;;    # re-open the network editor
+      2)  return 2 ;;    # one-shot: desktop login
+      3)  return 3 ;;    # latch: always desktop login
+      4)  return 4 ;;    # reboot
+      *)  return 2 ;;    # window closed / cancel -> desktop login, never a trap
+    esac
+  done
+}
+
+case "${1:-}" in
+  __session)
+    run_session
+    exit $?
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# HEADLESS main: nmtui on the console, then back to a getty login.
+# ---------------------------------------------------------------------------
+if [[ "$HEADLESS" == "1" ]]; then
+  if ! engine_env_ready; then
+    log "engine.env not ready - nothing to do on the headless console"
+    exit 0
+  fi
+  if [[ -e "$OPTOUT" ]]; then
+    log "operator opt-out latch present - leaving the console to getty"
+    start_getty
+    exit 0
+  fi
+  if command -v nmtui >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    log "launching nmtui for post-enroll network setup (headless)"
+    nmtui 2>/dev/null || true
+  else
+    log "nmtui / NetworkManager unavailable - handing back to the console login"
+  fi
+  start_getty
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# GUI main (runs on tty1 from vacti-netpanel.service).
+# ---------------------------------------------------------------------------
+# Defensive: only meaningful post-enroll. If somehow not enrolled, defer to the
+# lightdm gate (it will itself withhold on an absent engine.env) and exit cleanly.
+if ! engine_env_ready; then
+  log "engine.env not ready - deferring to the lightdm engine.env gate"
+  start_lightdm
+  exit 0
+fi
+
+# Operator opted out permanently -> straight to the desktop login.
+if [[ -e "$OPTOUT" ]]; then
+  log "operator opt-out latch present - going straight to the desktop login"
+  start_lightdm
+  exit 0
+fi
+
+# No usable display -> fail open to the desktop login (exactly the old behaviour).
+if ! graphical_possible; then
+  log "no usable graphical display - failing open to the desktop login"
+  start_lightdm
+  exit 0
+fi
+
+echo 1 > "$FLAG" 2>/dev/null || true   # belt-and-braces with the unit's ExecStartPre
+
+if ! command -v xinit >/dev/null 2>&1; then
+  log "xinit not installed - cannot run the network panel; failing open to the desktop login"
+  start_lightdm
+  exit 0
+fi
+
+rc=0
+xinit "$SELF" __session -- :0 vt1 -keeptty -nolisten tcp > "$XLOG" 2>&1 || rc=$?
+# xinit's exit status is the session client's: 2=desktop, 3=always-desktop,
+# 4=reboot, anything else=fall through to the desktop login.
+case "$rc" in
+  3)
+    log "operator chose: always go to the desktop login (writing opt-out latch)"
+    install -d -m0755 "$(dirname "$OPTOUT")" 2>/dev/null || true
+    : > "$OPTOUT" 2>/dev/null || true
+    start_lightdm
+    ;;
+  4)
+    log "operator chose: reboot"
+    rm -f "$FLAG" 2>/dev/null || true
+    systemctl reboot 2>/dev/null || start_lightdm
+    ;;
+  *)
+    log "network panel finished (rc=${rc}) - handing off to the desktop login"
+    start_lightdm
+    ;;
+esac
+exit 0

@@ -23,9 +23,13 @@
 # importable, run_wizard falls back to a yad notebook, then zenity; the advanced
 # NetworkManager editor is always one click away for Wi-Fi / static IP / 802.1x.
 #
-# On success (engine.env appears) it starts LightDM and exits 0 -> the gate flips
-# and the normal desktop login is now allowed. The token VALUE is never logged;
-# all crypto/token parsing is deferred to vacti-firstboot (single source of truth).
+# On success (engine.env appears) it hands off to the POST-ENROLL network panel
+# (vacti-netpanel.service), which owns tty1 before LightDM so the operator can set
+# static IP / Wi-Fi / proxy / DNS first; the panel's menu falls through to the
+# normal LightDM desktop login (one-shot or a permanent opt-out latch). The gate
+# still flips here (engine.env now exists), so the desktop login is allowed - it is
+# just offered via the network panel. The token VALUE is never logged; all
+# crypto/token parsing is deferred to vacti-firstboot (single source of truth).
 #
 # FAIL-OPEN: if no usable graphical display is available (headless/broken GPU) or
 # the kiosk cannot complete, it exits NON-ZERO. systemd then runs
@@ -226,6 +230,20 @@ pick_firstboot_unit() {
     fi
   done
   echo "vacti-firstboot.service"
+}
+
+# Post-enroll boot destination. Instead of jumping straight to the LightDM desktop
+# login, land on the NETWORK-settings console (vacti-netpanel.service) so the
+# operator can set static IP / Wi-Fi / proxy / DNS first. We also queue lightdm:
+# the runtime flag /run/vacti-netpanel.active + the 15-vacti-netpanel.conf drop-in
+# (After=vacti-netpanel.service) arbitrate which one actually takes tty1, with no
+# greeter race - exactly like the engine.env gate. If the panel unit is
+# condition-skipped (opt-out latch, no /etc/lightdm, etc.) no flag is set and
+# lightdm starts normally, so the operator is never left on a black screen. Both
+# use --no-block so this function returns immediately and tty1 is released.
+start_post_enroll_console() {
+  systemctl start --no-block vacti-netpanel.service 2>/dev/null || true
+  systemctl start --no-block lightdm.service 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -669,9 +687,11 @@ case "${1:-}" in
     engine_env_ready && exit 0 || exit 1
     ;;
   __finish)
-    # Post-success: reboot into the (now ungated) desktop login; if reboot is not
-    # permitted here, fall back to starting LightDM in place.
-    systemctl reboot 2>/dev/null || systemctl start lightdm.service 2>/dev/null || true
+    # Post-success: reboot into the (now ungated) boot path, which lands on the
+    # post-enroll network panel (vacti-netpanel.service, ordered before lightdm). If
+    # reboot is not permitted here, start the panel in place with a lightdm
+    # fall-through.
+    systemctl reboot 2>/dev/null || start_post_enroll_console
     exit 0
     ;;
 esac
@@ -683,8 +703,8 @@ echo "VACTI_ACTIVATE_KIOSK=start" > /dev/console 2>/dev/null || true
 # Already enrolled? Nothing to do - let LightDM take over immediately. A present but
 # empty/partial engine.env is NOT enrolled (case 5): fall through and run the kiosk.
 if engine_env_ready; then
-  log "engine.env present and populated - handing off to the desktop login"
-  systemctl start lightdm.service 2>/dev/null || true
+  log "engine.env present and populated - handing off to the post-enroll network panel"
+  start_post_enroll_console
   exit 0
 fi
 
@@ -719,8 +739,8 @@ else
 fi
 
 if engine_env_ready; then
-  log "enrollment complete - starting LightDM"
-  systemctl start lightdm.service 2>/dev/null || true
+  log "enrollment complete - handing off to the post-enroll network panel"
+  start_post_enroll_console
   exit 0
 fi
 

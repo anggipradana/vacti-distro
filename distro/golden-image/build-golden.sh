@@ -132,6 +132,16 @@ cp -a "${ENROLL_DIR}/activate/vacti-kiosk"                    "${STAGE}/usr/loca
 cp -a "${ENROLL_DIR}/activate/vacti-activate.service"         "${STAGE}/etc/systemd/system/vacti-activate.service"
 cp -a "${ENROLL_DIR}/activate/vacti-activate-fallback.service" "${STAGE}/etc/systemd/system/vacti-activate-fallback.service"
 cp -a "${ENROLL_DIR}/activate/vacti-activate-polkit.rules"    "${STAGE}/etc/polkit-1/rules.d/49-vacti-activate.rules"
+# POST-ENROLL network panel: once the box is enrolled, land on a NetworkManager
+# settings console (static IP / Wi-Fi / proxy / DNS) before the desktop login,
+# instead of jumping straight to LightDM. Staged UNCONDITIONALLY (harmless on the
+# headless golden: the GUI unit's ConditionPathExists=/etc/lightdm is false). The
+# GUI unit is enabled in the GUI branch below; the headless nmtui twin is enabled
+# only on a VACTI_HEADLESS_NM image. The lightdm defer drop-in (15-vacti-netpanel.conf)
+# is installed by apply-branding.sh (GUI-only), additive to the engine.env gate.
+cp -a "${ENROLL_DIR}/activate/vacti-netpanel"                 "${STAGE}/usr/local/sbin/vacti-netpanel"
+cp -a "${ENROLL_DIR}/activate/vacti-netpanel.service"         "${STAGE}/etc/systemd/system/vacti-netpanel.service"
+cp -a "${ENROLL_DIR}/activate/vacti-netpanel-headless.service" "${STAGE}/etc/systemd/system/vacti-netpanel-headless.service"
 # Headless pre-login activation TUI unit: owns tty1 before getty on the headless
 # SKU (no LightDM). Gated !engine.env + !/etc/lightdm, so it stays inert on the
 # GUI SKU (LightDM present) and after enrollment. Staged UNCONDITIONALLY; the
@@ -212,6 +222,7 @@ if [[ "${VACTI_CTF_ARSENAL}" =~ ^(1|true|yes|on)$ ]]; then
 fi
 chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/vacti-swap-firstboot" \
            "${STAGE}/usr/local/sbin/vacti-activate" "${STAGE}/usr/local/sbin/vacti-netsetup" \
+           "${STAGE}/usr/local/sbin/vacti-netpanel" \
            "${STAGE}/usr/local/sbin/vacti-engine-install" \
            "${STAGE}/usr/local/share/vacti-kiosk/vacti-kiosk" \
            "${STAGE}/opt/vacti-build/apply-branding.sh"
@@ -526,6 +537,11 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
   # and run network->enroll before LightDM. Its OnFailure= fallback getty means a
   # kiosk bug can never brick the box (fail-open).
   systemctl enable vacti-activate.service 2>/dev/null || true
+  # POST-ENROLL network panel (staged above). WantedBy=graphical.target, gated on
+  # /etc/lightdm (present) + engine.env (present only AFTER enrollment) + no opt-out
+  # latch, ordered Before=lightdm. Enable it so an enrolled box lands on the network
+  # settings console first; its OnFailure=lightdm + fail-open make it regression-safe.
+  systemctl enable vacti-netpanel.service 2>/dev/null || true
   # The GUI SKU always uses NetworkManager (the kiosk drives nm-connection-editor /
   # nmtui). MASK systemd-networkd so the two renderers never fight over the links,
   # and point cloud-init at the NetworkManager renderer. (Mirrors the headless
@@ -541,6 +557,15 @@ else
   # instead of a bare login. Gated !engine.env + !/etc/lightdm; OnFailure= hands
   # back to getty@tty1 so a TUI bug can never brick the box (fail-open).
   systemctl enable vacti-headless-activate.service 2>/dev/null || true
+  # POST-ENROLL console network panel (nmtui): graceful degradation of the GUI panel
+  # for the headless SKU. Enabled ONLY on a VACTI_HEADLESS_NM image (NetworkManager
+  # present, networkd no longer the zero-touch owner); the default zero-touch
+  # cloud-init/networkd headless image is left UNCHANGED so the seed path cannot
+  # regress. OnFailure=getty@tty1 keeps it fail-open.
+  if [[ "${VACTI_HEADLESS_NM}" =~ ^(1|true|yes|on)\$ ]]; then
+    systemctl enable vacti-netpanel-headless.service 2>/dev/null || true
+    echo "[prov] headless flavor: VACTI_HEADLESS_NM post-enroll nmtui panel enabled"
+  fi
   echo "[prov] headless flavor: text console boot (vacti-netsetup TUI + firstboot token channels); no graphical stack"
 fi
 

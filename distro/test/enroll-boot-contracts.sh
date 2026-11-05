@@ -148,6 +148,103 @@ if ! engine_env_ready; then ok "whitespace-only engine.env -> not ready"; else n
 printf 'VACTI_URL=https://cp.example\nVACTI_PRODUCER_TOKEN=abc123\n' > "$CFG_ENV"
 if engine_env_ready; then ok "populated engine.env -> ready"; else no "populated engine.env -> ready"; fi
 
+echo "== post-enroll handoff: land on a NETWORK panel, not the desktop login =="
+# After enrollment the console must land on a NetworkManager settings surface
+# (vacti-netpanel.service) BEFORE the LightDM desktop login, with a fall-through to
+# the desktop and without weakening the engine.env gate.
+NETPANEL_UNIT="${ENR}/activate/vacti-netpanel.service"
+NETPANEL_HEADLESS_UNIT="${ENR}/activate/vacti-netpanel-headless.service"
+NETPANEL_SH="${ENR}/activate/vacti-netpanel"
+NETPANEL_DROPIN="${ROOT}/distro/branding/greeter/lightdm.service.d/15-vacti-netpanel.conf"
+
+check "exists: ${NETPANEL_UNIT#$ROOT/}"          test -f "$NETPANEL_UNIT"
+check "exists: ${NETPANEL_HEADLESS_UNIT#$ROOT/}" test -f "$NETPANEL_HEADLESS_UNIT"
+check "exists: ${NETPANEL_SH#$ROOT/}"            test -f "$NETPANEL_SH"
+check "exists: ${NETPANEL_DROPIN#$ROOT/}"        test -f "$NETPANEL_DROPIN"
+
+echo "== netpanel unit owns tty1 post-enroll, before lightdm, fail-open to lightdm =="
+# Opposite polarity to the pre-enroll kiosk: runs only AFTER engine.env exists.
+check "vacti-netpanel.service runs only when enrolled (ConditionPathExists=engine.env, NOT negated)" \
+  has "$NETPANEL_UNIT" '^ConditionPathExists=/etc/vacti-engine/engine\.env$'
+check "vacti-netpanel.service is GUI-only (ConditionPathExists=/etc/lightdm)" \
+  has "$NETPANEL_UNIT" '^ConditionPathExists=/etc/lightdm$'
+check "vacti-netpanel.service honours the operator opt-out latch (!netpanel-optout)" \
+  has "$NETPANEL_UNIT" '^ConditionPathExists=!/var/lib/vacti/netpanel-optout$'
+check "vacti-netpanel.service Before=lightdm.service (owns tty1 first)" \
+  has "$NETPANEL_UNIT" '^Before=lightdm\.service$'
+check "vacti-netpanel.service Conflicts= or Before= getty@tty1" \
+  has "$NETPANEL_UNIT" '^(Conflicts|Before)=.*getty@tty1\.service'
+check "vacti-netpanel.service fails OPEN to the desktop login (OnFailure=lightdm.service)" \
+  has "$NETPANEL_UNIT" '^OnFailure=lightdm\.service$'
+check "vacti-netpanel.service drops the defer flag before lightdm checks it (ExecStartPre)" \
+  has "$NETPANEL_UNIT" 'ExecStartPre=.*/run/vacti-netpanel\.active'
+check "vacti-netpanel.service clears the defer flag on stop/crash (ExecStopPost)" \
+  has "$NETPANEL_UNIT" '^ExecStopPost=.*rm -f /run/vacti-netpanel\.active'
+
+echo "== lightdm defer drop-in is ADDITIVE and does NOT weaken the engine.env gate =="
+check "15-vacti-netpanel.conf defers lightdm while the panel holds tty1 (!/run/vacti-netpanel.active)" \
+  has "$NETPANEL_DROPIN" '^ConditionPathExists=!/run/vacti-netpanel\.active$'
+check "15-vacti-netpanel.conf orders lightdm After=vacti-netpanel.service (race-free)" \
+  has "$NETPANEL_DROPIN" '^After=vacti-netpanel\.service$'
+# The defer drop-in must be a SEPARATE file; it must NOT contain the engine.env gate
+# condition (that lives only in 10-vacti-gate.conf, which stays untouched).
+check "15-vacti-netpanel.conf does NOT carry the engine.env gate condition (gate not duplicated/weakened)" \
+  bash -c '! grep -Eq "ConditionPathExists=/etc/vacti-engine/engine\.env" "'"$NETPANEL_DROPIN"'"'
+check "10-vacti-gate.conf still keys on engine.env (gate intact)" \
+  has "$GATE" '^ConditionPathExists=/etc/vacti-engine/engine\.env$'
+
+echo "== vacti-activate post-enroll handoff targets the network panel, with a lightdm fall-through =="
+check "vacti-activate defines start_post_enroll_console()" \
+  has "$ACTIVATE_SH" '^start_post_enroll_console\(\)'
+check "start_post_enroll_console starts vacti-netpanel.service (--no-block)" \
+  has "$ACTIVATE_SH" 'systemctl start --no-block vacti-netpanel\.service'
+check "start_post_enroll_console keeps a lightdm fall-through (--no-block)" \
+  has "$ACTIVATE_SH" 'systemctl start --no-block lightdm\.service'
+check "vacti-activate no longer jumps straight to a bare 'systemctl start lightdm.service' post-enroll" \
+  bash -c '! grep -Eq "^[[:space:]]*systemctl start lightdm\.service" "'"$ACTIVATE_SH"'"'
+check "pre-enroll kiosk marker 'VACTI_ACTIVATE_KIOSK=start' is unchanged (Enrolling... path intact)" \
+  has "$ACTIVATE_SH" 'VACTI_ACTIVATE_KIOSK=start'
+
+echo "== headless SKU degrades to nmtui on the console (not nothing) =="
+check "vacti-netpanel-headless.service runs only when enrolled (engine.env)" \
+  has "$NETPANEL_HEADLESS_UNIT" '^ConditionPathExists=/etc/vacti-engine/engine\.env$'
+check "vacti-netpanel-headless.service is headless-only (!/etc/lightdm)" \
+  has "$NETPANEL_HEADLESS_UNIT" '^ConditionPathExists=!/etc/lightdm$'
+check "vacti-netpanel-headless.service fails OPEN to a getty (OnFailure=getty@tty1)" \
+  has "$NETPANEL_HEADLESS_UNIT" '^OnFailure=getty@tty1\.service$'
+check "vacti-netpanel --headless path drives nmtui" \
+  has "$NETPANEL_SH" 'nmtui'
+
+echo "== install/enable wiring ships the panel on both build drivers =="
+BG="${ROOT}/distro/golden-image/build-golden.sh"
+BISO="${ROOT}/distro/live-build-config/build-iso.sh"
+APPLY="${ROOT}/distro/branding/apply-branding.sh"
+HOOK="${ROOT}/distro/live-build-config/config/hooks/normal/0100-branding.hook.chroot"
+check "build-golden stages vacti-netpanel script" \
+  has "$BG" 'activate/vacti-netpanel"'
+check "build-golden enables vacti-netpanel.service (GUI)" \
+  has "$BG" 'systemctl enable vacti-netpanel\.service'
+check "build-golden enables the headless nmtui panel under VACTI_HEADLESS_NM" \
+  has "$BG" 'systemctl enable vacti-netpanel-headless\.service'
+check "apply-branding installs the 15-vacti-netpanel.conf defer drop-in" \
+  has "$APPLY" '15-vacti-netpanel\.conf'
+check "build-iso stages vacti-netpanel into includes.chroot" \
+  has "$BISO" 'activate/vacti-netpanel"'
+check "ISO branding hook enables vacti-netpanel.service (GUI)" \
+  has "$HOOK" 'systemctl enable vacti-netpanel\.service'
+
+echo "== functional: netpanel engine_env_ready predicate matches the activate one =="
+# Source the engine_env_ready() shipped in vacti-netpanel and exercise it, so the
+# post-enroll predicate tracks the same content-aware semantics as the kiosk.
+CFG_ENV="${TMPD}/netpanel-engine.env"
+eval "$(sed -n '/^engine_env_ready() {$/,/^}$/p' "$NETPANEL_SH")"
+rm -f "$CFG_ENV"
+if ! engine_env_ready; then ok "netpanel: absent engine.env -> not ready"; else no "netpanel: absent engine.env -> not ready"; fi
+: > "$CFG_ENV"
+if ! engine_env_ready; then ok "netpanel: zero-byte engine.env -> not ready"; else no "netpanel: zero-byte engine.env -> not ready"; fi
+printf 'VACTI_URL=https://cp.example\n' > "$CFG_ENV"
+if engine_env_ready; then ok "netpanel: populated engine.env -> ready"; else no "netpanel: populated engine.env -> ready"; fi
+
 echo
 echo "== summary: ${pass} passed, ${fail} failed =="
 [[ $fail -eq 0 ]]

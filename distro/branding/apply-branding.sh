@@ -147,6 +147,14 @@ if [[ -f "${SRC}/greeter/lightdm.service.d/10-vacti-gate.conf" ]] && { [[ -d /et
   install -D -m0644 "${SRC}/greeter/lightdm.service.d/10-vacti-gate.conf" \
     /etc/systemd/system/lightdm.service.d/10-vacti-gate.conf
   log "lightdm pre-login gate drop-in installed (no desktop login until enrolled)"
+  # Additive POST-ENROLL defer drop-in: once enrolled, vacti-netpanel.service owns
+  # tty1 first and LightDM defers while the panel holds /run/vacti-netpanel.active.
+  # SEPARATE file from 10-vacti-gate.conf; does NOT touch/weaken the engine.env gate.
+  if [[ -f "${SRC}/greeter/lightdm.service.d/15-vacti-netpanel.conf" ]]; then
+    install -D -m0644 "${SRC}/greeter/lightdm.service.d/15-vacti-netpanel.conf" \
+      /etc/systemd/system/lightdm.service.d/15-vacti-netpanel.conf
+    log "lightdm post-enroll network-panel defer drop-in installed (falls through to the desktop login)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
