@@ -138,13 +138,12 @@ STRINGS = {
         "status_not_connected": "Belum terhubung ke jaringan",
         "net_mode_win_title": "vacti - Jaringan",
         "net_mode_hero_title": "Pengaturan jaringan",
-        "net_mode_hero_sub": "Atur IP statis / Wi-Fi / proxy / DNS. Tekan Selesai bila sudah siap.",
-        "net_mode_done": "Selesai - buka login desktop",
-        "net_mode_always_desktop": "Selalu langsung ke login desktop",
-        "net_mode_cancel_heading": "Selalu langsung ke login desktop?",
-        "net_mode_cancel_body": "Panel jaringan ini tidak akan muncul lagi setelah reboot. Bisa diatur ulang dari desktop.",
-        "net_mode_cancel_back": "Batal",
-        "net_mode_cancel_exit": "Selalu ke desktop",
+        "net_mode_hero_sub": "Atur IP statis / Wi-Fi / proxy / DNS. Perubahan disimpan otomatis oleh NetworkManager.",
+        "net_mode_reboot": "Mulai ulang perangkat",
+        "net_mode_reboot_heading": "Mulai ulang perangkat?",
+        "net_mode_reboot_body": "Perangkat akan reboot. Tidak ada data yang hilang.",
+        "net_mode_reboot_back": "Batal",
+        "net_mode_reboot_confirm": "Mulai ulang",
     },
     "en": {
         "win_title": "vacti - Activation",
@@ -201,13 +200,12 @@ STRINGS = {
         "status_not_connected": "Not connected to a network",
         "net_mode_win_title": "vacti - Network",
         "net_mode_hero_title": "Network settings",
-        "net_mode_hero_sub": "Configure static IP / Wi-Fi / proxy / DNS. Press Done when ready.",
-        "net_mode_done": "Done - open desktop login",
-        "net_mode_always_desktop": "Always go straight to the desktop login",
-        "net_mode_cancel_heading": "Always go straight to the desktop login?",
-        "net_mode_cancel_body": "This network panel will no longer appear on future boots. You can reconfigure from the desktop.",
-        "net_mode_cancel_back": "Cancel",
-        "net_mode_cancel_exit": "Always desktop",
+        "net_mode_hero_sub": "Configure static IP / Wi-Fi / proxy / DNS. Changes are saved automatically by NetworkManager.",
+        "net_mode_reboot": "Reboot the appliance",
+        "net_mode_reboot_heading": "Reboot the appliance?",
+        "net_mode_reboot_body": "The appliance will restart. No data is lost.",
+        "net_mode_reboot_back": "Cancel",
+        "net_mode_reboot_confirm": "Reboot",
     },
 }
 
@@ -515,30 +513,39 @@ class KioskWindow(Adw.ApplicationWindow):
         col.append(self.status_lbl)
 
         # Primary / secondary actions.
-        self.activate_btn = Gtk.Button()
+        # In --mode=network (post-enroll appliance-ownership-only surface) there is NO
+        # path to the desktop: the operator's intent is that an enrolled box NEVER exposes
+        # a shell/desktop (IP protection - all legitimate operator needs are served through
+        # the control plane). So the primary CTA + the "always desktop" opt-out are both
+        # omitted; only an explicit "Reboot" is offered, which does not escape the kiosk.
         if MODE == "network":
-            self._reg(self.activate_btn.set_label, "net_mode_done")
+            reboot_btn = Gtk.Button()
+            self._reg(reboot_btn.set_label, "net_mode_reboot")
+            reboot_btn.add_css_class("pill")
+            reboot_btn.add_css_class("flat")
+            reboot_btn.set_halign(Gtk.Align.CENTER)
+            reboot_btn.connect("clicked", self.on_net_mode_reboot)
+            col.append(reboot_btn)
+            # Keep activate_btn as an attribute (other code paths read it even in this mode)
+            # so the stack operates uniformly; it is created but never shown.
+            self.activate_btn = Gtk.Button()
+            self.activate_btn.set_visible(False)
         else:
+            self.activate_btn = Gtk.Button()
             self._reg(self.activate_btn.set_label, "activate")
-        self.activate_btn.add_css_class("suggested-action")
-        self.activate_btn.add_css_class("pill")
-        self.activate_btn.add_css_class("vacti-cta")
-        self.activate_btn.set_hexpand(True)
-        if MODE == "network":
-            self.activate_btn.connect("clicked", self.on_net_mode_done)
-        else:
+            self.activate_btn.add_css_class("suggested-action")
+            self.activate_btn.add_css_class("pill")
+            self.activate_btn.add_css_class("vacti-cta")
+            self.activate_btn.set_hexpand(True)
             self.activate_btn.connect("clicked", self.on_activate)
-        col.append(self.activate_btn)
+            col.append(self.activate_btn)
 
-        cancel = Gtk.Button()
-        if MODE == "network":
-            self._reg(cancel.set_label, "net_mode_always_desktop")
-        else:
+            cancel = Gtk.Button()
             self._reg(cancel.set_label, "exit_console")
-        cancel.add_css_class("flat")
-        cancel.set_halign(Gtk.Align.CENTER)
-        cancel.connect("clicked", self.on_cancel)
-        col.append(cancel)
+            cancel.add_css_class("flat")
+            cancel.set_halign(Gtk.Align.CENTER)
+            cancel.connect("clicked", self.on_cancel)
+            col.append(cancel)
 
         return clamp
 
@@ -867,14 +874,13 @@ class KioskWindow(Adw.ApplicationWindow):
         return True
 
     def on_cancel(self, _btn):
-        net = MODE == "network"
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading=t("net_mode_cancel_heading" if net else "cancel_heading"),
-            body=t("net_mode_cancel_body" if net else "cancel_body"),
+            heading=t("cancel_heading"),
+            body=t("cancel_body"),
         )
-        dialog.add_response("back", t("net_mode_cancel_back" if net else "cancel_back"))
-        dialog.add_response("exit", t("net_mode_cancel_exit" if net else "cancel_exit"))
+        dialog.add_response("back", t("cancel_back"))
+        dialog.add_response("exit", t("cancel_exit"))
         dialog.set_response_appearance(
             "exit", Adw.ResponseAppearance.DESTRUCTIVE
         )
@@ -888,12 +894,28 @@ class KioskWindow(Adw.ApplicationWindow):
             EXIT_CODE = 10
             self.get_application().quit()
 
-    # Network-mode primary button: the operator is done configuring network;
-    # exit cleanly so vacti-netpanel hands off to the LightDM desktop login.
-    def on_net_mode_done(self, _btn):
-        global EXIT_CODE
-        EXIT_CODE = 0
-        self.get_application().quit()
+    # Network-mode reboot button: the ONLY exit from the netpanel surface. No
+    # desktop path (IP protection: an enrolled box never exposes a shell/desktop).
+    # Exit code 42 is unique to this path; vacti-netpanel translates it into
+    # `systemctl reboot` and never falls through to LightDM.
+    def on_net_mode_reboot(self, _btn):
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=t("net_mode_reboot_heading"),
+            body=t("net_mode_reboot_body"),
+        )
+        dialog.add_response("back", t("net_mode_reboot_back"))
+        dialog.add_response("reboot", t("net_mode_reboot_confirm"))
+        dialog.set_response_appearance("reboot", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("back")
+        dialog.connect("response", self._on_net_mode_reboot_response)
+        dialog.present()
+
+    def _on_net_mode_reboot_response(self, _dialog, response):
+        if response == "reboot":
+            global EXIT_CODE
+            EXIT_CODE = 42
+            self.get_application().quit()
 
 
 class KioskApp(Adw.Application):
