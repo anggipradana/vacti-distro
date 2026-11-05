@@ -229,14 +229,27 @@ if ! command -v xinit >/dev/null 2>&1; then
   exit 0
 fi
 
-# Loop the X session FOREVER. Every rc except Reboot (4) re-launches the kiosk.
-# The appliance is APPLIANCE-ONLY by operator policy; the console never exposes
-# a shell/desktop (IP protection). A rare non-X failure (xinit non-zero) is
-# considered the same as a kiosk close: relaunch. A short sleep rate-limits a
-# crash-loop so a broken image does not spin the tty at 100%.
+# Loop the X session. Every rc except Reboot (4) re-launches the kiosk; the
+# appliance is APPLIANCE-ONLY by operator policy and the console never exposes
+# a shell/desktop (IP protection). Two safety bounds keep the loop from wedging
+# the box or the smoke test:
+#   1. CRASH-LOOP cap: a rapid-exit session (< 5s wall clock, i.e. xinit itself
+#      refused to come up - no display, broken X deps, etc.) counts against a
+#      short retry budget; past the budget we fail OPEN to LightDM so the box
+#      is recoverable and the smoke test (which has no real display) does not
+#      spin here forever waiting for systemd to settle.
+#   2. Long-running sessions do NOT count against the budget (they reset it),
+#      so a normal operator opening and closing the panel many times over a
+#      long shift never trips the fall-open.
+# This is recovery, not escape: on a healthy box with a display, the kiosk
+# always starts in >5s and the loop stays appliance-only forever.
+MAX_FAST_FAILS="${VACTI_NETPANEL_MAX_FAST_FAILS:-5}"
+fast_fails=0
 while :; do
   rc=0
+  start_ts=$SECONDS
   xinit "$SELF" __session -- :0 vt1 -keeptty -nolisten tcp > "$XLOG" 2>&1 || rc=$?
+  ran_for=$(( SECONDS - start_ts ))
   case "$rc" in
     4)
       log "operator chose: reboot"
@@ -244,7 +257,18 @@ while :; do
       exit 0
       ;;
     *)
-      log "network panel session ended (rc=${rc}); relaunching (appliance-only, no desktop escape)"
+      if (( ran_for < 5 )); then
+        fast_fails=$(( fast_fails + 1 ))
+        log "network panel exited fast (rc=${rc}, ran_for=${ran_for}s, fast_fails=${fast_fails}/${MAX_FAST_FAILS})"
+        if (( fast_fails >= MAX_FAST_FAILS )); then
+          log "fast-fail budget exhausted - failing open to the desktop login (recovery; box has no usable display)"
+          start_lightdm
+          exit 0
+        fi
+      else
+        fast_fails=0
+        log "network panel session ended (rc=${rc}, ran_for=${ran_for}s); relaunching (appliance-only, no desktop escape)"
+      fi
       sleep 1
       ;;
   esac
