@@ -136,6 +136,15 @@ STRINGS = {
         "cancel_back": "Kembali ke aktivasi",
         "cancel_exit": "Keluar ke konsol",
         "status_not_connected": "Belum terhubung ke jaringan",
+        "net_mode_win_title": "vacti - Jaringan",
+        "net_mode_hero_title": "Pengaturan jaringan",
+        "net_mode_hero_sub": "Atur IP statis / Wi-Fi / proxy / DNS. Tekan Selesai bila sudah siap.",
+        "net_mode_done": "Selesai - buka login desktop",
+        "net_mode_always_desktop": "Selalu langsung ke login desktop",
+        "net_mode_cancel_heading": "Selalu langsung ke login desktop?",
+        "net_mode_cancel_body": "Panel jaringan ini tidak akan muncul lagi setelah reboot. Bisa diatur ulang dari desktop.",
+        "net_mode_cancel_back": "Batal",
+        "net_mode_cancel_exit": "Selalu ke desktop",
     },
     "en": {
         "win_title": "vacti - Activation",
@@ -190,6 +199,15 @@ STRINGS = {
         "cancel_back": "Back to activation",
         "cancel_exit": "Exit to console",
         "status_not_connected": "Not connected to a network",
+        "net_mode_win_title": "vacti - Network",
+        "net_mode_hero_title": "Network settings",
+        "net_mode_hero_sub": "Configure static IP / Wi-Fi / proxy / DNS. Press Done when ready.",
+        "net_mode_done": "Done - open desktop login",
+        "net_mode_always_desktop": "Always go straight to the desktop login",
+        "net_mode_cancel_heading": "Always go straight to the desktop login?",
+        "net_mode_cancel_body": "This network panel will no longer appear on future boots. You can reconfigure from the desktop.",
+        "net_mode_cancel_back": "Cancel",
+        "net_mode_cancel_exit": "Always desktop",
     },
 }
 
@@ -203,17 +221,27 @@ def _flag_lang(argv):
     return None
 
 
+def _flag_mode(argv):
+    """--mode=network | --mode network -> "network"; else "" (default: full enroll kiosk)."""
+    for i, a in enumerate(argv):
+        if a == "--mode" and i + 1 < len(argv):
+            return argv[i + 1].strip().lower()
+        if a.startswith("--mode="):
+            return a.split("=", 1)[1].strip().lower()
+    return ""
+
+
 def _positional_args(argv):
-    """argv minus the --lang flag (so argv[1] can still override ACTIVATE)."""
+    """argv minus the --lang and --mode flags (so argv[1] can still override ACTIVATE)."""
     out, skip = [], False
     for a in argv[1:]:
         if skip:
             skip = False
             continue
-        if a == "--lang":
+        if a in ("--lang", "--mode"):
             skip = True
             continue
-        if a.startswith("--lang="):
+        if a.startswith("--lang=") or a.startswith("--mode="):
             continue
         out.append(a)
     return out
@@ -253,6 +281,13 @@ def resolve_lang():
 
 
 CURRENT_LANG = resolve_lang()
+
+# --mode=network: run the SAME libadwaita kiosk shell but hide the enroll + optional tabs,
+# retitle the hero + buttons, and treat the primary button as "done -> desktop login" and
+# cancel as "always desktop login" (opt-out latch). Launched by vacti-netpanel (POST-enroll
+# UX) so the post-enroll console has the same premium look as the pre-enroll kiosk instead
+# of a bare nm-connection-editor popup. "" = default pre-enroll kiosk behaviour, unchanged.
+MODE = _flag_mode(sys.argv)
 
 
 def save_lang(lang):
@@ -326,7 +361,7 @@ class KioskWindow(Adw.ApplicationWindow):
         self._i18n = []
         self._lang_syncing = False
         self._last_status_line = ""
-        self._reg(self.set_title, "win_title")
+        self._reg(self.set_title, "net_mode_win_title" if MODE == "network" else "win_title")
         self.set_default_size(960, 640)
         self.fullscreen()
 
@@ -425,11 +460,11 @@ class KioskWindow(Adw.ApplicationWindow):
         if logo:
             hero.append(logo)
         title = Gtk.Label()
-        self._reg(title.set_label, "hero_title")
+        self._reg(title.set_label, "net_mode_hero_title" if MODE == "network" else "hero_title")
         title.add_css_class("title-1")
         hero.append(title)
         sub = Gtk.Label()
-        self._reg(sub.set_label, "hero_sub")
+        self._reg(sub.set_label, "net_mode_hero_sub" if MODE == "network" else "hero_sub")
         sub.add_css_class("dim-label")
         sub.set_wrap(True)
         sub.set_justify(Gtk.Justification.CENTER)
@@ -454,7 +489,17 @@ class KioskWindow(Adw.ApplicationWindow):
         self._reg(p_net.set_title, "tab_net")
         self._reg(p_enr.set_title, "tab_enroll")
         self._reg(p_opt.set_title, "tab_opt")
-        self.stack.set_visible_child_name("enroll")
+        if MODE == "network":
+            # Post-enroll network-only surface: hide the enroll + optional tabs and the
+            # tab switcher itself (one-tab UIs look clean without it). The underlying
+            # pages still exist in the stack so any code that might reference them by
+            # name never hits a KeyError.
+            p_enr.set_visible(False)
+            p_opt.set_visible(False)
+            switcher.set_visible(False)
+            self.stack.set_visible_child_name("net")
+        else:
+            self.stack.set_visible_child_name("enroll")
         col.append(self.stack)
 
         # Inline validation banner (hidden until needed).
@@ -471,16 +516,25 @@ class KioskWindow(Adw.ApplicationWindow):
 
         # Primary / secondary actions.
         self.activate_btn = Gtk.Button()
-        self._reg(self.activate_btn.set_label, "activate")
+        if MODE == "network":
+            self._reg(self.activate_btn.set_label, "net_mode_done")
+        else:
+            self._reg(self.activate_btn.set_label, "activate")
         self.activate_btn.add_css_class("suggested-action")
         self.activate_btn.add_css_class("pill")
         self.activate_btn.add_css_class("vacti-cta")
         self.activate_btn.set_hexpand(True)
-        self.activate_btn.connect("clicked", self.on_activate)
+        if MODE == "network":
+            self.activate_btn.connect("clicked", self.on_net_mode_done)
+        else:
+            self.activate_btn.connect("clicked", self.on_activate)
         col.append(self.activate_btn)
 
         cancel = Gtk.Button()
-        self._reg(cancel.set_label, "exit_console")
+        if MODE == "network":
+            self._reg(cancel.set_label, "net_mode_always_desktop")
+        else:
+            self._reg(cancel.set_label, "exit_console")
         cancel.add_css_class("flat")
         cancel.set_halign(Gtk.Align.CENTER)
         cancel.connect("clicked", self.on_cancel)
@@ -813,13 +867,14 @@ class KioskWindow(Adw.ApplicationWindow):
         return True
 
     def on_cancel(self, _btn):
+        net = MODE == "network"
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading=t("cancel_heading"),
-            body=t("cancel_body"),
+            heading=t("net_mode_cancel_heading" if net else "cancel_heading"),
+            body=t("net_mode_cancel_body" if net else "cancel_body"),
         )
-        dialog.add_response("back", t("cancel_back"))
-        dialog.add_response("exit", t("cancel_exit"))
+        dialog.add_response("back", t("net_mode_cancel_back" if net else "cancel_back"))
+        dialog.add_response("exit", t("net_mode_cancel_exit" if net else "cancel_exit"))
         dialog.set_response_appearance(
             "exit", Adw.ResponseAppearance.DESTRUCTIVE
         )
@@ -832,6 +887,13 @@ class KioskWindow(Adw.ApplicationWindow):
             global EXIT_CODE
             EXIT_CODE = 10
             self.get_application().quit()
+
+    # Network-mode primary button: the operator is done configuring network;
+    # exit cleanly so vacti-netpanel hands off to the LightDM desktop login.
+    def on_net_mode_done(self, _btn):
+        global EXIT_CODE
+        EXIT_CODE = 0
+        self.get_application().quit()
 
 
 class KioskApp(Adw.Application):

@@ -221,6 +221,33 @@ check "vacti-netpanel-headless.service fails OPEN to a getty (OnFailure=getty@tt
 check "vacti-netpanel --headless path drives nmtui" \
   has "$NETPANEL_SH" 'nmtui'
 
+echo "== GUI panel uses the premium vacti-kiosk shell in --mode=network, not a bare GTK popup =="
+check "vacti-netpanel launches vacti-kiosk in --mode=network as the preferred GUI" \
+  has "$NETPANEL_SH" '\--mode=network'
+check "vacti-netpanel keeps nm-connection-editor only as a yad-menu fallback" \
+  has "$NETPANEL_SH" 'nm-connection-editor'
+check "vacti-netpanel maps kiosk exit 0 -> desktop login (one-shot)" \
+  bash -c 'grep -Eq "0\\)[[:space:]]+return 2 ;;.*#.*desktop" "'"$NETPANEL_SH"'"'
+check "vacti-netpanel maps kiosk exit 10 -> opt-out latch" \
+  bash -c 'grep -Eq "10\\)[[:space:]]*return 3 ;;" "'"$NETPANEL_SH"'"'
+
+echo "== vacti-kiosk --mode=network reuses the libadwaita shell with hidden enroll/opt tabs =="
+KIOSK_SH="${ENR}/activate/vacti-kiosk"
+check "vacti-kiosk parses --mode flag" \
+  has "$KIOSK_SH" 'def _flag_mode'
+# Both the MODE check and the hide calls must exist in the kiosk source. Multi-line
+# proximity matching is brittle in portable grep, so pin both substrings separately.
+check "vacti-kiosk network-mode hides the enroll tab" \
+  has "$KIOSK_SH" 'p_enr\.set_visible\(False\)'
+check "vacti-kiosk network-mode hides the optional tab" \
+  has "$KIOSK_SH" 'p_opt\.set_visible\(False\)'
+check "vacti-kiosk gates the tab-hide on MODE == \"network\"" \
+  has "$KIOSK_SH" 'MODE == "network":'
+check "vacti-kiosk network-mode primary button is net_mode_done (not activate)" \
+  has "$KIOSK_SH" 'net_mode_done'
+check "vacti-kiosk network-mode on-done handler exits cleanly (EXIT_CODE=0)" \
+  has "$KIOSK_SH" 'def on_net_mode_done'
+
 echo "== install/enable wiring ships the panel on both build drivers =="
 BG="${ROOT}/distro/golden-image/build-golden.sh"
 BISO="${ROOT}/distro/live-build-config/build-iso.sh"

@@ -72,16 +72,50 @@ for _l in /usr/share/vacti/branding/logo/png/vacti-logomark-128.png \
 done
 
 # ---------------------------------------------------------------------------
-# The X session client, re-exec'd under xinit (GUI SKU). Opens the NetworkManager
-# editor; when the operator closes it, shows the fall-through menu and loops.
+# The X session client, re-exec'd under xinit (GUI SKU). Launches the premium
+# vacti-kiosk GTK4+libadwaita shell in --mode=network (same look as the pre-enroll
+# kiosk; hides the enroll+optional tabs, retitles the hero + buttons). When the
+# kiosk exits cleanly the operator is done -> return 2 (one-shot desktop login).
+# "Always desktop" sets EXIT_CODE=10 in the kiosk -> return 3 (opt-out latch).
+#
+# Fall-throughs: if the premium kiosk cannot start (import error, X init failure,
+# PYTHON_BIN missing), fall through to yad, then zenity, then a bare desktop login
+# - exactly the pre-change fall-through contract.
+#
 # Exit codes consumed by main: 2=desktop login (one-shot), 3=always desktop login
 # (latch), 4=reboot, anything else=fall through to the desktop login (no trap).
 # ---------------------------------------------------------------------------
+KIOSK_APP="/usr/local/share/vacti-kiosk/vacti-kiosk"
+PYTHON_BIN="$(command -v python3 || true)"
+
+run_kiosk_network() {
+  # Only usable when the premium kiosk and python are installed. The kiosk is a
+  # Python app - without PYTHON_BIN it is a no-op; return 1 so run_session falls
+  # through to the yad/zenity path. The kiosk itself handles GTK4/libadwaita
+  # import failures internally (it just exits non-zero and we fall through here).
+  [[ -f "$KIOSK_APP" && -n "$PYTHON_BIN" ]] || return 1
+  "$PYTHON_BIN" "$KIOSK_APP" --mode=network
+}
+
 run_session() {
   if command -v openbox >/dev/null 2>&1; then
     openbox >/dev/null 2>&1 &
     sleep 1
   fi
+
+  # Preferred: the premium vacti-kiosk shell in --mode=network. Its own exit codes:
+  #   0  -> operator pressed "Done" / closed the window  -> one-shot desktop login
+  #   10 -> operator pressed "Always desktop login"      -> opt-out latch
+  # Any non-{0,10} is the kiosk failing to render; fall through to yad/zenity.
+  local krc=1
+  run_kiosk_network
+  krc=$?
+  case "$krc" in
+    0)  return 2 ;;  # done -> one-shot desktop login
+    10) return 3 ;;  # latch -> always desktop login
+  esac
+
+  # Fallback: yad notebook -> zenity question -> bare fall-through (unchanged).
   local editor=""
   command -v nm-connection-editor >/dev/null 2>&1 && editor="nm-connection-editor"
 
