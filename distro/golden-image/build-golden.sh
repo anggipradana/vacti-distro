@@ -551,6 +551,14 @@ echo "[prov] branding"
 # enable the first-boot enroll unit (no token baked; it fails loudly without one)
 systemctl enable vacti-firstboot.service 2>/dev/null || true
 
+# enable the engine runner so an ENROLLED image auto-starts it on the first post-enroll
+# reboot. On a FAT-OVA the engine .deb postinst already runs systemctl enable
+# vacti-engine.service in this same chroot; this is a second, explicit layer so the
+# enablement symlink ships even if that postinst enable did not persist. No-op on a THIN
+# image (the unit file is not baked; enable just fails -> || true), where the engine is
+# instead enabled by the postinst on the live first boot. Idempotent + fail-open.
+systemctl enable vacti-engine.service 2>/dev/null || true
+
 # ---- anti-OOM: enable the backstops shipped via copy-in --------------------
 echo "[prov] enabling anti-OOM backstops (zram / earlyoom / swapfile firstboot)"
 # earlyoom: userspace OOM killer backstop (config in /etc/default/earlyoom)
