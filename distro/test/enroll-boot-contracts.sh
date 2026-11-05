@@ -287,6 +287,34 @@ if ! engine_env_ready; then ok "netpanel: zero-byte engine.env -> not ready"; el
 printf 'VACTI_URL=https://cp.example\n' > "$CFG_ENV"
 if engine_env_ready; then ok "netpanel: populated engine.env -> ready"; else no "netpanel: populated engine.env -> ready"; fi
 
+echo "== mobile arsenal is BAKED into the image (both build drivers), not left to runtime self-heal =="
+# The engine declares frida CLI + objection + jadx as the MANDATORY mobile tier
+# (capability 'core'; src/runner/arsenal-check.ts MOBILE_PIPX_TOOLS + MOBILE_ZIP_TOOLS).
+# Runtime self-heal was observed STUCK on a live engine (3 timer ticks, 0 installs), so
+# the tier must be baked at image-build time. Mirror the dual-driver netpanel contract:
+# the bake must be present in BOTH the golden-image extras AND the ISO hook (kept in sync).
+EXTRAS="${ROOT}/distro/golden-image/install-engine-extras.sh"
+ISO_HOOK="${ROOT}/distro/live-build-config/config/hooks/normal/0320-engine-extras.hook.chroot"
+check "exists: ${EXTRAS#$ROOT/}"   test -f "$EXTRAS"
+check "exists: ${ISO_HOOK#$ROOT/}" test -f "$ISO_HOOK"
+for _f in "$EXTRAS" "$ISO_HOOK"; do
+  _rel="${_f#$ROOT/}"
+  check "${_rel}: has the (5) mobile instrumentation step tag" \
+    has "$_f" '\(5\) mobile instrumentation tier'
+  check "${_rel}: pins frida CLI (frida-tools==)" \
+    has "$_f" 'frida-tools=='
+  check "${_rel}: bakes objection" \
+    has "$_f" 'objection:objection|pipx install.*objection|objection'
+  check "${_rel}: installs frida/objection via the /opt/pipx -> /usr/local/bin pattern" \
+    has "$_f" 'PIPX_BIN_DIR=/usr/local/bin'
+  check "${_rel}: bakes jadx from the pinned GitHub release zip" \
+    has "$_f" 'skylot/jadx/releases/download'
+  check "${_rel}: symlinks jadx onto the service PATH" \
+    has "$_f" '/usr/local/bin/jadx'
+  check "${_rel}: jadx download is best-effort (warns, does not abort the build)" \
+    has "$_f" 'jadx download failed'
+done
+
 echo
 echo "== summary: ${pass} passed, ${fail} failed =="
 [[ $fail -eq 0 ]]

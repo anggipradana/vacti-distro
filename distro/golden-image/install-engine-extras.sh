@@ -2,7 +2,8 @@
 # install-engine-extras.sh - bake the engine's MANDATORY-by-default NON-apt tools
 # that the package lists cannot express, into the BASE image (NOT gated on
 # VACTI_FULL_ARSENAL). These are part of the canonical mandatory set confirmed by
-# engine 0.2.302: CORE + web3 + REA + Ghidra. Runs UNCONDITIONALLY from
+# engine 0.2.302: CORE + web3 + REA + Ghidra + mobile (frida CLI + objection + jadx).
+# Runs UNCONDITIONALLY from
 # build-golden.sh's provision step, AFTER the engine .deb + arsenal install (so
 # `go`, `pipx`, the vacti-engine user, and curl/git are present).
 #
@@ -11,6 +12,7 @@
 #   (2) jwt_tool                 -> git clone -> /opt/jwt_tool (run by path)   [step_jwt_tool]
 #   (3) web3: slither + Foundry  -> pipx (/opt/pipx -> /usr/local/bin) + foundryup (/opt/foundry -> /usr/local/bin)  [step_web3_arsenal]
 #   (4) Caido CLI + caido-mcp-server -> engine-home caido-cli + go-built MCP    [step_caido]
+#   (5) mobile: frida-tools + objection -> pipx (/opt/pipx -> /usr/local/bin); jadx -> GitHub zip (/opt/jadx -> /usr/local/bin)  [step_jadx + pipx]
 #
 # DISTRO ADAPTATION of the engine's "as the engine user" installs: the engine runs
 # slither/foundry as ${ENGINE_USER} into its home, then SYMLINKS the real binaries
@@ -37,6 +39,13 @@ CAIDO_MCP_TAG="${VACTI_CAIDO_MCP_TAG:-v1.1.0}"
 JWT_TOOL_REPO="https://github.com/ticarpi/jwt_tool.git"
 JWT_TOOL_DIR="/opt/jwt_tool"
 FOUNDRY_DIR="/opt/foundry"
+# Mobile instrumentation pins - mirror the engine's packaging/arsenal.env
+# (FRIDA_CLI_PIN / JADX_VERSION_PIN). This script cannot source arsenal.env
+# (separate repo), so the pins are env-overridable defaults, exactly like the
+# go-tool + Caido versions above.
+FRIDA_CLI_PIN="${VACTI_FRIDA_CLI_PIN:-frida-tools==14.11.0}"
+JADX_VERSION="${VACTI_JADX_VERSION:-1.5.0}"
+JADX_DIR="/opt/jadx"
 
 log()  { echo "[extras] $*"; }
 warn() { echo "[extras][warn] $*" >&2; }
@@ -183,6 +192,55 @@ elif need go && need git; then
   rm -rf "$_src" 2>/dev/null || true
 else
   warn "go/git unavailable; skipping caido-mcp-server"
+fi
+
+# --- (5) mobile instrumentation tier (MANDATORY on every engine, 0.2.359) ------
+# The engine declares frida CLI + objection + jadx as capability 'core' (every
+# fleet box is mobile-pentest-capable by declaration; src/runner/arsenal-check.ts
+# MOBILE_PIPX_TOOLS + MOBILE_ZIP_TOOLS, missingMobileTools() UNGATED). frida-tools
+# + objection are pipx (same /opt/pipx -> /usr/local/bin pattern as slither above);
+# jadx is a pinned GitHub release zip (same shape as the engine bootstrap step_jadx).
+# Baked here so a fresh OVA reports the mobile tier complete on its FIRST heartbeat
+# instead of waiting on the runtime self-heal (healMobile / ensure_jadx) to backfill
+# post-boot - which was observed STUCK on a live engine (3 timer ticks, 0 installs).
+# Best-effort: a pipx/download blip warns and the build continues (self-heal covers it).
+if need pipx; then
+  for _mob in "${FRIDA_CLI_PIN}:frida" "objection:objection"; do
+    _spec="${_mob%%:*}"; _probe="${_mob##*:}"
+    if [ -x "/usr/local/bin/${_probe}" ]; then
+      log "mobile: ${_probe} already installed"
+    else
+      log "pipx: installing ${_spec} (mobile instrumentation) -> /usr/local/bin"
+      PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin PIP_BREAK_SYSTEM_PACKAGES=1 \
+        pipx install "${_spec}" >/dev/null 2>&1 \
+        || warn "pipx install ${_spec} failed (mobile instrumentation degrades; runtime self-heal backfills)"
+    fi
+  done
+else
+  warn "mobile: pipx not found; skipping frida-tools + objection"
+fi
+# jadx: pinned GitHub release zip -> /opt/jadx, launcher symlinked onto /usr/local/bin.
+if [ -x /usr/local/bin/jadx ]; then
+  log "mobile: jadx already installed"
+elif need curl && need unzip; then
+  jadx_url="https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip"
+  log "mobile: downloading jadx v${JADX_VERSION} -> ${JADX_DIR}"
+  _jtmp="$(mktemp -d)"
+  if curl -fsSL -m 180 -o "${_jtmp}/jadx.zip" "$jadx_url"; then
+    rm -rf "$JADX_DIR"; mkdir -p "$JADX_DIR"
+    if unzip -q -o "${_jtmp}/jadx.zip" -d "$JADX_DIR"; then
+      chmod +x "${JADX_DIR}/bin/jadx" "${JADX_DIR}/bin/jadx-gui" 2>/dev/null || true
+      ln -sf "${JADX_DIR}/bin/jadx" /usr/local/bin/jadx
+      log "mobile: jadx installed (${JADX_DIR}/bin/jadx) + symlinked to /usr/local/bin/jadx"
+    else
+      warn "mobile: jadx unzip failed; the decompiler self-heals post-boot (ensure_jadx)"
+    fi
+  else
+    warn "mobile: jadx download failed (${jadx_url}); the decompiler self-heals post-boot"
+  fi
+  rm -rf "$_jtmp" 2>/dev/null || true
+else
+  warn "mobile: curl/unzip not found; skipping jadx (self-heal covers it post-boot)"
 fi
 
 # --- hygiene: keep /root clean (no-secret scan greps /root) + image lean -------
