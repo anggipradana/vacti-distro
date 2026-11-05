@@ -82,8 +82,14 @@ check "firstboot inline writer targets a temp file" \
   has "$FIRSTBOOT_SH" '\}[[:space:]]*>[[:space:]]*"\$ENV_TMP"'
 check "firstboot publishes engine.env via atomic rename (mv -f)" \
   has "$FIRSTBOOT_SH" '^[[:space:]]*mv -f "\$ENV_TMP" "\$CFG_ENV"'
-check "firstboot validates producer token before publishing" \
-  has "$FIRSTBOOT_SH" 'VACTI_PRODUCER_TOKEN=\.\+'
+check "firstboot validates producer token before publishing (as VACTI_TOKEN)" \
+  has "$FIRSTBOOT_SH" 'VACTI_TOKEN=\.\+'
+# Regression-pin: the firstboot writer MUST emit the key name the engine's
+# Zod schema reads (VACTI_TOKEN). The earlier VACTI_PRODUCER_TOKEN variant
+# made the engine crash on startup under Type=notify so the appliance
+# never heartbeated. Keep in lockstep with bootstrap-apt.sh.
+check "firstboot writes VACTI_TOKEN (engine Zod key), not VACTI_PRODUCER_TOKEN" \
+  bash -c '! grep -Eq "\"VACTI_PRODUCER_TOKEN\"|VACTI_PRODUCER_TOKEN=" "'"$FIRSTBOOT_SH"'"'
 check "firstboot zero-byte backstop removes a partial engine.env" \
   has "$FIRSTBOOT_SH" 'if \[\[ ! -s "\$CFG_ENV" \]\]; then'
 check "firstboot no longer writes the live engine.env path directly" \
@@ -145,7 +151,7 @@ if ! engine_env_ready; then ok "absent engine.env -> not ready"; else no "absent
 if ! engine_env_ready; then ok "zero-byte engine.env -> not ready"; else no "zero-byte engine.env -> not ready"; fi
 printf '\n   \n' > "$CFG_ENV"
 if ! engine_env_ready; then ok "whitespace-only engine.env -> not ready"; else no "whitespace-only engine.env -> not ready"; fi
-printf 'VACTI_URL=https://cp.example\nVACTI_PRODUCER_TOKEN=abc123\n' > "$CFG_ENV"
+printf 'VACTI_URL=https://cp.example\nVACTI_TOKEN=abc123\n' > "$CFG_ENV"
 if engine_env_ready; then ok "populated engine.env -> ready"; else no "populated engine.env -> ready"; fi
 
 echo "== post-enroll handoff: land on a NETWORK panel, not the desktop login =="
