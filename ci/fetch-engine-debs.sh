@@ -18,8 +18,8 @@
 #   VACTI_ENGINE_REF           optional: pin the vacti-engine version; empty = latest
 #   VACTI_ENGINE_REPO          GH fallback repo (default anggipradana/vacti-pentest-engine)
 #   GH_TOKEN                   token with read access to the engine repo (GH fallback)
-#   VACTI_CHROMIUM_GHCR        GHCR repo for the chromium OCI artifact
-#                              (default ghcr.io/anggipradana/vacti-engine-chromium)
+#   VACTI_CHROMIUM_HF_BASE     HF dataset resolve base for the chromium .deb backfill
+#                              (default https://huggingface.co/datasets/anggipradana/vacti-distro-images/resolve/main/chromium)
 set -euo pipefail
 
 ARCH="${1:?usage: fetch-engine-debs.sh <arch> <outdir>}"
@@ -114,7 +114,7 @@ fetch_from_github() {
 # browsers.json pins the exact revision, so the built chromium is version-locked to the baked engine.
 # ci/build-chromium-deb.sh extracts ONLY playwright-core (no methodology IP), installs the pinned
 # chromium (cross-arch via PLAYWRIGHT_HOST_PLATFORM_OVERRIDE when the runner arch differs), and packages
-# it. This needs the engine .deb already present; it runs AFTER have_engine. Fails soft -> GHCR tier.
+# it. This needs the engine .deb already present; it runs AFTER have_engine. Fails soft -> HF tier.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 build_chromium_local() {
@@ -128,46 +128,50 @@ build_chromium_local() {
   [[ -n "$engine_deb" ]] || { warn "could not locate an engine .deb in ${OUTDIR}"; return 1; }
   log "building chromium locally from $(basename "$engine_deb") (public Playwright CDN; no secret)"
   bash "$builder" --engine-deb "$engine_deb" --arch "$ARCH" --out "$OUTDIR" \
-    || { warn "local chromium build failed; falling back to the GHCR backfill"; return 1; }
+    || { warn "local chromium build failed; falling back to the HF backfill"; return 1; }
   have_chromium
 }
 
-# --- 4. GHCR chromium backfill (public OCI artifact; NO token) ----------------
-# The chromium .deb is STRUCTURALLY absent from the apt pool: its ~226MB (amd64) / ~285MB (arm64)
-# body exceeds the upstream 100MB (Cloudflare free-plan) request-body cap, so the engine's apt-pool
-# upload takes a tolerated HTTP 413 and chromium never lands in the pool (the fleet self-heals the
-# browser at runtime via ensure-browser.sh). The engine GH Release has it, but that is a PRIVATE
-# cross-repo release this CI cannot read without a PAT the operator will not add. So the engine
-# release pipeline also mirrors chromium to GHCR as a PUBLIC OCI artifact (packaging/publish-chromium-
-# ghcr.sh, same owner, built-in GITHUB_TOKEN), which is pulled here anonymously - no secret needed.
-# This backfills ONLY chromium; vacti-engine itself still comes from the signed apt pool above.
-GHCR_REPO="${VACTI_CHROMIUM_GHCR:-ghcr.io/anggipradana/vacti-engine-chromium}"
+# --- 4. HF chromium backfill (public dataset; NO token) -----------------------
+# chromium is a big BINARY ARTIFACT, published to the PUBLIC Hugging Face dataset anggipradana/
+# vacti-distro-images (the same dataset that hosts the OVAs) by vacti-distro's chromium-release.yml.
+# This tier pulls the exact pinned revision anonymously over HTTPS - no oras, no registry login, no
+# one-time "make the package public" step. It is a CONTINUITY fallback behind the local build (tier 3):
+# it runs only when the local build could not (e.g. no node on the runner). The revision is read from
+# the engine .deb's bundled playwright-core/browsers.json so the pulled chromium matches the baked
+# engine; vacti-engine itself still comes from the signed apt pool above.
+HF_BASE="${VACTI_CHROMIUM_HF_BASE:-https://huggingface.co/datasets/anggipradana/vacti-distro-images/resolve/main/chromium}"
 
-ensure_oras() {
-  command -v oras >/dev/null 2>&1 && return 0
-  local ver="${ORAS_VERSION:-1.3.6}" tmp url
+chromium_revision_from_engine_deb() {
+  local deb rev tmp bj
+  deb="$(ls -1 "${OUTDIR}"/vacti-engine_*_"${ARCH}".deb 2>/dev/null | head -n1 || true)"
+  [[ -n "$deb" ]] || deb="$(ls -1 "${OUTDIR}"/vacti-engine_*.deb 2>/dev/null | head -n1 || true)"
+  [[ -n "$deb" && -f "$deb" ]] || return 1
+  command -v node >/dev/null 2>&1 || return 1
   tmp="$(mktemp -d)" || return 1
-  url="https://github.com/oras-project/oras/releases/download/v${ver}/oras_${ver}_linux_amd64.tar.gz"
-  warn "oras not found; installing ${ver}"
-  curl -fsSL "$url" -o "${tmp}/oras.tgz" || { rm -rf "$tmp"; return 1; }
-  tar -C "$tmp" -xzf "${tmp}/oras.tgz" oras || { rm -rf "$tmp"; return 1; }
-  # Keep the binary OUT of OUTDIR so it never rides the docker build-context / OVA stage dir.
-  chmod 0755 "${tmp}/oras" || { rm -rf "$tmp"; return 1; }
-  export PATH="${tmp}:${PATH}"
-  command -v oras >/dev/null 2>&1
+  dpkg-deb --fsys-tarfile "$deb" \
+    | tar -x -C "$tmp" --wildcards '*/node_modules/playwright-core/browsers.json' 2>/dev/null || true
+  bj="$(find "$tmp" -path '*/playwright-core/browsers.json' -type f 2>/dev/null | head -n1)"
+  if [[ -n "$bj" ]]; then
+    rev="$(node -e '
+      const fs=require("fs");
+      const b=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+      const c=(b.browsers||[]).find(x=>x.name==="chromium");
+      process.stdout.write(c&&c.revision?String(c.revision):"");
+    ' "$bj" 2>/dev/null || true)"
+  fi
+  rm -rf "$tmp"
+  [[ -n "$rev" ]] && { printf '%s' "$rev"; return 0; }
+  return 1
 }
 
-fetch_chromium_from_ghcr() {
-  ensure_oras || { warn "could not obtain the oras CLI; skipping GHCR chromium backfill"; return 1; }
-  # If the package is private rather than public, an anonymous pull 401s; a GH token (if present) is
-  # used best-effort so an operator who GRANTED the package to this repo instead of making it public
-  # also works. A public package needs no auth at all.
-  if [[ -n "${GH_TOKEN:-}" ]]; then
-    printf '%s' "${GH_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR:-x-access-token}" --password-stdin >/dev/null 2>&1 || true
-  fi
-  local oci_tag="latest-${ARCH}"
-  log "GHCR backfill: ${GHCR_REPO}:${oci_tag} -> ${OUTDIR}"
-  oras pull "${GHCR_REPO}:${oci_tag}" -o "${OUTDIR}" >/dev/null 2>&1 || { warn "oras pull ${GHCR_REPO}:${oci_tag} failed (package public? pushed?)"; return 1; }
+fetch_chromium_from_hf() {
+  local rev url
+  rev="$(chromium_revision_from_engine_deb)" || { warn "could not resolve the pinned chromium revision from the engine .deb; skipping HF backfill"; return 1; }
+  url="${HF_BASE}/vacti-engine-chromium_${rev}_${ARCH}.deb"
+  log "HF backfill: ${url} -> ${OUTDIR}"
+  curl -fSL "$url" -o "${OUTDIR}/vacti-engine-chromium_${rev}_${ARCH}.deb" 2>/dev/null \
+    || { warn "HF pull failed for revision ${rev} (${ARCH}); is it published under chromium/?"; return 1; }
   have_chromium
 }
 
@@ -180,10 +184,10 @@ elif have_engine && build_chromium_local; then
   # the upstream 100MB upload cap), so chromium is BUILT here from the engine's own pinned playwright-core
   # (public Playwright CDN, no secret, no cross-repo auth, cross-arch on one runner).
   log "fetched engine (apt pool) + chromium (built locally from the engine's pinned playwright-core)"
-elif have_engine && fetch_chromium_from_ghcr; then
-  # Last-resort fallback kept for continuity: pull chromium from the public GHCR OCI artifact if the
-  # local build could not run (e.g. no node on the runner). Only works if that package is public.
-  log "fetched engine (apt pool) + chromium (GHCR backfill)"
+elif have_engine && fetch_chromium_from_hf; then
+  # Continuity fallback: pull chromium from the public HF dataset if the local build could not run
+  # (e.g. no node on the runner). Public anonymous HTTPS, no token, no registry login.
+  log "fetched engine (apt pool) + chromium (HF backfill)"
 else
   warn "could not obtain both .debs (engine=$(have_engine && echo yes || echo no), chromium=$(have_chromium && echo yes || echo no)); build-golden.sh will fall back to THIN bootstrap"
 fi

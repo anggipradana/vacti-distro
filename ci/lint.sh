@@ -76,5 +76,14 @@ else
   echo "  !!! SKIP: docker not available - kiosk-stuck runtime test NOT executed !!!"
 fi
 
+echo "== chromium -> HF contract =="
+# Static contract test for the Chromium -> Hugging Face move (no network): chromium is built +
+# published to the HF dataset and the consumer backfill fetches from HF, not GHCR/oras.
+if [[ -x distro/test/chromium-hf-contract.sh ]]; then
+  bash distro/test/chromium-hf-contract.sh || rc=1
+else
+  echo "  distro/test/chromium-hf-contract.sh missing; skipping"
+fi
+
 [[ $rc -eq 0 ]] && echo "== lint PASS ==" || echo "== lint FAIL ==" >&2
 exit $rc

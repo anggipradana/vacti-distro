@@ -1,0 +1,143 @@
+# Build + publish the pinned vacti-engine-chromium .deb to the Hugging Face dataset
+# anggipradana/vacti-distro-images (the SAME dataset that hosts the OVA/ISO images).
+#
+# WHY HF (not GHCR): the ~226MB (amd64) / ~285MB (arm64) chromium .deb is a big BINARY ARTIFACT, and big
+# binary artifacts live in the HF dataset (free, multi-GB LFS, public anonymous pull, no Cloudflare cap).
+# Container images live in GHCR; code lives in private GitHub. HF already hosts the OVAs, so chromium
+# belongs there too - the old private-GHCR mirror is retired.
+#
+# CADENCE: chromium bumps only when Playwright bumps its pinned revision (~quarterly), independent of
+# engine releases, so this runs on manual dispatch (or a repository_dispatch the engine may fire). It
+# does NOT rebuild on every engine tag.
+#
+# NO-SKEW: the chromium revision is determined by the playwright-core version. The build reads the engine
+# repo's committed package-lock.json (via VACTI_ENGINE_REPO_TOKEN) to pin the exact playwright-core the
+# engine ships, so the published chromium matches the engine. A manual `playwright_version` input wins.
+#
+# SECRET REQUIRED: HF_PUBLISH_TOKEN (the hf_... write token for the dataset) - same secret
+# publish-images-hf.yml uses. VACTI_ENGINE_REPO_TOKEN is optional (read access to the engine repo to pin
+# the version); without it, pass playwright_version explicitly.
+name: chromium-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      playwright_version:
+        description: "playwright-core version to pin (empty = read the engine's package-lock.json, else latest)"
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [chromium-release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chromium-release
+  cancel-in-progress: false
+
+jobs:
+  build-publish:
+    strategy:
+      fail-fast: false
+      # Serialize the two arch legs so the SHA256SUMS remote-merge-upsert below cannot race.
+      max-parallel: 1
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout vacti-distro
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install huggingface_hub CLI (minor-pinned)
+        run: pip install "huggingface_hub[cli]~=0.35.0"
+
+      - name: Resolve the playwright-core pin
+        id: pin
+        env:
+          IN_VERSION: ${{ github.event.inputs.playwright_version || github.event.client_payload.playwright_version }}
+          ENGINE_REPO: anggipradana/vacti-pentest-engine
+          GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          VER="${IN_VERSION:-}"
+          if [ -z "$VER" ] && [ -n "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+            # Read the exact playwright-core version the engine pins, without a full checkout.
+            lock="$(gh api "repos/${ENGINE_REPO}/contents/package-lock.json" \
+                      --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)"
+            if [ -n "$lock" ]; then
+              VER="$(printf '%s' "$lock" | node -e '
+                const fs=require("fs");
+                const j=JSON.parse(fs.readFileSync(0,"utf8"));
+                const p=(j.packages&&j.packages["node_modules/playwright-core"])||null;
+                const d=(j.dependencies&&j.dependencies["playwright-core"])||null;
+                const v=(p&&p.version)||(d&&d.version)||"";
+                process.stdout.write(String(v));
+              ' 2>/dev/null || true)"
+            fi
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "[pin] playwright-core = ${VER:-<latest>}"
+
+      - name: Build the vacti-engine-chromium .deb (${{ matrix.arch }}, native runner)
+        id: build
+        env:
+          PLAYWRIGHT_VERSION: ${{ steps.pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x distro/chromium/build-chromium-deb.sh
+          deb="$(distro/chromium/build-chromium-deb.sh --arch "${{ matrix.arch }}" --out dist-chromium | tail -n1)"
+          [ -f "$deb" ] || { echo "::error::no chromium .deb produced"; exit 1; }
+          echo "deb=$deb" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$deb")" >> "$GITHUB_OUTPUT"
+          echo "[build] produced $deb"
+
+      - name: Publish the .deb + SHA256SUMS to Hugging Face (chromium/)
+        env:
+          HF_TOKEN: ${{ secrets.HF_PUBLISH_TOKEN }}
+          REPO_ID: anggipradana/vacti-distro-images
+          DEB: ${{ steps.build.outputs.deb }}
+          NAME: ${{ steps.build.outputs.name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "::error::HF_PUBLISH_TOKEN secret is not set; cannot publish (add the hf_... write token)."
+            exit 1
+          fi
+          RESOLVE="https://huggingface.co/datasets/${REPO_ID}/resolve/main"
+
+          huggingface-cli login --token "$HF_TOKEN" >/dev/null 2>&1 || { echo "::error::hf login failed"; exit 1; }
+          huggingface-cli repo create "vacti-distro-images" --type dataset -y >/dev/null 2>&1 || true
+
+          # Upload the .deb. Revision is in the filename, so arches/revisions never collide.
+          huggingface-cli upload "$REPO_ID" "$DEB" "chromium/${NAME}" \
+            --repo-type dataset --commit-message "chromium: ${NAME}"
+
+          # SHA256SUMS: remote-merge-upsert (this file is the one shared across arches, so the legs are
+          # serialized by max-parallel:1 to avoid a lost update).
+          local_line="$(sha256sum "$DEB" | awk -v n="$NAME" '{print $1"  "n}')"
+          curl -fsSL "${RESOLVE}/chromium/SHA256SUMS" -o remote.sums 2>/dev/null || : > remote.sums
+          { grep -v "  ${NAME}$" remote.sums 2>/dev/null || true; echo "$local_line"; } \
+            | awk 'NF>=2' | sort -k2 > merged.sums
+          huggingface-cli upload "$REPO_ID" merged.sums "chromium/SHA256SUMS" \
+            --repo-type dataset --commit-message "chromium: SHA256SUMS += ${NAME}"
+
+          echo "[hf] published ${RESOLVE}/chromium/${NAME}"
+          echo "### chromium ${NAME}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${RESOLVE}/chromium/${NAME}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- sha256: $(printf '%s' "$local_line" | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
