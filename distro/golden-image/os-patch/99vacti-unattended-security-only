@@ -1,0 +1,44 @@
+// vacti appliance - OS security auto-patch (Strategy 1, fanout #138)
+//
+// Scope unattended-upgrades to the Debian-Security origin ONLY. This closes the
+// trixie OS-CVE drift gap on long-lived enrolled boxes WITHOUT pulling
+// trixie-updates, backports, the pinned Kali prio-100 origin, or the
+// vacti-engine origin - so the arsenal, the pinned Chromium build, and the
+// engine's own `apt-self-update.sh --only-upgrade vacti-engine` self-updater
+// stay byte-stable.
+//
+// Loaded as 99* so it runs AFTER the package default /etc/apt/apt.conf.d/
+// 50unattended-upgrades. The `#clear` directive resets the default list (which
+// also carries ${distro_codename}-updates on some templates) so ONLY the
+// security origin below remains in effect.
+
+#clear Unattended-Upgrade::Origins-Pattern;
+Unattended-Upgrade::Origins-Pattern {
+    // Debian-Security ONLY. ${distro_codename} expands on the box (e.g. trixie),
+    // so this tracks the running release automatically. No -updates, no
+    // backports, no Kali, no vacti-engine.
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+
+// Belt-and-brace: the engine packages are owned by the engine's OWN updater
+// (apt-self-update.sh, `--only-upgrade vacti-engine` / `vacti-engine-chromium`).
+// Blacklist them so the two update paths can never collide on package selection,
+// and the pinned Chromium build is never moved by the OS patcher.
+Unattended-Upgrade::Package-Blacklist {
+    "vacti-engine";
+    "vacti-engine-chromium";
+};
+
+// Long-lived engagement boxes: NEVER auto-reboot. A kernel/libc fix that needs a
+// restart is surfaced to the operator (needrestart, notify-only) and applied on
+// the operator's schedule - never forced mid-engagement.
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+
+// Appliance stability: do not let the unattended run auto-remove dependencies or
+// kernels (avoids surprise arsenal / boot churn on a single-purpose box).
+Unattended-Upgrade::Remove-Unused-Dependencies "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "false";
+
+// Auditability: keep per-run detail under /var/log/unattended-upgrades/.
+Unattended-Upgrade::MinimalSteps "true";

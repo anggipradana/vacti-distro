@@ -46,6 +46,19 @@ netcat-openbsd
 sslscan
 testssl.sh
 
+# --- OS security auto-patch (config drop-ins staged by golden-image/os-patch/) ---
+# unattended-upgrades: the canonical Debian long-lived-stable auto-patcher. Scoped
+# by 99vacti-unattended-security-only to the Debian-Security origin ONLY (not
+# -updates, not Kali prio-100, not vacti-engine), so trixie OS CVE fixes reach a
+# long-lived enrolled box automatically while the arsenal + pinned Chromium stay
+# byte-stable. Pure distro infra, not an engine tool. Jev: distro_infra.
+unattended-upgrades
+# needrestart: companion to unattended-upgrades, configured notify-only
+# ($nrconf{restart}='l' via 99vacti-needrestart-list-only.conf) so a library/kernel
+# upgrade that needs a restart is SURFACED to the operator, never auto-bounced
+# mid-engagement. Distro reboot-discipline infra. Jev: distro_infra.
+needrestart
+
 # --- Anti-OOM backstops (config drop-ins staged by golden-image/oom/) ---
 # zram compressed RAM swap (primary cushion) + earlyoom userspace OOM killer
 # backstop. Pure appliance infrastructure, nothing to do with the arsenal.
