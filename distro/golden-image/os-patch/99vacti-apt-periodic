@@ -1,0 +1,14 @@
+// vacti appliance - APT periodic schedule for the security-only auto-patcher.
+//
+// Drives the apt-daily + apt-daily-upgrade systemd timers (which build-golden.sh
+// and the ISO build now leave UNMASKED) to refresh the package lists and run the
+// scoped unattended-upgrade once per activation. Pairs with
+// 99vacti-unattended-security-only (origin scope + reboot discipline).
+
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::Unattended-Upgrade "1";
+// Reclaim the downloaded security .debs weekly so the appliance stays lean.
+APT::Periodic::AutocleanInterval "7";
+// Verbose so /var/log/unattended-upgrades/ and apt history.log are auditable.
+APT::Periodic::Verbose "1";

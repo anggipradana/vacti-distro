@@ -26,6 +26,7 @@ PKG_DIR="${DISTRO_DIR}/packages"
 BRAND_DIR="${DISTRO_DIR}/branding"
 ENROLL_DIR="${DISTRO_DIR}/enroll"
 OOM_DIR="${HERE}/oom"
+OSPATCH_DIR="${HERE}/os-patch"
 WORK="${WORK:-${DISTRO_DIR}/.build/golden}"
 CACHE="${CACHE:-${DISTRO_DIR}/.build/cache}"
 OUT="${OUT_DIR:-${DISTRO_DIR}/out}"
@@ -85,6 +86,8 @@ rm -rf "$STAGE"; mkdir -p \
   "${STAGE}/etc/sysctl.d" \
   "${STAGE}/etc/tmpfiles.d" \
   "${STAGE}/etc/default" \
+  "${STAGE}/etc/apt/apt.conf.d" \
+  "${STAGE}/etc/needrestart/conf.d" \
   "${STAGE}/usr/share/keyrings" \
   "${STAGE}/opt/vacti-build"
 # branding assets -> /usr/share/vacti/branding (apply-branding.sh reads these)
@@ -159,6 +162,13 @@ cp -a "${OOM_DIR}/sysctl-90-vacti.conf"    "${STAGE}/etc/sysctl.d/90-vacti.conf"
 cp -a "${OOM_DIR}/zram-generator.conf"     "${STAGE}/etc/systemd/zram-generator.conf"
 cp -a "${OOM_DIR}/tmpfiles-vacti-thp.conf" "${STAGE}/etc/tmpfiles.d/vacti-thp.conf"
 cp -a "${OOM_DIR}/earlyoom.default"        "${STAGE}/etc/default/earlyoom"
+# OS security auto-patch drop-ins (Strategy 1, fanout #138): scope
+# unattended-upgrades to the Debian-Security origin ONLY, keep needrestart
+# notify-only, and drive the (now-unmasked below) apt-daily timers. The engine's
+# own --only-upgrade self-updater is unaffected (blacklisted in the UU config).
+cp -a "${OSPATCH_DIR}/99vacti-unattended-security-only" "${STAGE}/etc/apt/apt.conf.d/99vacti-unattended-security-only"
+cp -a "${OSPATCH_DIR}/99vacti-apt-periodic"             "${STAGE}/etc/apt/apt.conf.d/99vacti-apt-periodic"
+cp -a "${OSPATCH_DIR}/99vacti-needrestart-list-only.conf" "${STAGE}/etc/needrestart/conf.d/99vacti-needrestart-list-only.conf"
 # arsenal derivation: stage the manifest-driven generator + its inputs so
 # provision.sh can derive the arsenal list INSIDE the guest. Thin-bootstrap: the
 # engine .deb is NOT installed at build, so the generator reads the VENDORED
@@ -634,8 +644,17 @@ rm -rf /usr/share/man/* /usr/share/info/* 2>/dev/null || true
 find /usr/share/locale -mindepth 1 -maxdepth 1 -type d ! -name 'en*' -exec rm -rf {} + 2>/dev/null || true
 # LIGHTWEIGHT: mask periodic/maintenance units that only churn CPU+disk on a
 # single-purpose appliance (the engine self-heals its arsenal via its own path).
-systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer \
-  e2scrub_all.timer e2scrub_reap.service 2>/dev/null || true
+# NOTE: apt-daily.timer + apt-daily-upgrade.timer are DELIBERATELY NOT masked here
+# anymore (Strategy 1, fanout #138) - they drive the security-origin-only
+# unattended-upgrades auto-patcher (99vacti-unattended-security-only), which is the
+# only thing that reaches trixie OS CVE fixes on a long-lived enrolled box. The
+# scope excludes Kali/-updates/vacti-engine, so arsenal determinism is preserved.
+systemctl mask man-db.timer e2scrub_all.timer e2scrub_reap.service 2>/dev/null || true
+# OS security auto-patch: make sure the apt-daily timers are UNMASKED + enabled on
+# the shipped image (the Debian base ships them, but unmask defensively in case a
+# base snapshot pre-masked them). Automatic-Reboot stays OFF (UU config).
+systemctl unmask apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+systemctl enable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
 # assert no engine.env / token file leaked in
 rm -f /etc/vacti-engine/engine.env /etc/vacti-engine/enroll.token 2>/dev/null || true
 # LIGHTWEIGHT: discard freed blocks so the later qemu-img -c / virt-sparsify

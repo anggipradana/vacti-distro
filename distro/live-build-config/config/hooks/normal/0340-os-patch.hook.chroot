@@ -1,0 +1,91 @@
+#!/bin/sh
+# 0340-os-patch.hook.chroot - OS security auto-patch (Strategy 1, fanout #138).
+# ISO counterpart of the golden-image build-golden.sh OS-patch wiring; self-
+# contained (live-build hooks cannot source files outside the chroot), so the
+# config bodies below are kept IN SYNC with golden-image/os-patch/*. Keep the
+# three drop-ins + the timer handling byte-equivalent to that directory.
+#
+# What it does, mirroring the golden image:
+#   - installs unattended-upgrades + needrestart (also in distro-owned.list, so
+#     this is belt-and-brace / idempotent)
+#   - scopes unattended-upgrades to the Debian-Security origin ONLY
+#     (99vacti-unattended-security-only): no -updates, no backports, no Kali
+#     prio-100, no vacti-engine (blacklisted) -> arsenal + pinned Chromium stay
+#     byte-stable, engine --only-upgrade self-updater untouched
+#   - Automatic-Reboot OFF; needrestart notify-only ($nrconf{restart}='l')
+#   - leaves apt-daily + apt-daily-upgrade timers ENABLED (the live-build chroot
+#     does not mask them; enable defensively) to drive the patcher
+set -u
+
+log()  { echo "[os-patch] $*"; }
+warn() { echo "[os-patch][warn] $*" >&2; }
+
+export DEBIAN_FRONTEND=noninteractive
+
+# --- packages (belt-and-brace; distro-owned.list already lists them) ----------
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get install -y --no-install-recommends unattended-upgrades needrestart \
+    || warn "unattended-upgrades/needrestart install partial (distro-owned.list covers it)"
+fi
+
+# --- (1) unattended-upgrades: Debian-Security origin ONLY ---------------------
+mkdir -p /etc/apt/apt.conf.d
+cat > /etc/apt/apt.conf.d/99vacti-unattended-security-only <<'UUCONF'
+// vacti appliance - OS security auto-patch (Strategy 1, fanout #138)
+//
+// Scope unattended-upgrades to the Debian-Security origin ONLY. Closes the
+// trixie OS-CVE drift gap WITHOUT pulling -updates, backports, the pinned Kali
+// prio-100 origin, or the vacti-engine origin. Loaded 99* (after the package
+// default 50unattended-upgrades); #clear resets the default list first.
+
+#clear Unattended-Upgrade::Origins-Pattern;
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+
+// The engine packages are owned by the engine's OWN updater
+// (apt-self-update.sh --only-upgrade vacti-engine / vacti-engine-chromium).
+Unattended-Upgrade::Package-Blacklist {
+    "vacti-engine";
+    "vacti-engine-chromium";
+};
+
+// Long-lived engagement boxes: NEVER auto-reboot.
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+
+// Appliance stability: no surprise auto-removes.
+Unattended-Upgrade::Remove-Unused-Dependencies "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "false";
+
+// Auditability.
+Unattended-Upgrade::MinimalSteps "true";
+UUCONF
+
+# --- (2) apt periodic schedule ------------------------------------------------
+cat > /etc/apt/apt.conf.d/99vacti-apt-periodic <<'PERCONF'
+// vacti appliance - APT periodic schedule for the security-only auto-patcher.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Verbose "1";
+PERCONF
+
+# --- (3) needrestart notify-only ----------------------------------------------
+mkdir -p /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/99vacti-needrestart-list-only.conf <<'NRCONF'
+# vacti appliance - needrestart in NOTIFY-ONLY (list) mode.
+# 'l' = list only: a library/kernel upgrade that needs a restart is SURFACED to
+# the operator, never auto-bounced mid-engagement.
+$nrconf{restart} = 'l';
+$nrconf{kernelhints} = -1;
+NRCONF
+
+# --- apt-daily timers: ensure enabled (drive the patcher) ---------------------
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl unmask apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+  systemctl enable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+fi
+
+log "OS security auto-patch wired (security-origin-only, reboot OFF, needrestart list-only)"

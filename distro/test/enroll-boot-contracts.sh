@@ -343,6 +343,70 @@ else
   echo "SKIP  primary wordmark width check (python3 unavailable)"
 fi
 
+echo "== OS security auto-patch (Strategy 1, fanout #138) =="
+# unattended-upgrades scoped to the Debian-Security origin ONLY, needrestart
+# notify-only, Automatic-Reboot OFF, apt-daily timers unmasked, vacti-engine
+# blacklisted - dual-wired into the golden-image build + the ISO live-build hook.
+OSP_DIR="${ROOT}/distro/golden-image/os-patch"
+OSP_UU="${OSP_DIR}/99vacti-unattended-security-only"
+OSP_PERIODIC="${OSP_DIR}/99vacti-apt-periodic"
+OSP_NR="${OSP_DIR}/99vacti-needrestart-list-only.conf"
+OSP_HOOK="${ROOT}/distro/live-build-config/config/hooks/normal/0340-os-patch.hook.chroot"
+BG="${ROOT}/distro/golden-image/build-golden.sh"
+DOWNED="${ROOT}/distro/packages/distro-owned.list"
+
+for f in "$OSP_UU" "$OSP_PERIODIC" "$OSP_NR" "$OSP_HOOK"; do
+  check "exists: ${f#$ROOT/}" test -f "$f"
+done
+
+# --- config content invariants (golden-image canonical drop-ins) ---
+check "UU config #clears the default origins list before narrowing" \
+  has "$OSP_UU" '^#clear Unattended-Upgrade::Origins-Pattern'
+check "UU config pulls the Debian-Security origin (codename-security)" \
+  has "$OSP_UU" 'codename=.\{distro_codename\}-security,label=Debian-Security'
+check "UU config does NOT pull the -updates origin" \
+  bash -c '! grep -Eq "codename=.\{distro_codename\}-updates" "'"$OSP_UU"'"'
+check "UU config blacklists vacti-engine (engine owns its own updater)" \
+  has "$OSP_UU" '"vacti-engine"'
+check "UU config blacklists vacti-engine-chromium (pinned build untouched)" \
+  has "$OSP_UU" '"vacti-engine-chromium"'
+check "UU config: Automatic-Reboot is OFF" \
+  has "$OSP_UU" 'Unattended-Upgrade::Automatic-Reboot "false"'
+check "periodic config enables the unattended upgrade run" \
+  has "$OSP_PERIODIC" 'APT::Periodic::Unattended-Upgrade "1"'
+check "needrestart config is notify-only (restart = l)" \
+  has "$OSP_NR" 'nrconf.restart. = .l.'
+
+# --- distro-owned package list carries both packages ---
+check "distro-owned.list adds unattended-upgrades" \
+  has "$DOWNED" '^unattended-upgrades$'
+check "distro-owned.list adds needrestart" \
+  has "$DOWNED" '^needrestart$'
+
+# --- golden-image build: timers UNMASKED, config staged ---
+check "build-golden no longer MASKS the apt-daily timers" \
+  bash -c '! grep -Eq "systemctl mask .*apt-daily" "'"$BG"'"'
+check "build-golden explicitly unmasks the apt-daily timers" \
+  has "$BG" 'systemctl unmask apt-daily\.timer apt-daily-upgrade\.timer'
+check "build-golden stages the UU security-only drop-in" \
+  has "$BG" '99vacti-unattended-security-only'
+check "build-golden stages the needrestart notify-only drop-in" \
+  has "$BG" '99vacti-needrestart-list-only\.conf'
+
+# --- dual-wire: the ISO hook mirrors the same invariants ---
+check "ISO hook: Debian-Security origin only" \
+  has "$OSP_HOOK" 'codename=.\{distro_codename\}-security,label=Debian-Security'
+check "ISO hook: does NOT pull the -updates origin" \
+  bash -c '! grep -Eq "codename=.\{distro_codename\}-updates" "'"$OSP_HOOK"'"'
+check "ISO hook: blacklists vacti-engine" \
+  has "$OSP_HOOK" '"vacti-engine"'
+check "ISO hook: Automatic-Reboot is OFF" \
+  has "$OSP_HOOK" 'Unattended-Upgrade::Automatic-Reboot "false"'
+check "ISO hook: needrestart notify-only (restart = l)" \
+  has "$OSP_HOOK" 'nrconf.restart. = .l.'
+check "ISO hook: keeps apt-daily timers enabled" \
+  has "$OSP_HOOK" 'systemctl enable apt-daily\.timer apt-daily-upgrade\.timer'
+
 echo
 echo "== summary: ${pass} passed, ${fail} failed =="
 [[ $fail -eq 0 ]]
