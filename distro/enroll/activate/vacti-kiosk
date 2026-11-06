@@ -553,8 +553,21 @@ class KioskWindow(Adw.ApplicationWindow):
         for p in LOGO_CANDIDATES:
             if os.path.isfile(p):
                 try:
-                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(p, 320, 72, True)
-                    img = Gtk.Picture.new_for_pixbuf(pb)
+                    # Load the brand asset at its NATIVE resolution as a GdkTexture and
+                    # let GTK scale it ONCE, at render time, to the final on-screen size
+                    # (high-quality GSK downscale at the display's DPI). The previous
+                    # GdkPixbuf scale-on-load path (320x72) baked a tiny ~203x72 bilinear
+                    # raster that the widget then resampled a SECOND time -> the wordmark
+                    # looked blurry on a large (e.g. 1920x1080) surface.
+                    # Gtk.Picture.new_for_filename keeps the full-resolution source, so a
+                    # single crisp scale is done by the renderer. Same shipped asset; no
+                    # new runtime dependency (GTK4 decodes PNG natively).
+                    img = Gtk.Picture.new_for_filename(p)
+                    # new_for_filename never raises; a source that cannot be decoded
+                    # (e.g. an .svg candidate on an image with no librsvg loader) leaves a
+                    # null paintable -> fall through to the next candidate, as before.
+                    if img.get_paintable() is None:
+                        continue
                     img.set_can_shrink(True)
                     img.set_size_request(-1, 56)
                     img.add_css_class("vacti-logo")

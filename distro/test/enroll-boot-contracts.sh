@@ -315,6 +315,34 @@ for _f in "$EXTRAS" "$ISO_HOOK"; do
     has "$_f" 'jadx download failed'
 done
 
+echo "== netpanel/activation logo renders crisp (no upscaled low-res raster) =="
+# Operator report (TG 7760, screenshot): the vacti wordmark looked blurry on a
+# 1920x1080 surface. Root cause: GdkPixbuf.new_from_file_at_scale baked a tiny
+# ~203x72 bilinear raster that the widget then resampled a SECOND time. Fix: load
+# the brand asset at its native resolution via Gtk.Picture.new_for_filename and let
+# the renderer scale it ONCE at display DPI. Same shipped asset; no new dependency.
+check "kiosk logo loads the source at native resolution (Gtk.Picture.new_for_filename)" \
+  has "$KIOSK_SH" 'Gtk\.Picture\.new_for_filename\('
+check "kiosk logo no longer bakes a pre-scaled raster (no new_from_file_at_scale in _logo_widget)" \
+  bash -c '! sed -n "/def _logo_widget/,/return None/p" "'"$KIOSK_SH"'" | grep -q "new_from_file_at_scale"'
+check "kiosk logo falls through when a candidate cannot be decoded (null-paintable guard)" \
+  has "$KIOSK_SH" 'get_paintable\(\) is None'
+# The primary wordmark the first LOGO_CANDIDATE points to must ship (so it is staged
+# into the OVA under /usr/share/vacti/branding/) AND be high-resolution, so the single
+# render-time downscale has real pixels to work with (guards a future tiny-PNG swap).
+LOCKUP_PNG="${ROOT}/distro/branding/logo/png/vacti-lockup-horizontal-light.png"
+check "primary wordmark asset ships in the branding tree (staged into the OVA)" \
+  test -f "$LOCKUP_PNG"
+if command -v python3 >/dev/null 2>&1; then
+  check "primary wordmark asset is high-resolution (native width >= 400px)" \
+    python3 -c 'import struct,sys
+d=open(sys.argv[1],"rb").read(24)
+ok=d[:8]==b"\x89PNG\r\n\x1a\n" and struct.unpack(">II",d[16:24])[0]>=400
+sys.exit(0 if ok else 1)' "$LOCKUP_PNG"
+else
+  echo "SKIP  primary wordmark width check (python3 unavailable)"
+fi
+
 echo
 echo "== summary: ${pass} passed, ${fail} failed =="
 [[ $fail -eq 0 ]]
