@@ -48,3 +48,6 @@ distro/live-build-config/config/chroot
 
 # os
 .DS_Store
+
+# agent worktree scratch — never commit
+.claude/

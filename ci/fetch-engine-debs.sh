@@ -14,7 +14,7 @@
 # Usage: ci/fetch-engine-debs.sh <arch> <outdir>
 # Env:
 #   VACTI_APT_PRODUCER_TOKEN   producer token for the private apt pool (apt-pool path)
-#   VACTI_APT_URL              apt base URL (default https://repo.example.com)
+#   VACTI_APT_URL              apt base URL (required; e.g. https://apt.example.com)
 #   VACTI_ENGINE_REF           optional: pin the vacti-engine version; empty = latest
 #   VACTI_ENGINE_REPO          GH fallback repo (default anggipradana/vacti-pentest-engine)
 #   GH_TOKEN                   token with read access to the engine repo (GH fallback)
@@ -33,7 +33,7 @@ warn() { echo "[fetch-engine-debs][warn] $*" >&2; }
 
 mkdir -p "$OUTDIR"
 
-base="${VACTI_APT_URL:-https://repo.example.com}"
+base="${VACTI_APT_URL:?VACTI_APT_URL must be set (apt pool base URL)}"
 base="${base%/}/apt"
 
 have_engine()   { compgen -G "${OUTDIR}/vacti-engine_"*.deb >/dev/null 2>&1; }

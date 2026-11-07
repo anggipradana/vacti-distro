@@ -481,7 +481,7 @@ jobs:
           VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
           ENGINE_VER: ${{ steps.ver.outputs.version }}
         run: |
-          base="${VACTI_APT_URL:-https://repo.example.com}"
+          base="${VACTI_APT_URL:?VACTI_APT_URL must be set}"
           base="${base%/}/apt"
           idx="$(curl -fsSL -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages" 2>/dev/null \
                  || curl -fsSL -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages.gz" 2>/dev/null | gunzip -c 2>/dev/null \
