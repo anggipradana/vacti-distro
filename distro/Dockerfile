@@ -263,7 +263,16 @@ RUN --mount=type=secret,id=vacti_apt_token,required=false \
       CHROMIUM_DEB="$(ls -1 /debs/vacti-engine-chromium_*_"${DEB_ARCH}".deb 2>/dev/null | head -n1 || true)"; \
       [ -n "${CHROMIUM_DEB}" ] || { rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] FAT_IMAGE=1 needs the vacti-engine-chromium .deb for ${DEB_ARCH} in the engine_debs build-context (stage it with ci/fetch-engine-debs.sh ${DEB_ARCH}); chromium is not in the apt pool (exceeds the upstream 100MB upload cap) so it must be fetched at workflow time like the OVA bake"; exit 1; }; \
       echo "[docker] FAT bake: installing ${VACTI_ENGINE_PKG} (signed apt pool) + vacti-engine-chromium (${DEB_ARCH} local .deb) [token not logged]"; \
+      echo "[docker] FAT bake: refreshing NodeSource ${NODE_MAJOR}.x key+source so a stale gha-cached builder layer cannot drop nodejs (>= ${NODE_MAJOR}) at install time (engine Depends nodejs (>= ${NODE_MAJOR}); Debian trixie only ships nodejs 20)"; \
+      curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes -o /usr/share/keyrings/nodesource.gpg; \
+      chmod 0644 /usr/share/keyrings/nodesource.gpg; \
+      printf 'Types: deb\nURIs: https://deb.nodesource.com/node_%s.x\nSuites: nodistro\nComponents: main\nSigned-By: /usr/share/keyrings/nodesource.gpg\n' "${NODE_MAJOR}" > /etc/apt/sources.list.d/nodesource.sources; \
       apt-get update; \
+      NODE_CAND="$(apt-cache policy nodejs 2>/dev/null | awk -F': ' '/Candidate:/{c=$2} END{print c}')"; \
+      case "${NODE_CAND}" in \
+        ${NODE_MAJOR}.*) echo "[docker] FAT bake: nodejs candidate is ${NODE_CAND} (NodeSource ${NODE_MAJOR}.x resolved)" ;; \
+        *) rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] nodejs candidate is '${NODE_CAND}' (< ${NODE_MAJOR}); NodeSource ${NODE_MAJOR}.x did not resolve at FAT bake - refusing to fall back to Debian nodejs, which cannot satisfy ${VACTI_ENGINE_PKG} Depends nodejs (>= ${NODE_MAJOR})"; exit 1 ;; \
+      esac; \
       apt-get install -y --no-install-recommends "${VACTI_ENGINE_PKG}" "${CHROMIUM_DEB}"; \
       MARKER=/usr/lib/vacti-engine/dist/runner/cli.js; \
       [ -e "${MARKER}" ] || { rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] engine install reported success but ${MARKER} is missing"; exit 1; }; \
