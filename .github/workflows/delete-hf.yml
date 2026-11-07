@@ -22,6 +22,11 @@ on:
         description: "Release version X.Y.Z (folder prefix)"
         required: false
         default: "0.1.0"
+      allow_glob:
+        description: "Opt in to raw glob patterns (DANGEROUS: can over-delete). Leave false for exact-path deletes."
+        required: false
+        type: boolean
+        default: false
 
 # Least privilege: the delete authenticates with HF_PUBLISH_TOKEN, not the
 # GitHub token. Nothing in the repo is written.
@@ -52,6 +57,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_PUBLISH_TOKEN }}
           IN_PATHS: ${{ github.event.inputs.paths }}
           IN_VERSION: ${{ github.event.inputs.version }}
+          ALLOW_GLOB: ${{ github.event.inputs.allow_glob }}
         run: |
           set -euo pipefail
           if [ -z "${HF_TOKEN:-}" ]; then
@@ -59,51 +65,7 @@ jobs:
             echo "Add it in Settings > Secrets and variables > Actions (the hf_... write token)." >&2
             exit 1
           fi
-          python - <<'PY'
-          import os
-
-          from huggingface_hub import HfApi
-
-          REPO_ID = "anggipradana/vacti-distro-images"
-          REPO_TYPE = "dataset"
-
-          token = os.environ["HF_TOKEN"]
-          version = os.environ["IN_VERSION"].strip()
-          raw = os.environ["IN_PATHS"]
-
-          names = [p.strip() for p in raw.split(",") if p.strip()]
-          if not names:
-              raise SystemExit("no paths provided")
-
-          prefix = f"v{version}/"
-          targets = [f"{prefix}{n}" for n in names]
-
-          print("[delete] repo      :", REPO_ID)
-          print("[delete] version   :", version)
-          print("[delete] targets   :")
-          for t in targets:
-              print("          -", t)
-
-          api = HfApi(token=token)
-
-          api.delete_files(
-              repo_id=REPO_ID,
-              repo_type=REPO_TYPE,
-              delete_patterns=targets,
-              commit_message=f"chore: delete obsolete artifacts under v{version}",
-          )
-
-          remaining = sorted(
-              f
-              for f in api.list_repo_files(repo_id=REPO_ID, repo_type=REPO_TYPE)
-              if f.startswith(prefix)
-          )
-          print(f"[delete] remaining files under {prefix} ({len(remaining)}):")
-          for f in remaining:
-              print("          -", f)
-
-          still = [t for t in targets if t in remaining]
-          if still:
-              raise SystemExit(f"[delete] FAILED - targets still present: {still}")
-          print("[delete] OK - all targets removed")
-          PY
+          # Input sanitation + exact-path deletes live in scripts/delete-hf.py so
+          # they are unit-tested (scripts/test-delete-hf-input.py). Raw globs are
+          # used only when allow_glob=true is explicitly set.
+          python scripts/delete-hf.py
