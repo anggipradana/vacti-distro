@@ -51,12 +51,11 @@ a floor, not the update channel.)
 ### What DOES update independently: the engine `.deb`
 
 The **engine itself** (the `dist` runtime + the prompt-bundle + the skill-bundle = the
-real IP, plus its bundled Chromium) is **not baked** into any published image
-(thin-bootstrap, IP protection). It is pulled at **first boot / container start** from
-the private apt repo using the per-run enrollment token, and the running engine then
-does a **~45-minute idle update check** to stay current. So methodology/skills update
-on their own cadence; the **apt arsenal of binary tools does not** — that rides the
-image tag.
+real IP, plus its bundled Chromium) is **baked at build time** into every published
+image. The engine activates on first boot against your control plane using the per-run
+enrollment credential, and the running engine then does a **~45-minute idle update
+check** to stay current. So methodology/skills update on their own cadence; the **apt
+arsenal of binary tools does not** — that rides the image tag.
 
 ## Cross-arch parity is enforced in CI
 
