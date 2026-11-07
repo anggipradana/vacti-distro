@@ -230,14 +230,13 @@ README="${STAGE}/README.md"
   echo "  - disk-images"
   echo "---"
   echo
-  echo "# vacti-distro images"
+  echo "# Vacti appliance images"
   echo
-  echo "Permanent host for vacti-distro VM / ISO / cloud images that exceed the"
-  echo "2GiB per-asset cap on GitHub Releases. Files are stored with Git LFS and"
-  echo "served from stable public resolve URLs."
+  echo "Pre-built operating-system images for the Vacti pentest appliance."
+  echo "Each image boots pre-provisioned; first boot runs enrollment against"
+  echo "your Vacti control plane."
   echo
-  echo "The small .deb and fingerprint files are NOT here: they stay on the"
-  echo "GitHub Release and the apt repo, their canonical home."
+  echo "Documentation: [docs.vacti.org](https://docs.vacti.org)."
   echo
   echo "## Latest release: v${VERSION}"
   echo
@@ -251,9 +250,9 @@ ${version_files}
 EOF
   echo
   echo "Verify: download \`${RESOLVE_BASE}/v${VERSION}/SHA256SUMS\` and run"
-  echo "\`sha256sum -c SHA256SUMS\` in the directory holding the images."
+  echo "\`sha256sum -c SHA256SUMS\` next to the images."
   echo
-  echo "Older releases live under their own \`vX.Y.Z/\` directory in this dataset."
+  echo "Older releases are kept under their own \`vX.Y.Z/\` directory."
 } > "$README"
 
 log "updating README.md index ..."
