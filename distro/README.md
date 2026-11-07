@@ -35,7 +35,7 @@ before you finish, just mint a fresh one.
    - Set the **control-plane URL**.
    - In the **Kode aktivasi / Token** field, **type the 8-char pairing code** from the CP
      (a full token also works - the field auto-detects which you pasted).
-   - Confirm. The appliance exchanges the code for the full token, pulls the engine, and enrolls.
+   - Confirm. The appliance exchanges the code for the full token and activates the baked engine.
 5. The GUI OVA also ships **firefox-esr** and **xfce4-screenshooter** for manual operator use
    (browse a target, grab a screenshot) from the XFCE desktop.
 
@@ -43,8 +43,8 @@ before you finish, just mint a fresh one.
 
 ## 2. Docker container - fastest, smallest footprint
 
-The image is a **thin bootstrap**: the engine is pulled from the private apt repo at container
-start, authenticated with your credential. Nothing engine-side is baked.
+The image bakes the engine at build time; at container start it activates against your control
+plane using your credential. No reusable secret is baked into the image.
 
 Pairing-code form (recommended):
 
