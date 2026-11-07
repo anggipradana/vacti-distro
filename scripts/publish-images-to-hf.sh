@@ -329,6 +329,26 @@ EOF
   echo "Verify: download \`${RESOLVE_BASE}/v${HEADLINE_VERSION}/SHA256SUMS\` and run"
   echo "\`sha256sum -c SHA256SUMS\` next to the images."
   echo
+  echo "## Docker (alternative to the OVA)"
+  echo
+  echo "The same appliance is also published as a multi-arch Docker image"
+  echo "(\`linux/amd64\` + \`linux/arm64\`) at \`ghcr.io/anggipradana/vacti-distro:<version>\`."
+  echo "It bakes the engine, so first run enrolls against your control plane the same"
+  echo "way the OVA does."
+  echo
+  echo '```'
+  echo "docker pull ghcr.io/anggipradana/vacti-distro:${VERSION}"
+  echo "docker run -d \\"
+  echo "  --name vacti-engine \\"
+  echo "  -e VACTI_CP_URL=https://your-control-plane.example \\"
+  echo "  -e VACTI_ENROLL_TOKEN=<enrollment-token> \\"
+  echo "  --restart unless-stopped \\"
+  echo "  ghcr.io/anggipradana/vacti-distro:${VERSION}"
+  echo '```'
+  echo
+  echo "The GHCR image is private; request access from the operator, or deploy from"
+  echo "the OVA which needs no registry auth."
+  echo
   echo "Older releases are kept under their own \`vX.Y.Z/\` directory."
 } > "$README"
 # >>> readme-render-end <<<
