@@ -82,7 +82,11 @@ REVISION="$(node -e "
 " "$PC_DIR")"
 log "building vacti-engine-chromium revision ${REVISION} (${ARCH})"
 
-CLI="$(node -e "process.stdout.write(require.resolve('playwright-core/cli.js', { paths: [process.argv[1]] }))" "$PC_DIR")"
+CLI="$(node -e "
+  const path = require('path');
+  const pkg = require.resolve('playwright-core/package.json', { paths: [process.argv[1]] });
+  process.stdout.write(path.join(path.dirname(pkg), 'cli.js'));
+" "$PC_DIR")"
 
 # --- download the pinned Chromium into a staging dir ------------------------------------------------
 STAGING="${WORK}/stage"
