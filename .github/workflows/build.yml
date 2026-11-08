@@ -94,6 +94,12 @@ env:
   # Build-time private-repo credential. A build-time secret, NEVER baked into an
   # image (the build strips it before finalize; the no-secret scan re-verifies).
   VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+  # Build-time appliance login password for the default 'arparp' local admin user
+  # (build-golden.sh:chpasswd). Required: build-golden.sh fails closed if unset.
+  # Lives only on the CI runner RAM + the throwaway provision.sh host copy that
+  # build-golden.sh deletes after virt-customize runs; NEVER on the golden disk
+  # as cleartext (the in-guest copy is wiped by --run-command's trailing rm).
+  ARPARP_PASSWORD: ${{ secrets.ARPARP_PASSWORD }}
   OUT_DIR: out
 
 jobs:

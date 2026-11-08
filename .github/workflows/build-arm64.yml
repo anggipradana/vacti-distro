@@ -78,6 +78,9 @@ env:
   VACTI_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF || github.event.client_payload.release || '' }}
   VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
   VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+  # Build-time appliance login password for the default 'arparp' local admin user
+  # (build-golden.sh:chpasswd). Required: build-golden.sh fails closed if unset.
+  ARPARP_PASSWORD: ${{ secrets.ARPARP_PASSWORD }}
   # Every job targets arm64. vacti-appliance.env turns this into the "-arm64"
   # artifact suffix and the arm64 cloud-image / kernel-flavour / bootloader choices.
   DEBIAN_ARCH: arm64

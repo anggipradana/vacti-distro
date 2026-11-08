@@ -610,8 +610,9 @@ systemctl daemon-reload 2>/dev/null || true
 # the earlier vacti:vacti baseline). Root stays disabled (--root-password disabled
 # on the virt-customize call); this is the sudo-capable shell / SSH login.
 # Deliberate operator decision - NO expiry, NO force-change on first login. The
-# credential is distributed out-of-band to licensed operators (not published), so
-# the no-secret scan is unaffected (it flags tokens/keys, not this account).
+# credential value is injected at build time from the ARPARP_PASSWORD env var
+# (required; set as the GH Actions repo secret ARPARP_PASSWORD) and is NEVER
+# baked into source. Rotation = flip the secret + rebuild.
 echo "[prov] creating default login user 'arparp' (sudo group, bash shell)"
 apt-get install -y --no-install-recommends sudo 2>/dev/null || true
 if ! id arparp >/dev/null 2>&1; then
@@ -619,7 +620,7 @@ if ! id arparp >/dev/null 2>&1; then
 else
   usermod -s /bin/bash -aG sudo arparp || true
 fi
-echo 'arparp:REDACTED_PASSWORD' | chpasswd
+echo "arparp:${ARPARP_PASSWORD:?ARPARP_PASSWORD must be set at build time (GH secret)}" | chpasswd
 # never expire the password and never force a change at login (default-cred policy)
 chage -M -1 -m 0 -I -1 -E -1 arparp 2>/dev/null || true
 passwd -u arparp 2>/dev/null || true
