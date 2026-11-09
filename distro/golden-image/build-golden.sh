@@ -412,6 +412,24 @@ fi
 # engine.env (absent here), so at bake time it only creates the user + enables the
 # update timer; it does NOT start the service. FINALIZE removes the template
 # engine.env so first-boot enroll writes the real one.
+
+# BROAD ROOT grant (engine 0.2.441): mark this image as a dedicated pentest APPLIANCE so the
+# vacti-engine .deb postinst installs the broad NOPASSWD grant (postinst block 3d-ter -> the
+# engine user gets root-tier tools: nmap -O, iptables, tcpdump raw, metasploit privileged
+# modules). The MARKER FILE is the deterministic signal the postinst keys on (env vars do not
+# flow into dpkg), so it must exist BEFORE the engine .deb is installed below (fat bake) AND
+# persist into the image for the THIN first-boot install path (vacti-engine-install.service).
+# The environment.d conf additionally exports the flag into the engine's runtime environment
+# (belt-and-suspenders). Appliance-only: the desktop .deb install path (bootstrap-apt.sh) writes
+# NEITHER, so the broad grant stays strictly opt-in there (VACTI_ENGINE_BROAD_ROOT=1). FINALIZE
+# removes only engine.env + enroll.token from /etc/vacti-engine, so both survive it.
+: > /etc/vacti-engine-appliance-image
+chmod 0644 /etc/vacti-engine-appliance-image
+install -d -m0755 /etc/environment.d
+printf 'VACTI_ENGINE_BROAD_ROOT=1\n' > /etc/environment.d/vacti-engine.conf
+chmod 0644 /etc/environment.d/vacti-engine.conf
+echo "[prov] appliance: wrote /etc/vacti-engine-appliance-image marker + VACTI_ENGINE_BROAD_ROOT (broad root grant installs with the engine .deb)"
+
 if compgen -G "/opt/vacti-build/engine-debs/vacti-engine_"*.deb >/dev/null 2>&1; then
   echo "[prov] FAT-OVA: installing baked vacti-engine + vacti-engine-chromium from local .debs"
   apt-get install -y /opt/vacti-build/engine-debs/vacti-engine-chromium_*.deb \

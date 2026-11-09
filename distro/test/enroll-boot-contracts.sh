@@ -275,6 +275,17 @@ check "build-iso stages vacti-netpanel into includes.chroot" \
 check "ISO branding hook enables vacti-netpanel.service (GUI)" \
   has "$HOOK" 'systemctl enable vacti-netpanel\.service'
 
+echo "== broad-root appliance marker (engine 0.2.441) =="
+# The golden image marks itself an appliance so the vacti-engine .deb postinst installs the broad
+# NOPASSWD grant (postinst block 3d-ter). The marker file is the deterministic postinst signal and
+# MUST be written before the engine .deb install (fat bake) so it is in place when the postinst runs.
+check "build-golden writes the appliance marker /etc/vacti-engine-appliance-image" \
+  has "$BG" '/etc/vacti-engine-appliance-image'
+check "build-golden exports VACTI_ENGINE_BROAD_ROOT=1 into the runtime environment" \
+  has "$BG" 'VACTI_ENGINE_BROAD_ROOT=1'
+check "build-golden writes the marker BEFORE installing the engine .deb (postinst sees it)" \
+  bash -c 'awk "/vacti-engine-appliance-image/{m=NR} /compgen -G .*engine-debs.vacti-engine_/{i=NR} END{exit !(m>0 && i>0 && m<i)}" "'"$BG"'"'
+
 echo "== functional: netpanel engine_env_ready predicate matches the activate one =="
 # Source the engine_env_ready() shipped in vacti-netpanel and exercise it, so the
 # post-enroll predicate tracks the same content-aware semantics as the kiosk.
