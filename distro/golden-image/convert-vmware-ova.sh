@@ -41,7 +41,7 @@ POP_BYTES="$(stat -c%s "${WORK}/${VMDK}")"
 CAP_BYTES="$(qemu-img info --output=json "$GOLDEN" | sed -n 's/.*"virtual-size": *\([0-9]*\).*/\1/p' | head -1)"
 OVF="${NAME}.ovf"
 sed -e "s|@VMDK@|${VMDK}|g" \
-    -e "s|@DISK_CAPACITY@|${CAP_BYTES:-21474836480}|g" \
+    -e "s|@DISK_CAPACITY@|${CAP_BYTES:-107374182400}|g" \
     -e "s|@DISK_POPULATED@|${POP_BYTES}|g" \
     -e "s|@PRODUCT@|${VACTI_PRODUCT_PRETTY}|g" \
     -e "s|@VERSION@|${VACTI_RELEASE}|g" \

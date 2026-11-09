@@ -20,17 +20,17 @@
 #      File/@ovf:size when present) == the actual VMDK byte size.
 #   6. The .mf SHA256 entries match the actual file hashes.
 #   7. The VMDK is a readable VMDK (qemu-img info).
-#   8. Default RAM is the shipped baseline (>= MIN_RAM_MB, default 8192) - guards
-#      the 8GB-box engine capacity floor from silently regressing.
+#   8. Default RAM is the shipped baseline (>= MIN_RAM_MB, default 10240) - guards
+#      the 10GB engine capacity floor from silently regressing.
 #
 # Open-source tools only; READ-ONLY. Exit non-zero on any violation.
 #
 # Usage: validate-ovf.sh <artifact.ova> [<artifact.ova> ...]
 #   OVF_XSD=/path/to/dsp8023.xsd  -> also run xmllint --schema (optional)
-#   MIN_RAM_MB=8192               -> minimum advertised RAM (default 8192)
+#   MIN_RAM_MB=10240              -> minimum advertised RAM (default 10240)
 set -euo pipefail
 
-MIN_RAM_MB="${MIN_RAM_MB:-8192}"
+MIN_RAM_MB="${MIN_RAM_MB:-10240}"
 FAIL=0
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
