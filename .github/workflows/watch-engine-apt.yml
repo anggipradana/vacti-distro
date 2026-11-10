@@ -28,10 +28,16 @@
 #
 # IDEMPOTENCY / NO LOOP
 # - If the newest apt version <= the newest images-v* release: no-op.
-# - Else if a build.yml or build-arm64.yml run is already queued/in_progress: no-op
-#   (an in-flight build will publish the images-v<ver> release that closes the gap;
-#   this prevents re-dispatch during the ~1h build window before that release lands).
-# - Else: dispatch both builds for the new version.
+# - Else if a persisted marker .github/.watch-state/dispatched-<ver>.marker exists for
+#   that apt version: no-op (this version was already dispatched by an earlier poll;
+#   the in-flight build will publish images-v<ver> and close the gap). The marker is
+#   the SOURCE OF TRUTH for "already dispatched", committed to the repo after a
+#   successful dispatch, so it survives across poll runs and runner identities. It
+#   replaces the earlier `gh run list --status in_progress` guard, which returned 0
+#   in CI even with matching in-flight runs and caused duplicate dispatches.
+# - Else: dispatch both builds for the new version, then commit the marker.
+# The top-level `concurrency: watch-engine-apt` group serializes overlapping schedule
+# fires so two runs can never both pass the marker check and double-dispatch.
 # The builds never trigger this workflow (it runs only on schedule / manual), and a
 # tag/release created by GITHUB_TOKEN does not trigger further workflows, so there is
 # no dispatch loop. Any curl/jq/gh failure logs a warning and exits 0 (never fails the
@@ -44,8 +50,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write   # self-dispatch build.yml + build-arm64.yml, list runs
-  contents: read   # list this repo's releases
+  actions: write   # self-dispatch build.yml + build-arm64.yml
+  contents: write  # commit the per-version dispatch marker (idempotency source of truth)
 
 concurrency:
   # Serialize watch runs so two overlapping schedules can't both dispatch the same
@@ -57,7 +63,11 @@ jobs:
   check-and-dispatch:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (for the persisted idempotency marker state)
+        uses: actions/checkout@v4
+
       - name: Poll engine apt repo and self-dispatch image build on a newer version
+        id: poll
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -107,21 +117,17 @@ jobs:
             exit 0
           fi
 
-          # --- 4. idempotency guard: skip if a build is already in flight -------------
+          # --- 4. idempotency guard: skip if this version was already dispatched -------
           # build.yml/build-arm64.yml take ~1h and publish images-v<ver> only at the
           # end, so without this guard the 15-min poll would re-dispatch the same
-          # version 3-4x before that release lands. If any build run is queued or
-          # in_progress, defer: the in-flight build will close the gap.
-          active=0
-          for wf in build.yml build-arm64.yml; do
-            for st in in_progress queued; do
-              n="$(gh run list --workflow "$wf" --status "$st" --json databaseId --jq 'length' 2>/dev/null || echo 0)"
-              case "$n" in ''|*[!0-9]*) n=0;; esac
-              active=$((active + n))
-            done
-          done
-          if [ "$active" -gt 0 ]; then
-            summary "watch-engine-apt: apt ${apt_ver} > images-v${distro_ver}, but ${active} build run(s) already queued/in_progress; deferring (idempotent)."
+          # version 3-4x before that release lands. The guard is a PERSISTED marker
+          # committed to this repo after a successful dispatch (not a live `gh run list`
+          # query, which returned 0 in CI despite matching in-flight runs). The repo is
+          # checked out above, so the marker reflects every prior poll's dispatches.
+          marker_dir=".github/.watch-state"
+          marker="${marker_dir}/dispatched-${apt_ver}.marker"
+          if [ -f "$marker" ]; then
+            summary "watch-engine-apt: apt ${apt_ver} > images-v${distro_ver}, but ${marker} already present; already dispatched (idempotent no-op)."
             exit 0
           fi
 
@@ -138,9 +144,56 @@ jobs:
             fi
           done
           if [ "$rc" = 0 ]; then
-            summary "watch-engine-apt: DISPATCHED build.yml + build-arm64.yml for ${apt_ver} (was images-v${distro_ver})."
+            # BOTH builds dispatched. Write the persisted marker so later polls skip
+            # this version, and flag the commit step to land it. Partial dispatch
+            # (rc=1) deliberately writes NO marker, so the next poll retries.
+            mkdir -p "$marker_dir"
+            : > "$marker"
+            # Prune: keep only the newest 5 markers by version once more than 10 exist,
+            # so the state dir does not grow unbounded. Pruned + new marker commit
+            # together (one commit) via the step below. sort -V so 0.2.9 < 0.2.10.
+            count="$(find "$marker_dir" -maxdepth 1 -name 'dispatched-*.marker' 2>/dev/null | wc -l)"
+            if [ "$count" -gt 10 ]; then
+              find "$marker_dir" -maxdepth 1 -name 'dispatched-*.marker' -printf '%f\n' \
+                | sed -E 's/^dispatched-(.*)\.marker$/\1/' \
+                | sort -V | head -n -5 \
+                | while IFS= read -r v; do rm -f "${marker_dir}/dispatched-${v}.marker"; done
+              summary "watch-engine-apt: pruned old dispatch markers (kept newest 5)."
+            fi
+            {
+              echo "dispatched=true"
+              echo "apt_ver=${apt_ver}"
+            } >> "$GITHUB_OUTPUT"
+            summary "watch-engine-apt: DISPATCHED build.yml + build-arm64.yml for ${apt_ver} (was images-v${distro_ver}); marker ${marker} written."
           else
-            summary "watch-engine-apt: partial dispatch for ${apt_ver} (see warnings); next poll retries."
+            summary "watch-engine-apt: partial dispatch for ${apt_ver} (see warnings); no marker written, next poll retries."
           fi
           # Never fail the schedule on a dispatch glitch; the next 15-min poll retries.
           exit 0
+
+      - name: Commit the dispatch marker (idempotency state)
+        # Runs only after BOTH builds were dispatched. Persists the marker (and any
+        # prune from the step above) to the repo so later polls skip this version.
+        # GITHUB_TOKEN + contents:write authorizes the push; a non-fast-forward (a
+        # concurrent commit to the default branch) is handled with one rebase-retry.
+        if: ${{ steps.poll.outputs.dispatched == 'true' }}
+        env:
+          APT_VER: ${{ steps.poll.outputs.apt_ver }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/.watch-state
+          if git diff --cached --quiet; then
+            echo "no marker changes to commit (already persisted); nothing to do"
+            exit 0
+          fi
+          git commit -m "chore(watch): mark apt v${APT_VER} dispatched"
+          # Explicit remote+refspec so the push works regardless of whether checkout
+          # left HEAD on a branch or detached, with one rebase-retry if a concurrent
+          # commit advanced the branch. A branch push by GITHUB_TOKEN does not trigger
+          # further workflows (and build.yml's push trigger is tags-only), so this
+          # commit cannot re-fire the watch or the build.
+          branch="${GITHUB_REF_NAME:-main}"
+          git push origin "HEAD:${branch}" \
+            || { git pull --rebase origin "${branch}" && git push origin "HEAD:${branch}"; }
