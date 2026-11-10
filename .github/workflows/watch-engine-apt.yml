@@ -1,0 +1,146 @@
+# watch-engine-apt: pull-based cross-repo cascade (PAT-free).
+#
+# WHY THIS EXISTS
+# The engine release pipeline (vacti-pentest-engine/.github/workflows/release-deb.yml)
+# tries to notify this repo after a new vacti-engine .deb publishes, via a
+# `repository_dispatch: engine-deb-published`. Inside GitHub Actions the default
+# GITHUB_TOKEN CANNOT dispatch ANOTHER repo, so that CI step needs a cross-repo PAT
+# (secrets.DISTRO_DISPATCH_PAT). The operator has NOT set that PAT, so every CI-only
+# engine release silently skips the cascade and the image matrix never rebuilds (the
+# on-box release path still cascades via local gh auth, but a CI-only tag push does
+# not). Today's 0.2.449 engine release went CI-only and had to be dispatched by hand.
+#
+# THE FIX (this workflow)
+# A scheduled job in THIS repo polls the engine apt repo every 15 min for the newest
+# published vacti-engine version and, when it is newer than any images-v* release this
+# repo has built, SELF-dispatches build.yml + build-arm64.yml. Self-dispatch in the
+# SAME repo works with the default GITHUB_TOKEN (permissions: actions: write), so NO
+# PAT and NO operator action are ever required. It works whether the engine release
+# went via CI or on-box (both publish the .deb to the same apt repo), and converges
+# within 15 min of any publish.
+#
+# NOTE ON "public apt": the apt repo is NOT publicly readable (it returns an HTML
+# landing page to anonymous requests). The real source of truth is the authenticated
+# apt index (HTTP Basic login `vacti`, password = producer token). This workflow reads
+# it with secrets.VACTI_APT_PRODUCER_TOKEN + vars.VACTI_APT_URL, both ALREADY
+# configured in this repo (build.yml uses them), so this stays PAT-free: it introduces
+# no new secret the operator must provision or rotate.
+#
+# IDEMPOTENCY / NO LOOP
+# - If the newest apt version <= the newest images-v* release: no-op.
+# - Else if a build.yml or build-arm64.yml run is already queued/in_progress: no-op
+#   (an in-flight build will publish the images-v<ver> release that closes the gap;
+#   this prevents re-dispatch during the ~1h build window before that release lands).
+# - Else: dispatch both builds for the new version.
+# The builds never trigger this workflow (it runs only on schedule / manual), and a
+# tag/release created by GITHUB_TOKEN does not trigger further workflows, so there is
+# no dispatch loop. Any curl/jq/gh failure logs a warning and exits 0 (never fails the
+# schedule).
+name: watch-engine-apt
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write   # self-dispatch build.yml + build-arm64.yml, list runs
+  contents: read   # list this repo's releases
+
+concurrency:
+  # Serialize watch runs so two overlapping schedules can't both dispatch the same
+  # version. cancel-in-progress stays false: a running check is cheap and should finish.
+  group: watch-engine-apt
+  cancel-in-progress: false
+
+jobs:
+  check-and-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poll engine apt repo and self-dispatch image build on a newer version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+        run: |
+          set -uo pipefail
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; echo "$*"; }
+          warn_exit0() { echo "::warning::$*"; summary "watch-engine-apt: SKIPPED (fail-safe): $*"; exit 0; }
+
+          # --- 1. newest vacti-engine version published to the apt repo ---------------
+          [ -n "${VACTI_APT_URL:-}" ] || warn_exit0 "vars.VACTI_APT_URL is not set"
+          [ -n "${VACTI_APT_PRODUCER_TOKEN:-}" ] || warn_exit0 "secrets.VACTI_APT_PRODUCER_TOKEN is not set"
+          base="${VACTI_APT_URL%/}/apt"
+          # Flat apt repo: the index lives at <base>/Packages (gz fallback). Same
+          # authenticated transport apt itself uses (Basic login 'vacti').
+          idx="$(curl -fsSL --max-time 30 -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages" 2>/dev/null \
+                 || curl -fsSL --max-time 30 -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages.gz" 2>/dev/null | gunzip -c 2>/dev/null \
+                 || true)"
+          [ -n "$idx" ] || warn_exit0 "could not read the apt index at ${base}/Packages (auth/path/network)"
+
+          # Pick the highest Version among stanzas whose Package is EXACTLY vacti-engine
+          # (an exact field match so vacti-engine-chromium is excluded). sort -V so
+          # 0.2.10 > 0.2.9 (lexical sort would be wrong).
+          apt_ver="$(printf '%s\n' "$idx" | awk '
+              BEGIN{RS="";FS="\n"}
+              { pkg=0; ver="";
+                for(i=1;i<=NF;i++){
+                  if($i=="Package: vacti-engine") pkg=1;
+                  if($i ~ /^Version:[ \t]+/){ v=$i; sub(/^Version:[ \t]+/,"",v); ver=v }
+                }
+                if(pkg && ver!="") print ver
+              }' | sort -V | uniq | tail -1)"
+          [ -n "$apt_ver" ] || warn_exit0 "no 'Package: vacti-engine' stanza with a Version found in the apt index"
+          echo "apt newest vacti-engine version: ${apt_ver}"
+
+          # --- 2. newest images-v* release already built by THIS repo -----------------
+          distro_ver="$(gh api "/repos/${REPO}/releases" --jq '.[].tag_name' 2>/dev/null \
+                        | grep -E '^images-v' | sed -E 's/^images-v//' | sort -V | tail -1 || true)"
+          [ -n "$distro_ver" ] || distro_ver="0"
+          echo "distro newest images-v* release: ${distro_ver}"
+
+          # --- 3. compare (sort -V); no-op unless apt is strictly newer ---------------
+          newest="$(printf '%s\n%s\n' "$distro_ver" "$apt_ver" | sort -V | tail -1)"
+          if [ "$newest" != "$apt_ver" ] || [ "$apt_ver" = "$distro_ver" ]; then
+            summary "watch-engine-apt: already up-to-date (apt ${apt_ver} <= images-v${distro_ver}); no dispatch."
+            exit 0
+          fi
+
+          # --- 4. idempotency guard: skip if a build is already in flight -------------
+          # build.yml/build-arm64.yml take ~1h and publish images-v<ver> only at the
+          # end, so without this guard the 15-min poll would re-dispatch the same
+          # version 3-4x before that release lands. If any build run is queued or
+          # in_progress, defer: the in-flight build will close the gap.
+          active=0
+          for wf in build.yml build-arm64.yml; do
+            for st in in_progress queued; do
+              n="$(gh run list --workflow "$wf" --status "$st" --json databaseId --jq 'length' 2>/dev/null || echo 0)"
+              case "$n" in ''|*[!0-9]*) n=0;; esac
+              active=$((active + n))
+            done
+          done
+          if [ "$active" -gt 0 ]; then
+            summary "watch-engine-apt: apt ${apt_ver} > images-v${distro_ver}, but ${active} build run(s) already queued/in_progress; deferring (idempotent)."
+            exit 0
+          fi
+
+          # --- 5. dispatch both image builds for the new version ----------------------
+          # Inputs mirror build.yml / build-arm64.yml defaults (full arsenal + CTF +
+          # FAT-OVA) so an auto-rebuild never silently reverts :latest to a lean set.
+          rc=0
+          for wf in build.yml build-arm64.yml; do
+            if gh workflow run "$wf" -R "${REPO}" \
+                 -f release="${apt_ver}" -f full_arsenal=1 -f ctf_arsenal=1 -f fat_ova=1 2>&1; then
+              echo "dispatched ${wf} for ${apt_ver}"
+            else
+              echo "::warning::failed to dispatch ${wf} for ${apt_ver}"; rc=1
+            fi
+          done
+          if [ "$rc" = 0 ]; then
+            summary "watch-engine-apt: DISPATCHED build.yml + build-arm64.yml for ${apt_ver} (was images-v${distro_ver})."
+          else
+            summary "watch-engine-apt: partial dispatch for ${apt_ver} (see warnings); next poll retries."
+          fi
+          # Never fail the schedule on a dispatch glitch; the next 15-min poll retries.
+          exit 0
