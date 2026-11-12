@@ -74,9 +74,14 @@ cp -a "${DISTRO_DIR}/branding/os-release" "${DISTRO_DIR}/branding/issue" \
       "${DISTRO_DIR}/branding/motd" "${DISTRO_DIR}/branding/disclaimer.txt" \
       "${DISTRO_DIR}/branding/apply-branding.sh" \
       "${HERE}/config/includes.chroot/usr/share/vacti/branding/"
-for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo kiosk; do
+for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo kiosk scripts; do
   [[ -d "${DISTRO_DIR}/branding/${d}" ]] && cp -a "${DISTRO_DIR}/branding/${d}" "${HERE}/config/includes.chroot/usr/share/vacti/branding/"
 done
+# console/power lockdown knobs (B3 GREEN L7) for apply-branding.sh in the chroot
+# hook (the build env is not inherited there). Parsed, never sourced; no secret.
+printf 'VACTI_SERIAL_GETTY=%s\nVACTI_SERIAL_GETTY_PORTS=%s\n' \
+  "${VACTI_SERIAL_GETTY:-keep}" "${VACTI_SERIAL_GETTY_PORTS:-ttyS0 ttyAMA0}" \
+  > "${HERE}/config/includes.chroot/usr/share/vacti/branding/lockdown.env"
 # GRUB boot-menu splash (binary overlay), if the operator provided one
 [[ -f "${DISTRO_DIR}/branding/grub/splash.png" ]] && \
   install -D -m0644 "${DISTRO_DIR}/branding/grub/splash.png" "${HERE}/config/includes.binary/boot/grub/splash.png"

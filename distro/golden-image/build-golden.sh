@@ -107,9 +107,15 @@ cp -a "${BRAND_DIR}/os-release" "${BRAND_DIR}/issue" "${BRAND_DIR}/issue.net" \
 # .deb itself is NEVER baked (thin-bootstrap IP protection); only this public key
 # ships here, exactly as the engine's own postinst installs it to the same path.
 install -m0644 "${BRAND_DIR}/vacti-apt.gpg" "${STAGE}/usr/share/keyrings/vacti-apt.gpg"
-for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo kiosk; do
+for d in grub plymouth wallpaper greeter console fastfetch xfce profile.d logo kiosk scripts; do
   [[ -d "${BRAND_DIR}/${d}" ]] && cp -a "${BRAND_DIR}/${d}" "${STAGE}/usr/share/vacti/branding/"
 done
+# console/power lockdown knobs (B3 GREEN L7) for apply-branding.sh, which runs
+# inside the guest where the host env is not inherited. Parsed (never sourced)
+# by apply-branding.sh; no secret. Default keep = serial-getty unchanged.
+printf 'VACTI_SERIAL_GETTY=%s\nVACTI_SERIAL_GETTY_PORTS=%s\n' \
+  "${VACTI_SERIAL_GETTY:-keep}" "${VACTI_SERIAL_GETTY_PORTS:-ttyS0 ttyAMA0}" \
+  > "${STAGE}/usr/share/vacti/branding/lockdown.env"
 cp -a "${BRAND_DIR}/apply-branding.sh" "${STAGE}/opt/vacti-build/apply-branding.sh"
 # firstboot unit + script
 cp -a "${ENROLL_DIR}/firstboot/vacti-firstboot"          "${STAGE}/usr/local/sbin/vacti-firstboot"

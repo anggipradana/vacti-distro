@@ -1,0 +1,40 @@
+// 10-vacti-lockdown.rules -> /etc/polkit-1/rules.d/10-vacti-lockdown.rules
+//
+// L1 lockdown (B3 GREEN): stop the login screen and other non-admin local
+// sessions from powering off, rebooting, halting, suspending or hibernating the
+// box. Those actions now need ADMIN authentication (AUTH_ADMIN), not the logind
+// default allow_active=yes.
+//
+// This rule works on its own. It stays in force even if the greeter's ~power
+// indicator comes back (for example after an old template is re-applied): the
+// LightDM greeter runs as the unprivileged 'lightdm' user with no polkit agent,
+// so an admin challenge means the request is denied.
+//
+// It covers every host. No user name is hardcoded: it never looks for a
+// particular account (such as the shipped operator login), so it also works on
+// a retrofit host that is still on an older user name. Not affected:
+//   - root, including the engine's `sudo -n` path. logind also skips polkit for
+//     any caller holding CAP_SYS_BOOT. The explicit root check is extra safety.
+//   - members of the 'sudo' group (the operator login on every SKU), so the XFCE
+//     logout/shutdown dialog and `systemctl reboot` over SSH work as before.
+// Everyone else (lightdm greeter, kiosk/visitor users, any account added later
+// that is not an admin) gets an admin password challenge, which fails safe.
+//
+// Load order: polkit runs rules in filename order across /etc and /usr/share,
+// and the first rule to return a result decides. The 10- prefix puts this rule
+// before 49-vacti-activate.rules and 50-default.rules. That file never grants
+// power actions, so nothing conflicts.
+//
+// To revert: delete this file. polkitd re-reads rules.d by itself, so no restart
+// is needed.
+polkit.addRule(function(action, subject) {
+    var power = /^org\.freedesktop\.login1\.(power-off|reboot|halt|suspend|hibernate)(-multiple-sessions|-ignore-inhibit)?$/;
+    var legacy = /^org\.freedesktop\.consolekit\.system\.(stop|restart)(-multiple-users)?$/;
+    if (!power.test(action.id) && !legacy.test(action.id)) {
+        return;  // not handled: fall through to later rules / logind defaults
+    }
+    if (subject.user === "root" || subject.isInGroup("sudo")) {
+        return;  // not handled: fall through to later rules / logind defaults
+    }
+    return polkit.Result.AUTH_ADMIN;
+});

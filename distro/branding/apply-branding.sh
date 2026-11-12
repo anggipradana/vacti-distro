@@ -129,6 +129,9 @@ if [[ -d "${SRC}/wallpaper" ]]; then
   cp -a "${SRC}/wallpaper/." /usr/share/backgrounds/vacti/ 2>/dev/null || true
   [[ -d "${SRC}/greeter" ]] && cp -a "${SRC}/greeter/." /usr/share/backgrounds/vacti/ 2>/dev/null || true
   rm -f /usr/share/backgrounds/vacti/*.svg /usr/share/backgrounds/vacti/*.conf 2>/dev/null || true
+  # the greeter dir also carries the L1 polkit rule source; it belongs only in
+  # /etc/polkit-1/rules.d (section 11), never in the wallpaper dir
+  rm -rf /usr/share/backgrounds/vacti/polkit 2>/dev/null || true
   log "wallpaper staged to /usr/share/backgrounds/vacti"
 fi
 
@@ -197,5 +200,145 @@ case "$cur_host" in
     ;;
   *) log "hostname kept (${cur_host})" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# 11. console / power lockdown (B3 GREEN subset): L1 polkit power rule, L2
+#     Ctrl-Alt-Del, L3 SysRq, L6 getty tty2-6, L7 serial-getty per SKU.
+#     Same file for the golden guest, the ISO chroot (and so the Calamares
+#     install), and a retrofit re-run on a live host.
+#     IDEMPOTENT: install -D rewrites identical bytes; masking a masked unit is a
+#     no-op; nothing gets appended. BREAK-GLASS PRESERVED: tty1 is never touched
+#     (getty@tty1 is the kiosk/netpanel fail-open target), and neither is the
+#     getty@.service template. SSH and the engine's root `sudo -n` path don't use
+#     polkit/VTs. The hypervisor serial console stays up by default
+#     (VACTI_SERIAL_GETTY=keep). NEVER restarts logind/lightdm/getty live:
+#     manager/VT changes take effect at the next boot (R2d rule A1).
+# ---------------------------------------------------------------------------
+# true when this run is NOT the booted system (live-build chroot, virt-customize
+# guest chroot) or is a container. Then live kernel/systemd changes are skipped:
+# a chroot's /proc belongs to the BUILD HOST, so `sysctl -p` would change the
+# CI runner, not the image.
+not_live_host() {
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    systemd-detect-virt --chroot -q 2>/dev/null && return 0
+    systemd-detect-virt --container -q 2>/dev/null && return 0
+    return 1
+  fi
+  [[ "$(stat -c %d:%i / 2>/dev/null)" != "$(stat -c %d:%i /proc/1/root/. 2>/dev/null)" ]]
+}
+# mask a unit: systemctl when present (works offline in a chroot), else the
+# equivalent /etc symlink to /dev/null. Never fails the branding run.
+mask_unit() { # unit
+  systemctl mask "$1" >/dev/null 2>&1 && return 0
+  install -d /etc/systemd/system 2>/dev/null && ln -sfn /dev/null "/etc/systemd/system/$1" 2>/dev/null || true
+}
+# a lockdown knob: env var first, else the build-time value that build-golden.sh /
+# build-iso.sh record in ${SRC}/lockdown.env (parsed, never sourced).
+lockdown_knob() { # name default
+  local v="${!1:-}"
+  if [[ -z "$v" && -f "${SRC}/lockdown.env" ]]; then
+    v="$(sed -n "s/^$1=//p" "${SRC}/lockdown.env" | tail -n1 | tr -d "\"'" \
+         | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  fi
+  printf '%s' "${v:-$2}"
+}
+
+# Opt-out latches. The operator revert tool (vacti-undo-tty-mask / vacti-lockdown-undo,
+# installed below) writes /etc/vacti-lockdown/<layer>.optout, so a re-run does not
+# re-apply a layer the operator deliberately reverted.
+LATCH_DIR="/etc/vacti-lockdown"
+
+# L1: polkit admin-auth for logind power actions from non-admin local subjects.
+# Installed on BOTH SKUs: headless also has a tty1 console seat. The ~power drop
+# itself lives in the greeter template above (section 8).
+if [[ -f "${LATCH_DIR}/l1-power.optout" ]]; then
+  # operator reverted L1: keep the rule off and put ~power back after section 8
+  # reinstalled the template (same edit the revert tool makes)
+  if [[ -f /etc/lightdm/lightdm-gtk-greeter.conf ]] \
+     && ! grep -qE '^indicators *=.*~power' /etc/lightdm/lightdm-gtk-greeter.conf; then
+    sed -i -E 's/^(indicators *=.*[^;[:space:]])[;[:space:]]*$/\1;~power/' /etc/lightdm/lightdm-gtk-greeter.conf || true
+  fi
+  log "L1 skipped (operator opt-out latch present; greeter ~power kept)"
+elif [[ -f "${SRC}/greeter/polkit/10-vacti-lockdown.rules" ]]; then
+  install -D -m0644 "${SRC}/greeter/polkit/10-vacti-lockdown.rules" /etc/polkit-1/rules.d/10-vacti-lockdown.rules
+  log "L1 polkit power lockdown rule installed (non-admin seats need admin auth to power off/reboot)"
+fi
+
+# L2: Ctrl-Alt-Del -> nothing (target masked + 7-press burst disabled).
+if [[ -f "${LATCH_DIR}/l2-cad.optout" ]]; then
+  log "L2 skipped (operator opt-out latch present)"
+elif [[ -f "${SRC}/console/ctrl-alt-del.conf" ]]; then
+  install -D -m0644 "${SRC}/console/ctrl-alt-del.conf" /etc/systemd/system.conf.d/10-vacti-cad.conf
+  mask_unit ctrl-alt-del.target
+  log "L2 ctrl-alt-del.target masked + CtrlAltDelBurstAction=none (manager drop-in active at next boot)"
+fi
+
+# L3: SysRq off. Live-apply ONLY this one file, ONLY on a booted host (never in a
+# build chroot). Every other sysctl.d file is left alone, so no `sysctl --system`.
+if [[ -f "${LATCH_DIR}/l3-sysrq.optout" ]]; then
+  log "L3 skipped (operator opt-out latch present)"
+elif [[ -f "${SRC}/console/90-vacti-sysrq.conf" ]]; then
+  install -D -m0644 "${SRC}/console/90-vacti-sysrq.conf" /etc/sysctl.d/90-vacti-sysrq.conf
+  if ! not_live_host; then
+    sysctl -q -p /etc/sysctl.d/90-vacti-sysrq.conf >/dev/null 2>&1 || true
+  fi
+  log "L3 kernel.sysrq=0 installed"
+fi
+
+# L6: blank VTs on Ctrl-Alt-F2..F6. Mask getty@ + autovt@ tty2..6 (autovt is what
+# logind spawns on a VT switch). NOT tty1, NOT the template. A running getty is
+# not stopped (an operator may be logged in on it); the mask applies on the next
+# spawn or boot. Opt-out latch: vacti-undo-tty-mask (L6/L7 revert) writes
+# /etc/vacti-lockdown/tty-mask.optout so a re-run does not re-mask.
+if [[ -f "${LATCH_DIR}/tty-mask.optout" ]]; then
+  log "L6 tty2-6 mask skipped (operator opt-out latch present)"
+else
+  for i in 2 3 4 5 6; do
+    mask_unit "getty@tty${i}.service"
+    mask_unit "autovt@tty${i}.service"
+  done
+  log "L6 getty/autovt tty2-6 masked (tty1 + getty@.service template untouched)"
+fi
+
+# L7: serial-getty per SKU. keep (DEFAULT) = no change: the hypervisor serial
+# console stays a break-glass login and CI smoke-boot keeps its ttyS0 prompt.
+# mask = force-mask (physical appliance). auto = mask only when this run is on
+# a booted bare-metal host (systemd-detect-virt --vm == none). In a build chroot
+# the SKU can't be detected, so auto resolves to keep there.
+serial_mode="$(lockdown_knob VACTI_SERIAL_GETTY keep)"
+serial_ports="$(lockdown_knob VACTI_SERIAL_GETTY_PORTS 'ttyS0 ttyAMA0')"
+serial_do_mask=0
+case "$serial_mode" in
+  keep) log "L7 serial-getty kept (VACTI_SERIAL_GETTY=keep; hypervisor break-glass preserved)" ;;
+  mask) serial_do_mask=1 ;;
+  auto)
+    if ! not_live_host && command -v systemd-detect-virt >/dev/null 2>&1 \
+       && [[ "$(systemd-detect-virt --vm 2>/dev/null || true)" == "none" ]]; then
+      serial_do_mask=1
+    else
+      log "L7 serial-getty kept (VACTI_SERIAL_GETTY=auto: VM, container or build chroot)"
+    fi
+    ;;
+  *) log "L7 serial-getty kept (unknown VACTI_SERIAL_GETTY='${serial_mode}'; expected keep|mask|auto)" ;;
+esac
+if [[ "$serial_do_mask" -eq 1 ]]; then
+  if [[ -f "${LATCH_DIR}/tty-mask.optout" ]]; then
+    log "L7 serial-getty mask skipped (operator opt-out latch present)"
+  else
+    for port in $serial_ports; do
+      [[ "$port" =~ ^[A-Za-z0-9]+$ ]] || continue
+      mask_unit "serial-getty@${port}.service"
+    done
+    log "L7 serial-getty masked on: ${serial_ports} (VACTI_SERIAL_GETTY=${serial_mode})"
+  fi
+fi
+
+# Operator revert tool for the layers above: default = L6/L7 VT/serial masks;
+# `power|cad|sysrq|all` revert L1/L2/L3 as well. Every revert latches an opt-out.
+if [[ -f "${SRC}/scripts/undo-tty-mask.sh" ]]; then
+  install -D -m0755 "${SRC}/scripts/undo-tty-mask.sh" /usr/local/sbin/vacti-undo-tty-mask
+  ln -sfn vacti-undo-tty-mask /usr/local/sbin/vacti-lockdown-undo
+  log "vacti-undo-tty-mask (+ vacti-lockdown-undo) installed (per-layer revert + opt-out latch)"
+fi
 
 log "branding complete"

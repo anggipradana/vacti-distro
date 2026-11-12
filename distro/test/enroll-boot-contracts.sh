@@ -418,6 +418,32 @@ check "ISO hook: needrestart notify-only (restart = l)" \
 check "ISO hook: keeps apt-daily timers enabled" \
   has "$OSP_HOOK" 'systemctl enable apt-daily\.timer apt-daily-upgrade\.timer'
 
+echo "== console/power lockdown (B3 GREEN) keeps break-glass =="
+GREETER_CONF="${ROOT}/distro/branding/greeter/lightdm-gtk-greeter.conf"
+LOCK_RULE="${ROOT}/distro/branding/greeter/polkit/10-vacti-lockdown.rules"
+check "L1 greeter indicators line has no ~power" \
+  bash -c 'grep -E "^indicators" "'"$GREETER_CONF"'" | grep -vq "~power"'
+check "L1 polkit rule returns AUTH_ADMIN (never YES)" \
+  bash -c 'grep -q "polkit.Result.AUTH_ADMIN" "'"$LOCK_RULE"'" && ! grep -q "polkit.Result.YES" "'"$LOCK_RULE"'"'
+check "L1 polkit rule exempts root + sudo group (no hardcoded user)" \
+  has "$LOCK_RULE" 'subject\.user === "root" \|\| subject\.isInGroup\("sudo"\)'
+check "apply-branding installs the L1 polkit rule" \
+  has "$APPLY" '/etc/polkit-1/rules\.d/10-vacti-lockdown\.rules'
+check "apply-branding masks ctrl-alt-del.target + installs BurstAction drop-in" \
+  bash -c 'grep -q "mask_unit ctrl-alt-del.target" "'"$APPLY"'" && grep -q "system.conf.d/10-vacti-cad.conf" "'"$APPLY"'"'
+check "L2 drop-in sets CtrlAltDelBurstAction=none" \
+  has "${ROOT}/distro/branding/console/ctrl-alt-del.conf" '^CtrlAltDelBurstAction=none$'
+check "L3 sysctl drop-in sets kernel.sysrq = 0" \
+  has "${ROOT}/distro/branding/console/90-vacti-sysrq.conf" '^kernel\.sysrq = 0$'
+check "apply-branding never runs a blanket sysctl --system" \
+  bash -c '! grep -Eq "^[^#]*sysctl --system" "'"$APPLY"'"'
+check "L6 masks only tty2..6 (never tty1, never the getty@ template)" \
+  bash -c 'grep -q "for i in 2 3 4 5 6" "'"$APPLY"'" && ! grep -Eq "mask_unit \"?(getty|autovt)@(tty1)?\.service" "'"$APPLY"'"'
+check "L7 serial-getty default is keep" \
+  has "${ROOT}/distro/vacti-appliance.env" '^VACTI_SERIAL_GETTY="\$\{VACTI_SERIAL_GETTY:-keep\}"'
+check "both build drivers stage the branding scripts dir (undo tool)" \
+  bash -c 'grep -q "kiosk scripts; do" "'"$BG"'" && grep -q "kiosk scripts; do" "'"$BISO"'"'
+
 echo
 echo "== summary: ${pass} passed, ${fail} failed =="
 [[ $fail -eq 0 ]]
