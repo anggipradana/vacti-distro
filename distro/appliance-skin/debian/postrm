@@ -1,0 +1,32 @@
+#!/bin/bash
+# vacti-appliance-skin postrm. Self-contained: the package files (incl. skin-lib.sh)
+# are already gone when this runs.
+#   remove: clear the ack + deadline so a reinstall starts a fresh 24h probation
+#   purge : also drop /etc/vacti-appliance-skin and the state dir, EXCEPT
+#           - user-migration snapshots under migrate/ (needed by migrate-user rollback)
+#           - the manifest/backups if a diversion is still held (incomplete reversal)
+set -e
+
+STATE=/var/lib/vacti-appliance-skin
+
+case "$1" in
+  remove)
+    rm -f "${STATE}/ack" "${STATE}/revert-deadline"
+    ;;
+  purge)
+    rm -f "${STATE}/ack" "${STATE}/ack.prev" "${STATE}/revert-deadline" "${STATE}/auto-reverted" "${STATE}/.lock"
+    if ! LC_ALL=C dpkg-divert --list 2>/dev/null | grep -q ' by vacti-appliance-skin$'; then
+      rm -f "${STATE}/manifest"
+      rm -rf "${STATE}/backup"
+    fi
+    rm -rf /etc/vacti-appliance-skin
+    if [ -d "${STATE}/migrate" ] && [ -n "$(ls -A "${STATE}/migrate" 2>/dev/null)" ]; then
+      echo "vacti-appliance-skin: keeping ${STATE}/migrate (user-migration snapshots)"
+    fi
+    rmdir --ignore-fail-on-non-empty "$STATE" 2>/dev/null || true
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

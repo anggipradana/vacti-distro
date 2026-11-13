@@ -1,0 +1,28 @@
+#!/bin/bash
+# vacti-appliance-skin prerm. Tears the applied skin down only on a real removal; on
+# upgrade the state is kept and the new postinst re-applies over it (manifest-merged).
+#   1. disable the auto-revert timer (we are removing on purpose). The .service is NOT
+#      stopped: it may be the caller (auto-revert -> apt-get remove).
+#   2. remove.sh: unmask, delete created paths, dpkg-divert --remove --rename, restore
+#   3. systemctl daemon-reload
+#   4. drop the version marker
+# Never exits non-zero: a failing prerm would block the removal/auto-revert itself.
+set -e
+
+LIBEXEC=/usr/libexec/vacti-appliance-skin
+
+case "$1" in
+  remove | deconfigure)
+    # shellcheck source=../skin-lib.sh
+    . "${LIBEXEC}/skin-lib.sh"
+    systemctl disable --now "$SKIN_TIMER" >/dev/null 2>&1 || true
+    "${LIBEXEC}/remove.sh" || skin_log "WARNING: remove.sh reported an incomplete reversal (see journal); diversions still held are listed by: dpkg-divert --list | grep ${SKIN_PKG}"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    rm -f "$SKIN_MARKER"
+    ;;
+  upgrade | failed-upgrade) ;;
+esac
+
+#DEBHELPER#
+
+exit 0

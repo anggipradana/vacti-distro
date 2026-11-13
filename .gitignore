@@ -51,3 +51,12 @@ distro/live-build-config/config/chroot
 
 # agent worktree scratch — never commit
 .claude/
+
+# appliance-skin build artifacts (branding is copied at build time from distro/branding)
+distro/appliance-skin/dist-skin/
+distro/appliance-skin/build/
+distro/appliance-skin/debian/vacti-appliance-skin/
+distro/appliance-skin/debian/.debhelper/
+distro/appliance-skin/debian/files
+distro/appliance-skin/debian/*.substvars
+distro/appliance-skin/debian/debhelper-build-stamp

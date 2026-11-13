@@ -1,0 +1,10 @@
+apply.sh usr/libexec/vacti-appliance-skin
+remove.sh usr/libexec/vacti-appliance-skin
+migrate-user.sh usr/libexec/vacti-appliance-skin
+auto-revert.sh usr/libexec/vacti-appliance-skin
+ctl.sh usr/libexec/vacti-appliance-skin
+skin-lib.sh usr/libexec/vacti-appliance-skin
+build/branding usr/share/vacti-appliance-skin
+build/VERSION usr/share/vacti-appliance-skin
+build/SOURCE usr/share/vacti-appliance-skin
+README.md usr/share/doc/vacti-appliance-skin

@@ -1,0 +1,123 @@
+name: Release appliance-skin .deb
+
+# Build vacti-appliance-skin_<ver>_all.deb (Architecture: all - config + shell + brand
+# assets, no compiled code) and publish it to the SAME private apt repo the engine uses,
+# via POST /pentest/engine-deb (storeDebAndReindex keys on the control Package name, which
+# starts with "vacti-engine-"... NO: this package is "vacti-appliance-skin", so see the
+# note in the publish job). The fleet already points apt at that repo for vacti-engine, so
+# `apt install vacti-appliance-skin` resolves with NO new source line on any box.
+#
+# Trigger: a push that touches debian/changelog (a new version), or manual dispatch.
+#
+# REQUIRED SECRETS (mirror the engine repo's):
+#   VACTI_URL            control-plane API base (POSTs to ${VACTI_URL}/pentest/engine-deb)
+#   VACTI_PUBLISH_TOKEN  Bearer token for the upload (Publish scope)
+#
+# FAIL CLOSED: publish depends on build-and-smoke, which asserts install applies the skin
+# and remove restores every tree byte-identical with no diversions left. A reversal
+# regression therefore can never publish.
+
+on:
+  push:
+    paths:
+      - 'distro/appliance-skin/debian/changelog'
+      - 'distro/appliance-skin/**'
+      - '.github/workflows/release-skin-deb.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: release-skin-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: shellcheck + bash -n + em-dash sweep
+        working-directory: distro/appliance-skin
+        run: |
+          set -euo pipefail
+          SH=(apply.sh remove.sh migrate-user.sh auto-revert.sh ctl.sh skin-lib.sh build-skin-deb.sh test/smoke.sh debian/postinst debian/prerm debian/postrm)
+          for f in "${SH[@]}"; do bash -n "$f"; done
+          shellcheck -x -S warning "${SH[@]}"
+          # engine/distro house rule: no em/en dashes anywhere in the package source
+          if grep -rnP '[\x{2013}\x{2014}]' . ; then
+            echo "::error::em/en dash found in appliance-skin sources"; exit 1
+          fi
+
+  build-and-smoke:
+    needs: lint-gate
+    runs-on: ubuntu-latest
+    outputs:
+      filename: ${{ steps.deb.outputs.filename }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install build + lint tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq dpkg-dev debhelper
+      - name: Build the .deb (copies distro/branding, -Zgzip)
+        id: build
+        run: |
+          set -euo pipefail
+          VERSION="$(dpkg-parsechangelog -l distro/appliance-skin/debian/changelog -S Version)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          bash distro/appliance-skin/build-skin-deb.sh --version "$VERSION"
+      - name: Locate the built package
+        id: deb
+        run: |
+          set -euo pipefail
+          path="$(ls -1 distro/appliance-skin/dist-skin/vacti-appliance-skin_*_all.deb | head -n1)"
+          [ -f "$path" ] || { echo "::error::no .deb produced"; exit 1; }
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "filename=$(basename "$path")" >> "$GITHUB_OUTPUT"
+      - name: Smoke - install applies, remove reverses byte-identical (fail closed)
+        run: sudo bash distro/appliance-skin/test/smoke.sh "${{ steps.deb.outputs.path }}"
+      - name: Headless smoke - clean install + remove without lightdm/plymouth
+        env:
+          DOCKER_IMAGE: debian:trixie-slim
+        run: sudo bash distro/appliance-skin/test/smoke.sh "${{ steps.deb.outputs.path }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vacti-appliance-skin-deb
+          path: distro/appliance-skin/dist-skin/*.deb
+          if-no-files-found: error
+
+  publish:
+    needs: build-and-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: vacti-appliance-skin-deb
+          path: dist-skin
+      - name: Publish to the vacti apt repo
+        env:
+          VACTI_URL: ${{ secrets.VACTI_URL }}
+          VACTI_PUBLISH_TOKEN: ${{ secrets.VACTI_PUBLISH_TOKEN }}
+          FILENAME: ${{ needs.build-and-smoke.outputs.filename }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VACTI_URL:-}" ] || [ -z "${VACTI_PUBLISH_TOKEN:-}" ]; then
+            echo "::error::VACTI_URL and VACTI_PUBLISH_TOKEN repo secrets are required."
+            exit 1
+          fi
+          DEB="dist-skin/${FILENAME}"
+          [ -f "$DEB" ] || { echo "::error::missing ${DEB}"; exit 1; }
+          # Same route the engine uses. NOTE: the CP publish gate (libs/api/src/apt-repo.ts
+          # validateEngineDeb/ALLOWED_DEB_PACKAGE) currently accepts "vacti-engine" and
+          # "vacti-engine-*" only. "vacti-appliance-skin" must be added to that allowlist on
+          # the control plane BEFORE this upload will be accepted (a one-line change there).
+          # -f makes curl fail the job on any HTTP >= 400 (incl. a 422 reject), so a
+          # not-yet-allowlisted name fails loudly rather than silently dropping the package.
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${VACTI_PUBLISH_TOKEN}" \
+            --data-binary "@${DEB}" \
+            "${VACTI_URL}/pentest/engine-deb?filename=${FILENAME}"
+          echo "published ${FILENAME}"

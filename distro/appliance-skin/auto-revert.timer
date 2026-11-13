@@ -1,0 +1,21 @@
+# Installed as vacti-appliance-skin-auto-revert.timer.
+#
+# The 24h revert window is a WALL-CLOCK deadline written by postinst at install time
+# (/var/lib/vacti-appliance-skin/revert-deadline); this timer only POLLS it. Why not
+# OnBootSec=24h: a monotonic OnBootSec that is already in the past when the timer is
+# started (any host with >24h uptime, i.e. every live fleet box) elapses IMMEDIATELY,
+# which would revert the skin seconds after install; and OnActiveSec would restart the
+# 24h countdown on every reboot. Polling a fixed deadline gives exactly "24h after
+# install", across reboots, with at most ~1h of slack.
+[Unit]
+Description=vacti-appliance-skin auto-revert check (removes the skin unless acknowledged within 24h)
+Documentation=file:///usr/share/doc/vacti-appliance-skin/README.md
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+AccuracySec=1min
+Unit=vacti-appliance-skin-auto-revert.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,39 @@
+#!/usr/bin/make -f
+# vacti-appliance-skin: Architecture: all, no compiled code. Branding assets are
+# copied at BUILD time from the single source of truth, ../branding (vacti-distro
+# distro/branding/), never committed twice.
+
+SKIN_VERSION := $(shell dpkg-parsechangelog -S Version)
+SKIN_SOURCE := $(shell git -C .. rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+PKGDIR := debian/vacti-appliance-skin
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	rm -rf build
+	mkdir -p build
+	cp -a ../branding build/branding
+	printf '%s\n' '$(SKIN_VERSION)' > build/VERSION
+	printf 'vacti-distro %s (distro/branding + distro/appliance-skin)\n' '$(SKIN_SOURCE)' > build/SOURCE
+
+override_dh_auto_clean:
+	rm -rf build
+
+override_dh_install:
+	dh_install
+	install -D -m 0644 auto-revert.timer $(PKGDIR)/usr/lib/systemd/system/vacti-appliance-skin-auto-revert.timer
+	install -D -m 0644 auto-revert.service $(PKGDIR)/usr/lib/systemd/system/vacti-appliance-skin-auto-revert.service
+	chmod 0755 $(PKGDIR)/usr/libexec/vacti-appliance-skin/*.sh
+	chmod 0755 $(PKGDIR)/usr/share/vacti-appliance-skin/branding/apply-branding.sh
+
+# The skin owns its unit lifecycle in postinst/prerm: the auto-revert timer is armed
+# only when the applied version is not yet acknowledged, and never restarted on upgrade.
+override_dh_systemd_enable:
+override_dh_systemd_start:
+override_dh_installsystemd:
+
+# The control-plane apt indexer reads control.tar.gz with zlib: zstd/xz would yield an
+# empty index entry and the fleet would never see the package.
+override_dh_builddeb:
+	dh_builddeb -- -Zgzip

@@ -1,0 +1,18 @@
+Source: vacti-appliance-skin
+Section: admin
+Priority: optional
+Maintainer: Vacti <ops@vacti.example>
+Build-Depends: debhelper (>= 10)
+Standards-Version: 4.6.0
+
+Package: vacti-appliance-skin
+Architecture: all
+Depends: dpkg (>= 1.17.6), coreutils, systemd, ${misc:Depends}
+Recommends: vacti-engine (>= 0.2.452), lightdm, network-manager, plymouth-themes
+Provides: vacti-appliance-skin
+Description: Vacti appliance skin + lockdown retrofit for live kali hosts
+ Backports the vacti-distro appliance brand (plymouth, GRUB, LightDM greeter,
+ PS1, MOTD) plus the B3 GREEN lockdown subset (polkit power neutralize,
+ ctrl-alt-del mask, sysrq=0, getty tty2-6 mask) onto a running Kali or Debian
+ host. Idempotent install; dpkg-divert --rename on remove restores originals.
+ Optional kali->arparp user migration via /usr/libexec/vacti-appliance-skin/migrate-user.sh.

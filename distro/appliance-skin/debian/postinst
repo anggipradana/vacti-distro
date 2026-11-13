@@ -1,0 +1,54 @@
+#!/bin/bash
+# vacti-appliance-skin postinst. Runs on install AND upgrade (configure). Idempotent.
+#
+#   1. idempotency guard: applied-version marker == this version -> nothing to do
+#   2. preflight: vacti-engine active? (WARNING only; dev boxes without an engine install fine)
+#   3. preflight: arch-neutral payload            } performed inside apply.sh so a standalone
+#   4. stage branding to /usr/share/vacti/branding } re-apply follows the identical path
+#   5. apply.sh (claims + apply-branding.sh + lockdown layer)
+#   6. systemctl daemon-reload
+#   7. lightdm is NEVER restarted (it would kill the operator's Xfce session); the greeter,
+#      plymouth and GRUB pick the skin up at the next natural boot/login
+#   8. arm the 24h auto-revert timer (unless this version is already acknowledged)
+#   9. write the version marker LAST, so a failure before it leaves the marker absent and
+#      the next configure/upgrade re-applies (fail-forward, never a half-applied "done")
+#
+# Never exits non-zero for a skin problem: a failing postinst would leave the package
+# half-configured and wedge apt on a production engine box. Never stops vacti-engine.
+set -e
+
+LIBEXEC=/usr/libexec/vacti-appliance-skin
+# shellcheck source=../skin-lib.sh
+. "${LIBEXEC}/skin-lib.sh"
+
+case "$1" in
+  configure)
+    VERSION="$(skin_version)"
+    if [ "$(skin_applied_version)" = "$VERSION" ]; then
+      skin_log "skin ${VERSION} already applied; nothing to do"
+    else
+      if ! systemctl is-active --quiet vacti-engine.service 2>/dev/null; then
+        skin_log "WARNING: vacti-engine.service is not active (dev box?); applying the skin anyway"
+      fi
+      if "${LIBEXEC}/apply.sh"; then
+        applied=1
+      else
+        applied=0
+        skin_log "WARNING: apply.sh failed; version marker NOT written (re-run: dpkg-reconfigure vacti-appliance-skin; revert: apt remove vacti-appliance-skin)"
+      fi
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      # armed even after a failed apply: a partial skin is reverted in 24h unless acknowledged
+      skin_arm_auto_revert "$VERSION" || skin_log "WARNING: could not arm the auto-revert timer"
+      if [ "$applied" = 1 ]; then
+        install -d -m 0755 "$SKIN_ETC"
+        printf '%s\n' "$VERSION" > "${SKIN_MARKER}.tmp" && mv -f "${SKIN_MARKER}.tmp" "$SKIN_MARKER"
+        skin_log "skin ${VERSION} applied. Verify SSH key login + engine health, then: vacti-appliance-skin --ack"
+      fi
+    fi
+    ;;
+  abort-upgrade | abort-remove | abort-deconfigure) ;;
+esac
+
+#DEBHELPER#
+
+exit 0

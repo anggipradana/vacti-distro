@@ -1,0 +1,12 @@
+# Installed as vacti-appliance-skin-auto-revert.service (triggered by the .timer).
+# Removes vacti-appliance-skin when /var/lib/vacti-appliance-skin/ack does not hold the
+# applied version by the install-time deadline. Acknowledge with: vacti-appliance-skin --ack
+[Unit]
+Description=vacti-appliance-skin auto-revert (remove the skin if not acknowledged)
+Documentation=file:///usr/share/doc/vacti-appliance-skin/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/vacti-appliance-skin/auto-revert.sh
+# apt/dpkg may wait on a lock held by the engine's idle auto-update (DPkg::Lock::Timeout=900)
+TimeoutStartSec=30min
