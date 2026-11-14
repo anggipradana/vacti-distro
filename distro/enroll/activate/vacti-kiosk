@@ -17,6 +17,16 @@
 #
 # No token/code/proxy/key VALUE is ever printed or logged here; sensitive values
 # are handed to the helper subcommands via the environment, never argv.
+#
+# Feature flags (env, consumed at process start):
+#   VACTI_KIOSK_DIAG - post-enroll "Diagnostik" tab (operator-driven ping +
+#                      DNS-resolve of an arbitrary target). Default "1" = on;
+#                      set to "0" to hide the tab AND make the matching
+#                      vacti-activate subcommands (__ping-target /
+#                      __resolve-target) exit 3 "disabled". The tab is ONLY
+#                      ever rendered in --mode=network (post-enroll surface)
+#                      regardless of this flag - pre-enroll keeps zero new
+#                      surface.
 import os
 import re
 import sys
@@ -144,6 +154,15 @@ STRINGS = {
         "net_mode_reboot_body": "Perangkat akan reboot. Tidak ada data yang hilang.",
         "net_mode_reboot_back": "Batal",
         "net_mode_reboot_confirm": "Mulai ulang",
+        # Diagnostik tab (post-enroll only; see vacti-kiosk _page_diagnostic).
+        "tab_diag": "Diagnostik",
+        "diag_target_title": "Target (host atau IP)",
+        "diag_btn_ping": "Ping",
+        "diag_btn_resolve": "Resolve DNS",
+        "diag_btn_clear": "Bersihkan",
+        "diag_invalid_target": "Target tidak valid.",
+        "diag_busy": "Probe lain sedang berjalan.",
+        "diag_disabled": "Tab diagnostik dinonaktifkan.",
     },
     "en": {
         "win_title": "vacti - Activation",
@@ -206,6 +225,15 @@ STRINGS = {
         "net_mode_reboot_body": "The appliance will restart. No data is lost.",
         "net_mode_reboot_back": "Cancel",
         "net_mode_reboot_confirm": "Reboot",
+        # Diagnostik tab (post-enroll only; see vacti-kiosk _page_diagnostic).
+        "tab_diag": "Diagnostics",
+        "diag_target_title": "Target (hostname / IP)",
+        "diag_btn_ping": "Ping",
+        "diag_btn_resolve": "Resolve DNS",
+        "diag_btn_clear": "Clear",
+        "diag_invalid_target": "Invalid target.",
+        "diag_busy": "Another probe is running.",
+        "diag_disabled": "Diagnostics tab is disabled.",
     },
 }
 
@@ -487,14 +515,29 @@ class KioskWindow(Adw.ApplicationWindow):
         self._reg(p_net.set_title, "tab_net")
         self._reg(p_enr.set_title, "tab_enroll")
         self._reg(p_opt.set_title, "tab_opt")
+        # APPEND-ONLY: Diagnostik tab (post-enroll only, feature-flagged).
+        # Added AFTER the existing tabs so the three above stay in-order; it
+        # only renders on the post-enroll (--mode=network) surface and is
+        # entirely absent in pre-enroll (zero new surface before enrollment).
+        # VACTI_KIOSK_DIAG=0 at env time hides it on the post-enroll side too.
+        p_diag = None
+        diag_enabled = os.environ.get("VACTI_KIOSK_DIAG", "1") == "1"
+        if MODE == "network" and diag_enabled:
+            p_diag = self.stack.add_titled(
+                self._page_diagnostic(), "diag", t("tab_diag")
+            )
+            self._reg(p_diag.set_title, "tab_diag")
         if MODE == "network":
-            # Post-enroll network-only surface: hide the enroll + optional tabs and the
-            # tab switcher itself (one-tab UIs look clean without it). The underlying
-            # pages still exist in the stack so any code that might reference them by
+            # Post-enroll network-only surface: hide the enroll + optional tabs.
+            # When Diagnostik is also present the switcher stays visible (two
+            # visible tabs: Jaringan | Diagnostik); otherwise keep the historical
+            # one-tab clean look by hiding the switcher. The underlying pages
+            # still exist in the stack so any code that might reference them by
             # name never hits a KeyError.
             p_enr.set_visible(False)
             p_opt.set_visible(False)
-            switcher.set_visible(False)
+            if p_diag is None:
+                switcher.set_visible(False)
             self.stack.set_visible_child_name("net")
         else:
             self.stack.set_visible_child_name("enroll")
@@ -609,6 +652,194 @@ class KioskWindow(Adw.ApplicationWindow):
         adv_row.set_activatable_widget(adv_btn)
         grp.add(adv_row)
         return grp
+
+    # ---- Diagnostik tab ----------------------------------------------------
+    # Post-enroll (MODE=="network") operator-driven ping + DNS-resolve of an
+    # arbitrary target. Entirely additive: existing tabs/methods are untouched.
+    # Subprocess target travels via env var (VACTI_TARGET), never argv; the
+    # bash side re-validates and uses hardcoded /bin/ping / /usr/bin/getent
+    # with `--` end-of-options.
+    _DIAG_IPV4_RE = re.compile(
+        r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$"
+    )
+    _DIAG_HOST_RE = re.compile(
+        r"^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)"
+        r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+    )
+
+    def _diag_valid_target(self, t):
+        if not t or len(t) > 253 or "/" in t:
+            return False
+        m = self._DIAG_IPV4_RE.match(t)
+        if m:
+            try:
+                parts = [int(x) for x in m.groups()]
+            except ValueError:
+                return False
+            if any(p < 0 or p > 255 for p in parts):
+                return False
+            if all(p == 0 for p in parts):
+                return False
+            if parts[3] == 255:
+                return False
+            return True
+        return bool(self._DIAG_HOST_RE.match(t))
+
+    def _page_diagnostic(self):
+        grp = Adw.PreferencesGroup()
+        self._reg(grp.set_title, "tab_diag")
+
+        # Target input row (hostname / IP). set_input_purpose(URL) hints the
+        # on-screen keyboard; validation happens below (and again in bash).
+        self.diag_target_row = Adw.EntryRow()
+        self._reg(self.diag_target_row.set_title, "diag_target_title")
+        try:
+            self.diag_target_row.set_input_purpose(Gtk.InputPurpose.URL)
+        except Exception:
+            pass
+        grp.add(self.diag_target_row)
+
+        # Button row: Ping / Resolve DNS / Clear.
+        btn_row = Adw.ActionRow()
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_valign(Gtk.Align.CENTER)
+        btn_box.set_hexpand(True)
+
+        self.diag_ping_btn = Gtk.Button()
+        self._reg(self.diag_ping_btn.set_label, "diag_btn_ping")
+        self.diag_ping_btn.add_css_class("suggested-action")
+        self.diag_ping_btn.connect(
+            "clicked",
+            lambda *_: self._run_diag_probe(
+                "ping", self.diag_target_row.get_text().strip()
+            ),
+        )
+        btn_box.append(self.diag_ping_btn)
+
+        self.diag_resolve_btn = Gtk.Button()
+        self._reg(self.diag_resolve_btn.set_label, "diag_btn_resolve")
+        self.diag_resolve_btn.connect(
+            "clicked",
+            lambda *_: self._run_diag_probe(
+                "resolve", self.diag_target_row.get_text().strip()
+            ),
+        )
+        btn_box.append(self.diag_resolve_btn)
+
+        self.diag_clear_btn = Gtk.Button()
+        self._reg(self.diag_clear_btn.set_label, "diag_btn_clear")
+        self.diag_clear_btn.add_css_class("flat")
+        self.diag_clear_btn.connect(
+            "clicked", lambda *_: self._diag_clear()
+        )
+        btn_box.append(self.diag_clear_btn)
+
+        btn_row.set_child(btn_box)
+        grp.add(btn_row)
+
+        # Output: non-editable, scrollable, monospace Gtk.TextView (~12 lines).
+        out_row = Adw.ActionRow()
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(
+            Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC
+        )
+        scroller.set_min_content_height(220)   # ~12 monospace lines
+        scroller.set_hexpand(True)
+        scroller.set_vexpand(False)
+        self.diag_buf = Gtk.TextBuffer()
+        self.diag_view = Gtk.TextView(buffer=self.diag_buf)
+        self.diag_view.set_editable(False)
+        self.diag_view.set_cursor_visible(False)
+        self.diag_view.set_monospace(True)
+        self.diag_view.set_wrap_mode(Gtk.WrapMode.NONE)
+        scroller.set_child(self.diag_view)
+        out_row.set_child(scroller)
+        grp.add(out_row)
+
+        # Per-probe lock: only ONE probe in flight at a time. Prevents operator
+        # spam (DoS / DNS-exfil throughput cap) and keeps the output readable.
+        self._diag_lock = threading.Lock()
+        return grp
+
+    def _diag_clear(self):
+        try:
+            self.diag_buf.set_text("", -1)
+        except Exception:
+            pass
+
+    def _diag_append(self, line):
+        try:
+            end = self.diag_buf.get_end_iter()
+            self.diag_buf.insert(end, (line or "") + "\n", -1)
+            end = self.diag_buf.get_end_iter()
+            self.diag_view.scroll_to_iter(end, 0.0, False, 0.0, 1.0)
+        except Exception:
+            pass
+        return False
+
+    def _diag_set_running(self, running):
+        for attr in ("diag_ping_btn", "diag_resolve_btn"):
+            b = getattr(self, attr, None)
+            if b is not None:
+                b.set_sensitive(not running)
+        return False
+
+    def _run_diag_probe(self, kind, target):
+        """kind: 'ping' | 'resolve'. Spawns a worker thread and streams the
+        captured stdout+stderr back into diag_buf via GLib.idle_add."""
+        if kind not in ("ping", "resolve"):
+            return
+        if not self._diag_valid_target(target):
+            self._diag_append(t("diag_invalid_target"))
+            return
+        # Per-probe lock, non-blocking: refuse a second concurrent probe.
+        lock = getattr(self, "_diag_lock", None)
+        if lock is None or not lock.acquire(blocking=False):
+            self._diag_append(t("diag_busy"))
+            return
+        self._diag_set_running(True)
+        self._diag_append("$ {} {}".format(kind, target))
+
+        def work():
+            try:
+                env = dict(os.environ)
+                env["VACTI_LANG"] = CURRENT_LANG
+                # Target travels via env var, NEVER argv. Matches the
+                # VACTI_PROXY / VACTI_TSKEY / VACTI_CODE / VACTI_TOKEN pattern.
+                env["VACTI_TARGET"] = target
+                rc = 1
+                out = ""
+                try:
+                    cp = subprocess.run(
+                        [ACTIVATE, "__{}-target".format(kind)],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                    )
+                    rc = cp.returncode
+                    out = (cp.stdout or "")
+                    if cp.stderr:
+                        out = (out + ("\n" if out and not out.endswith("\n") else "")
+                               + cp.stderr)
+                except subprocess.TimeoutExpired:
+                    rc = 124
+                    out = ""
+                except Exception:
+                    rc = 1
+                    out = ""
+                for line in (out.rstrip().splitlines() if out else []):
+                    GLib.idle_add(self._diag_append, line)
+                GLib.idle_add(self._diag_append, "[exit {}]".format(rc))
+            finally:
+                GLib.idle_add(self._diag_set_running, False)
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _page_enroll(self):
         grp = Adw.PreferencesGroup()

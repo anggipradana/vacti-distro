@@ -343,6 +343,72 @@ reachable() { # url
   curl -sS -o /dev/null --connect-timeout 10 --max-time 15 -I "${base}/" >/dev/null 2>&1
 }
 
+# ---------------------------------------------------------------------------
+# Operator diagnostic primitives (post-enroll Diagnostik tab): ping + DNS
+# resolve of an operator-chosen target. BOTH read the target from the
+# VACTI_TARGET env var (NEVER argv), re-validate it here against a strict
+# allowlist (RFC-1123 hostname OR dotted-quad IPv4; CIDR, 0.0.0.0, and any
+# .255 broadcast are rejected), and exec a HARDCODED absolute binary with a
+# --  end-of-options separator so a value starting with '-' can never be
+# parsed as a flag. No shell=True, no eval, no backticks, no argv concat.
+# The target is logged to journald via logger(1) for an operator-input
+# audit trail; the result is not. Feature-gated by VACTI_KIOSK_DIAG (default
+# on = "1"); when off both subcommands print "disabled" and exit 3. Mirrors
+# the existing env-not-argv pattern used by __exchange / __enroll /
+# __apply-optional, so the GTK kiosk's _run([...]) call surface is uniform.
+# ---------------------------------------------------------------------------
+_vacti_valid_target() { # target
+  local t="${1:-}"
+  [[ -n "$t" && ${#t} -le 253 ]] || return 1
+  # CIDR notation and any slash in general are rejected before pattern match.
+  [[ "$t" == *"/"* ]] && return 1
+  # IPv4 dotted-quad path: validate each octet AND reject 0.0.0.0 + x.x.x.255.
+  if [[ "$t" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+    local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}"
+    (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
+    (( a == 0 && b == 0 && c == 0 && d == 0 )) && return 1
+    (( d == 255 )) && return 1
+    return 0
+  fi
+  # RFC-1123 hostname: letter/digit/hyphen labels (1-63 chars/label, no
+  # leading or trailing hyphen), total length already bounded <=253 above.
+  [[ "$t" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]] && return 0
+  return 1
+}
+
+# Feature-flag gate: VACTI_KIOSK_DIAG=0 makes both subcommands a no-op (rc=3,
+# message "disabled") so a deployment can disable the tab without pulling the
+# code. Default "1" = on (operator explicit choice).
+_vacti_diag_gate() {
+  if [[ "${VACTI_KIOSK_DIAG:-1}" != "1" ]]; then
+    echo "disabled"
+    return 3
+  fi
+  return 0
+}
+
+do_ping_target() {
+  _vacti_diag_gate || return $?
+  local t="${VACTI_TARGET:-}"
+  if ! _vacti_valid_target "$t"; then
+    echo "invalid target"
+    return 2
+  fi
+  logger -t vacti-diag -- "ping-target target=$t" 2>/dev/null || true
+  /bin/ping -c 4 -W 2 -n -q -- "$t"
+}
+
+do_resolve_target() {
+  _vacti_diag_gate || return $?
+  local t="${VACTI_TARGET:-}"
+  if ! _vacti_valid_target "$t"; then
+    echo "invalid target"
+    return 2
+  fi
+  logger -t vacti-diag -- "resolve-target target=$t" 2>/dev/null || true
+  /usr/bin/getent hosts -- "$t"
+}
+
 # Best-effort join the tailnet with an auth key. Single source of truth for the
 # `tailscale up` call so the manual Opsional-tab key AND the auth key auto-delivered
 # on the exchange response (option A) both go through the exact same path. The key
@@ -693,6 +759,21 @@ case "${1:-}" in
     # fall-through.
     systemctl reboot 2>/dev/null || start_post_enroll_console
     exit 0
+    ;;
+  __ping-target)
+    # Operator diagnostic: ping the VACTI_TARGET env value (NEVER argv). Target
+    # re-validated here (hostname / dotted-quad IPv4; CIDR + x.x.x.255 + 0.0.0.0
+    # rejected). Hardcoded /bin/ping with -c 4 -W 2 -n -q --, 8s wall-clock bound.
+    # Feature-gated by VACTI_KIOSK_DIAG (default on).
+    do_ping_target
+    exit $?
+    ;;
+  __resolve-target)
+    # Operator diagnostic: resolve VACTI_TARGET via nsswitch (NEVER a
+    # user-supplied @resolver). Hardcoded /usr/bin/getent hosts --. Same gate
+    # and regex validation as __ping-target.
+    do_resolve_target
+    exit $?
     ;;
 esac
 

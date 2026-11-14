@@ -60,3 +60,7 @@ distro/appliance-skin/debian/.debhelper/
 distro/appliance-skin/debian/files
 distro/appliance-skin/debian/*.substvars
 distro/appliance-skin/debian/debhelper-build-stamp
+
+# Python bytecode (vacti-kiosk emits .pyc next to its source when imported)
+__pycache__/
+*.pyc
