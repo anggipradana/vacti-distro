@@ -77,7 +77,7 @@ env:
   VACTI_FAT_OVA: ${{ github.event.inputs.fat_ova || '1' }}
   VACTI_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF || github.event.client_payload.release || '' }}
   VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
-  VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+  VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
   # Build-time appliance login password for the default 'arparp' local admin user
   # (build-golden.sh:chpasswd). Required: build-golden.sh fails closed if unset.
   ARPARP_PASSWORD: ${{ secrets.ARPARP_PASSWORD }}
@@ -136,7 +136,7 @@ jobs:
         # empty ENGINE_DEBS_DIR makes build-golden.sh fall back to THIN first-boot.
         if: ${{ env.VACTI_FAT_OVA != '0' }}
         env:
-          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
           VACTI_ENGINE_REF: ${{ env.VACTI_ENGINE_REF }}
           GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
         run: |

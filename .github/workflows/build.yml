@@ -93,7 +93,7 @@ env:
   VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
   # Build-time private-repo credential. A build-time secret, NEVER baked into an
   # image (the build strips it before finalize; the no-secret scan re-verifies).
-  VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+  VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
   # Build-time appliance login password for the default 'arparp' local admin user
   # (build-golden.sh:chpasswd). Required: build-golden.sh fails closed if unset.
   # Lives only on the CI runner RAM + the throwaway provision.sh host copy that
@@ -170,7 +170,7 @@ jobs:
         # the THIN first-boot install path. Set VACTI_FAT_OVA=0 to force thin.
         if: ${{ env.VACTI_FAT_OVA != '0' }}
         env:
-          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
           VACTI_ENGINE_REF: ${{ env.VACTI_ENGINE_REF }}
           GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
@@ -484,7 +484,7 @@ jobs:
         # .deb is truly absent); this step just surfaces a clear early signal.
         continue-on-error: true
         env:
-          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
           ENGINE_VER: ${{ steps.ver.outputs.version }}
         run: |
           base="${VACTI_APT_URL:?VACTI_APT_URL must be set}"
@@ -521,7 +521,7 @@ jobs:
         # Docker FAT bake installs vacti-engine as latest-in-pool, so the latest release
         # asset is the right chromium.
         env:
-          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
           GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p engine-debs
@@ -561,7 +561,7 @@ jobs:
           build-contexts: |
             engine_debs=engine-debs
           secrets: |
-            vacti_apt_token=${{ secrets.VACTI_APT_PRODUCER_TOKEN }}
+            vacti_apt_token=${{ secrets.VACTI_APT_READ_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
