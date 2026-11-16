@@ -20,6 +20,7 @@
 #   GH_TOKEN                   token with read access to the engine repo (GH fallback)
 #   VACTI_CHROMIUM_HF_BASE     HF dataset resolve base for the chromium .deb backfill
 #                              (default https://huggingface.co/datasets/anggipradana/vacti-distro-images/resolve/main/chromium)
+#   VACTI_CHROMIUM_PIN         chromium pin file (default distro/packages/chromium-pin.json)
 set -euo pipefail
 
 ARCH="${1:?usage: fetch-engine-debs.sh <arch> <outdir>}"
@@ -107,27 +108,22 @@ fetch_from_github() {
      --dir "$OUTDIR" --clobber 2>/dev/null || return 1
 }
 
-# --- 3. local chromium build from the engine's OWN bundled playwright-core -----
-# Preferred chromium source: BUILD the vacti-engine-chromium .deb right here, with no cross-repo auth
-# and no secret. chromium is the open-source Playwright-pinned build, downloaded anonymously from the
-# PUBLIC Playwright CDN; the vacti-engine app .deb fetched above bundles playwright-core, whose
-# browsers.json pins the exact revision, so the built chromium is version-locked to the baked engine.
-# ci/build-chromium-deb.sh extracts ONLY playwright-core (no methodology IP), installs the pinned
-# chromium (cross-arch via PLAYWRIGHT_HOST_PLATFORM_OVERRIDE when the runner arch differs), and packages
-# it. This needs the engine .deb already present; it runs AFTER have_engine. Fails soft -> HF tier.
+# --- 3. local chromium build from the vacti-owned chromium pin ---------------------------------------
+# Preferred chromium source: BUILD the vacti-engine-chromium .deb right here, with no cross-repo auth and no
+# secret. distro/packages/chromium-pin.json pins the revision + per-arch archive URLs + SHA256s (no
+# playwright-core involved); ci/build-chromium-deb.sh downloads, verifies and packages them. Any runner arch
+# can build any target arch. It runs after have_engine only to keep the tier order; it no longer reads the
+# engine .deb. Fails soft -> HF tier.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHROMIUM_PIN="${VACTI_CHROMIUM_PIN:-${SCRIPT_DIR}/../distro/packages/chromium-pin.json}"
 
 build_chromium_local() {
-  have_engine || { warn "no engine .deb present yet; cannot build chromium locally"; return 1; }
-  command -v node >/dev/null 2>&1 || { warn "node unavailable; skipping local chromium build"; return 1; }
-  local builder="${SCRIPT_DIR}/build-chromium-deb.sh" engine_deb
-  [[ -x "$builder" || -f "$builder" ]] || { warn "ci/build-chromium-deb.sh missing"; return 1; }
-  # Prefer the arch-matched engine .deb; playwright-core is pure JS so any engine .deb also works.
-  engine_deb="$(ls -1 "${OUTDIR}"/vacti-engine_*_"${ARCH}".deb 2>/dev/null | head -n1 || true)"
-  [[ -n "$engine_deb" ]] || engine_deb="$(ls -1 "${OUTDIR}"/vacti-engine_*.deb 2>/dev/null | head -n1 || true)"
-  [[ -n "$engine_deb" ]] || { warn "could not locate an engine .deb in ${OUTDIR}"; return 1; }
-  log "building chromium locally from $(basename "$engine_deb") (public Playwright CDN; no secret)"
-  bash "$builder" --engine-deb "$engine_deb" --arch "$ARCH" --out "$OUTDIR" \
+  have_engine || { warn "no engine .deb present yet; skipping local chromium build"; return 1; }
+  local builder="${SCRIPT_DIR}/build-chromium-deb.sh"
+  [[ -f "$builder" ]] || { warn "ci/build-chromium-deb.sh missing"; return 1; }
+  [[ -f "$CHROMIUM_PIN" ]] || { warn "chromium pin missing: ${CHROMIUM_PIN}"; return 1; }
+  log "building chromium locally from $(basename "$CHROMIUM_PIN") (SHA256-pinned upstream archives; no secret)"
+  bash "$builder" --arch "$ARCH" --out "$OUTDIR" --pin "$CHROMIUM_PIN" \
     || { warn "local chromium build failed; falling back to the HF backfill"; return 1; }
   have_chromium
 }
@@ -135,43 +131,40 @@ build_chromium_local() {
 # --- 4. HF chromium backfill (public dataset; NO token) -----------------------
 # chromium is a big BINARY ARTIFACT, published to the PUBLIC Hugging Face dataset anggipradana/
 # vacti-distro-images (the same dataset that hosts the OVAs) by vacti-distro's chromium-release.yml.
-# This tier pulls the exact pinned revision anonymously over HTTPS - no oras, no registry login, no
-# one-time "make the package public" step. It is a CONTINUITY fallback behind the local build (tier 3):
-# it runs only when the local build could not (e.g. no node on the runner). The revision is read from
-# the engine .deb's bundled playwright-core/browsers.json so the pulled chromium matches the baked
-# engine; vacti-engine itself still comes from the signed apt pool above.
+# This tier pulls the exact pinned revision anonymously over HTTPS. It is a CONTINUITY fallback behind the
+# local build (tier 3). The revision comes from the vacti chromium pin, and the pulled .deb MUST match the
+# entry for it in the dataset's chromium/SHA256SUMS (published by the same workflow); a missing entry or a
+# mismatch rejects the .deb (fail-closed for this tier -> THIN fallback), it is never baked unverified.
 HF_BASE="${VACTI_CHROMIUM_HF_BASE:-https://huggingface.co/datasets/anggipradana/vacti-distro-images/resolve/main/chromium}"
 
-chromium_revision_from_engine_deb() {
-  local deb rev tmp bj
-  deb="$(ls -1 "${OUTDIR}"/vacti-engine_*_"${ARCH}".deb 2>/dev/null | head -n1 || true)"
-  [[ -n "$deb" ]] || deb="$(ls -1 "${OUTDIR}"/vacti-engine_*.deb 2>/dev/null | head -n1 || true)"
-  [[ -n "$deb" && -f "$deb" ]] || return 1
-  command -v node >/dev/null 2>&1 || return 1
-  tmp="$(mktemp -d)" || return 1
-  dpkg-deb --fsys-tarfile "$deb" \
-    | tar -x -C "$tmp" --wildcards '*/node_modules/playwright-core/browsers.json' 2>/dev/null || true
-  bj="$(find "$tmp" -path '*/playwright-core/browsers.json' -type f 2>/dev/null | head -n1)"
-  if [[ -n "$bj" ]]; then
-    rev="$(node -e '
-      const fs=require("fs");
-      const b=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-      const c=(b.browsers||[]).find(x=>x.name==="chromium");
-      process.stdout.write(c&&c.revision?String(c.revision):"");
-    ' "$bj" 2>/dev/null || true)"
-  fi
-  rm -rf "$tmp"
-  [[ -n "$rev" ]] && { printf '%s' "$rev"; return 0; }
-  return 1
+chromium_revision_from_pin() {
+  [[ -f "$CHROMIUM_PIN" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  local rev
+  rev="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["revision"])' "$CHROMIUM_PIN" 2>/dev/null || true)"
+  [[ "$rev" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$rev"
 }
 
 fetch_chromium_from_hf() {
-  local rev url
-  rev="$(chromium_revision_from_engine_deb)" || { warn "could not resolve the pinned chromium revision from the engine .deb; skipping HF backfill"; return 1; }
-  url="${HF_BASE}/vacti-engine-chromium_${rev}_${ARCH}.deb"
+  local rev name url sums want got
+  rev="$(chromium_revision_from_pin)" || { warn "could not resolve the pinned chromium revision from ${CHROMIUM_PIN}; skipping HF backfill"; return 1; }
+  name="vacti-engine-chromium_${rev}_${ARCH}.deb"
+  url="${HF_BASE}/${name}"
+  sums="$(curl -fsSL "${HF_BASE}/SHA256SUMS" 2>/dev/null || true)"
+  want="$(awk -v n="$name" '$2 == n { print $1; exit }' <<<"$sums")"
+  [[ "$want" =~ ^[0-9a-f]{64}$ ]] || { warn "HF SHA256SUMS has no entry for ${name}; refusing an unverifiable .deb"; return 1; }
   log "HF backfill: ${url} -> ${OUTDIR}"
-  curl -fSL "$url" -o "${OUTDIR}/vacti-engine-chromium_${rev}_${ARCH}.deb" 2>/dev/null \
-    || { warn "HF pull failed for revision ${rev} (${ARCH}); is it published under chromium/?"; return 1; }
+  curl -fSL "$url" -o "${OUTDIR}/${name}.part" 2>/dev/null \
+    || { rm -f "${OUTDIR}/${name}.part"; warn "HF pull failed for revision ${rev} (${ARCH}); is it published under chromium/?"; return 1; }
+  got="$(sha256sum "${OUTDIR}/${name}.part" | cut -d' ' -f1)"
+  if [[ "$got" != "$want" ]]; then
+    rm -f "${OUTDIR}/${name}.part"
+    warn "HF ${name} SHA256 mismatch (SHA256SUMS ${want}, got ${got}); rejected"
+    return 1
+  fi
+  mv -f "${OUTDIR}/${name}.part" "${OUTDIR}/${name}"
+  log "HF backfill: ${name} sha256 verified (${got})"
   have_chromium
 }
 
@@ -181,12 +174,12 @@ elif fetch_from_github && have_engine && have_chromium; then
   log "fetched engine + chromium from the GitHub release fallback"
 elif have_engine && build_chromium_local; then
   # Steady state for this build: the apt pool serves vacti-engine but NOT chromium (chromium is over
-  # the upstream 100MB upload cap), so chromium is BUILT here from the engine's own pinned playwright-core
-  # (public Playwright CDN, no secret, no cross-repo auth, cross-arch on one runner).
-  log "fetched engine (apt pool) + chromium (built locally from the engine's pinned playwright-core)"
+  # the upstream 100MB upload cap), so chromium is BUILT here from the vacti chromium pin (SHA256-verified
+  # upstream archives, no secret, no cross-repo auth, cross-arch on one runner).
+  log "fetched engine (apt pool) + chromium (built locally from the vacti chromium pin)"
 elif have_engine && fetch_chromium_from_hf; then
   # Continuity fallback: pull chromium from the public HF dataset if the local build could not run
-  # (e.g. no node on the runner). Public anonymous HTTPS, no token, no registry login.
+  # (e.g. an upstream archive is unreachable). Public anonymous HTTPS, SHA256SUMS-verified, no token.
   log "fetched engine (apt pool) + chromium (HF backfill)"
 else
   warn "could not obtain both .debs (engine=$(have_engine && echo yes || echo no), chromium=$(have_chromium && echo yes || echo no)); build-golden.sh will fall back to THIN bootstrap"

@@ -28,6 +28,13 @@
 #                  hard FAIL.
 #   CHECK B      : the generator must actually EMIT every manifest arsenal package
 #                  for the right flavour (full + ctf is a superset of core + ctf).
+#   CHECK C      : distro/packages/chromium-pin.json (the vacti-owned Chromium pin
+#                  the vacti-engine-chromium .deb is built from) must EQUAL the
+#                  engine's packaging/chromium-pin.json (every key but "comment").
+#                  The engine pin is $VACTI_ENGINE_CHROMIUM_PIN, else the sibling
+#                  of the resolved engine manifest, else extracted from the same
+#                  pulled .deb. An engine that does not ship the pin yet (older
+#                  .debs) is a warning, not a failure; a diff is a hard FAIL.
 #
 # Exit: 0 = in sync (or soft-skip); 1 = divergence (named) or a real error.
 set -uo pipefail
@@ -37,6 +44,9 @@ PKG_DIR="${ROOT}/distro/packages"
 VENDORED="${PKG_DIR}/arsenal-manifest.json"
 GEN="${PKG_DIR}/gen-live-build-list.sh"
 INSTALLED_MANIFEST_PATH="usr/lib/vacti-engine/packaging/arsenal-manifest.json"
+INSTALLED_CHROMIUM_PIN_PATH="usr/lib/vacti-engine/packaging/chromium-pin.json"
+DISTRO_CHROMIUM_PIN="${PKG_DIR}/chromium-pin.json"
+ENGINE_CHROMIUM_PIN=""
 
 log()  { echo "[arsenal-sync] $*"; }
 warn() { echo "[arsenal-sync][warn] $*" >&2; }
@@ -107,6 +117,10 @@ PY
              && [[ -s "${CLEANUP}/engine-manifest.json" ]]; then
             ENGINE_MANIFEST="${CLEANUP}/engine-manifest.json"
             log "authoritative manifest: extracted from ${fn} (ref='${ref:-latest}')"
+            if dpkg-deb --fsys-tarfile "$deb" 2>/dev/null | tar -xO "./${INSTALLED_CHROMIUM_PIN_PATH}" > "${CLEANUP}/engine-chromium-pin.json" 2>/dev/null \
+               && [[ -s "${CLEANUP}/engine-chromium-pin.json" ]]; then
+              ENGINE_CHROMIUM_PIN="${CLEANUP}/engine-chromium-pin.json"
+            fi
           fi
         fi
       fi
@@ -203,5 +217,31 @@ if missing:
     sys.exit(1)
 print("[arsenal-sync] CHECK B ok: generated full+ctf list is a superset of the manifest arsenal (%d pkgs)" % len(arsenal))
 PY
+
+# --- CHECK C: distro chromium pin == engine chromium pin -----------------------
+log "CHECK C: distro chromium pin vs engine chromium pin"
+if [[ -z "$ENGINE_CHROMIUM_PIN" ]]; then
+  if [[ -n "${VACTI_ENGINE_CHROMIUM_PIN:-}" && -f "${VACTI_ENGINE_CHROMIUM_PIN}" ]]; then
+    ENGINE_CHROMIUM_PIN="${VACTI_ENGINE_CHROMIUM_PIN}"
+  elif [[ -f "$(dirname "$ENGINE_MANIFEST")/chromium-pin.json" ]]; then
+    ENGINE_CHROMIUM_PIN="$(dirname "$ENGINE_MANIFEST")/chromium-pin.json"
+  fi
+fi
+[[ -f "$DISTRO_CHROMIUM_PIN" ]] || fail "distro chromium pin missing: ${DISTRO_CHROMIUM_PIN}"
+if [[ -z "$ENGINE_CHROMIUM_PIN" ]]; then
+  warn "engine ships no packaging/chromium-pin.json at this ref (pre-pin engine); CHECK C skipped"
+else
+  python3 - "$DISTRO_CHROMIUM_PIN" "$ENGINE_CHROMIUM_PIN" <<'PY' || exit 1
+import json, sys
+d = json.load(open(sys.argv[1])); e = json.load(open(sys.argv[2]))
+d.pop("comment", None); e.pop("comment", None)
+if d != e:
+    sys.stderr.write("[arsenal-sync][FAIL] chromium pin DIVERGES: distro rev=%r ver=%r vs engine rev=%r ver=%r\n"
+                     % (d.get("revision"), d.get("browser_version"), e.get("revision"), e.get("browser_version")))
+    sys.stderr.write("  fix: bump distro/packages/chromium-pin.json and the engine's packaging/chromium-pin.json together.\n")
+    sys.exit(1)
+print("[arsenal-sync] CHECK C ok: chromium pin rev %s (Chrome %s) matches the engine" % (d["revision"], d["browser_version"]))
+PY
+fi
 
 log "PASS: distro arsenal is in sync with the engine manifest"

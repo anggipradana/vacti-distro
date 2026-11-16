@@ -46,5 +46,33 @@ else
   fail "$FETCH missing"
 fi
 
+echo "== build is independent of playwright-core (vacti-owned pin + SHA256) =="
+PIN="distro/packages/chromium-pin.json"
+if [ -f "$PIN" ] && python3 -I -c '
+import json, re, sys
+p = json.load(open(sys.argv[1]))
+assert re.fullmatch(r"\d+", p["revision"])
+for arch in ("amd64", "arm64"):
+    names = sorted(c["name"] for c in p["arches"][arch])
+    assert names == ["chromium", "chromium-headless-shell", "ffmpeg"], names
+    for c in p["arches"][arch]:
+        assert re.fullmatch(r"[0-9a-f]{64}", c["sha256"]) and c["url"].startswith("https://")
+' "$PIN" 2>/dev/null; then
+  ok "$PIN well-formed (amd64 + arm64, sha256 + https per archive)"
+else
+  fail "$PIN missing or malformed"
+fi
+for f in "$BUILDER" ci/build-chromium-deb.sh "$FETCH" "$WF"; do
+  if grep -vE '^\s*#' "$f" | grep -qE 'npm install|playwright-core/(cli\.js|browsers\.json|package\.json)|require\.resolve\(.playwright|PLAYWRIGHT_HOST_PLATFORM_OVERRIDE|node "\$CLI"'; then
+    fail "$f still drives the build through playwright-core"
+  else
+    ok "$f does not use playwright-core"
+  fi
+done
+grep -q "chromium-pin.json" "$BUILDER" && grep -q "sha256sum -c" "$BUILDER" \
+  && ok "builder reads the pin and SHA256-verifies archives" || fail "builder lacks pin read / SHA256 verify"
+grep -q "SHA256SUMS" "$FETCH" && grep -q "sha256sum" "$FETCH" \
+  && ok "HF backfill verifies against SHA256SUMS" || fail "HF backfill does not verify SHA256"
+
 [ $rc -eq 0 ] && echo "== chromium-hf-contract PASS ==" || echo "== chromium-hf-contract FAIL ==" >&2
 exit $rc

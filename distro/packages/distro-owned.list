@@ -71,8 +71,8 @@ earlyoom
 fastfetch
 
 # --- Headless Chromium shared-library closure ---
-# The engine .deb bundles Chromium via playwright-core's pinned build; it is NOT
-# a separate apt package, but its shared-library deps must be present on the thin
+# The pinned Chromium ships as vacti-engine-chromium (built from chromium-pin.json),
+# not a Debian apt package, but its shared-library deps must be present on the thin
 # Debian 13 genericcloud base or headless launch fails (the classic missing
 # libnss3/libgbm1). Debian 13 (trixie) completed the 64-bit time_t transition, so
 # several ship under t64 names. The per-package best-effort install tolerates a

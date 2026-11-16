@@ -1,0 +1,67 @@
+{
+  "comment": "vacti-owned pin for the vacti-engine-chromium .deb. Source of truth for the Chromium build vacti ships; replaces the old implicit read of playwright-core/browsers.json. Mirrored byte-for-byte at vacti-pentest-engine packaging/chromium-pin.json (ci/arsenal-sync-check.sh CHECK C). Bump revision + every url/sha256/size together in a dedicated wave. linux-arm64 Chrome for Testing exists only from 153.0.8001.0, so at 149.x arm64 uses the Playwright-published static build URL (fetched directly, SHA256-pinned, no playwright-core).",
+  "schema": 1,
+  "revision": "1228",
+  "browser_version": "149.0.7827.55",
+  "playwright_core_compat": "1.61.0",
+  "arches": {
+    "amd64": [
+      {
+        "name": "chromium",
+        "dir": "chromium-1228",
+        "exe": "chrome-linux64/chrome",
+        "source": "chrome-for-testing",
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/linux64/chrome-linux64.zip",
+        "sha256": "13113b963ac22fffdad898a677591028e4397c46c1daa9e61811258eed6e35b5",
+        "size": 185646494
+      },
+      {
+        "name": "chromium-headless-shell",
+        "dir": "chromium_headless_shell-1228",
+        "exe": "chrome-headless-shell-linux64/chrome-headless-shell",
+        "source": "chrome-for-testing",
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/linux64/chrome-headless-shell-linux64.zip",
+        "sha256": "410c9407d5de3fea80d9398666be06f2aa09154a3fa7b327dc254e336bb4c4b7",
+        "size": 119778157
+      },
+      {
+        "name": "ffmpeg",
+        "dir": "ffmpeg-1011",
+        "exe": "ffmpeg-linux",
+        "source": "playwright-static",
+        "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip",
+        "sha256": "ebc74fc5b94830176a3c2914ae96bd8bc7f6a91f4f33890230f84a172ee61ccc",
+        "size": 2376500
+      }
+    ],
+    "arm64": [
+      {
+        "name": "chromium",
+        "dir": "chromium-1228",
+        "exe": "chrome-linux/chrome",
+        "source": "playwright-static",
+        "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1228/chromium-linux-arm64.zip",
+        "sha256": "ec044b50ed065adeb4c5ffdb42d1529901cbaf897cdf542bfef8af01d6e0cc79",
+        "size": 196280473
+      },
+      {
+        "name": "chromium-headless-shell",
+        "dir": "chromium_headless_shell-1228",
+        "exe": "chrome-linux/headless_shell",
+        "source": "playwright-static",
+        "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1228/chromium-headless-shell-linux-arm64.zip",
+        "sha256": "1652929a70f4afb17aca36fce073fb7ed22262d16825be761b0801972f43ac4f",
+        "size": 115342043
+      },
+      {
+        "name": "ffmpeg",
+        "dir": "ffmpeg-1011",
+        "exe": "ffmpeg-linux",
+        "source": "playwright-static",
+        "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux-arm64.zip",
+        "sha256": "2628c03f05318ff812c8c9baaf207dea2ddf53e818c0dc936714b0fbe3afb009",
+        "size": 1717234
+      }
+    ]
+  }
+}

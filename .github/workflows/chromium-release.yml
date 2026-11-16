@@ -6,26 +6,21 @@
 # Container images live in GHCR; code lives in private GitHub. HF already hosts the OVAs, so chromium
 # belongs there too - the old private-GHCR mirror is retired.
 #
-# CADENCE: chromium bumps only when Playwright bumps its pinned revision (~quarterly), independent of
-# engine releases, so this runs on manual dispatch (or a repository_dispatch the engine may fire). It
-# does NOT rebuild on every engine tag.
+# CADENCE: chromium bumps only when distro/packages/chromium-pin.json is bumped (a dedicated wave),
+# independent of engine releases, so this runs on manual dispatch (or a repository_dispatch the engine may
+# fire). It does NOT rebuild on every engine tag.
 #
-# NO-SKEW: the chromium revision is determined by the playwright-core version. The build reads the engine
-# repo's committed package-lock.json (via VACTI_ENGINE_REPO_TOKEN) to pin the exact playwright-core the
-# engine ships, so the published chromium matches the engine. A manual `playwright_version` input wins.
+# NO-SKEW: the chromium revision, per-arch archive URLs and SHA256s come from the vacti-owned
+# distro/packages/chromium-pin.json (mirrored in the engine repo, guarded by ci/arsenal-sync-check.sh
+# CHECK C). No playwright-core is installed and no engine-repo token is needed; the build fails on any
+# archive SHA256 mismatch.
 #
 # SECRET REQUIRED: HF_PUBLISH_TOKEN (the hf_... write token for the dataset) - same secret
-# publish-images-hf.yml uses. VACTI_ENGINE_REPO_TOKEN is optional (read access to the engine repo to pin
-# the version); without it, pass playwright_version explicitly.
+# publish-images-hf.yml uses.
 name: chromium-release
 
 on:
   workflow_dispatch:
-    inputs:
-      playwright_version:
-        description: "playwright-core version to pin (empty = read the engine's package-lock.json, else latest)"
-        required: false
-        default: ""
   repository_dispatch:
     types: [chromium-release]
 
@@ -53,11 +48,6 @@ jobs:
       - name: Checkout vacti-distro
         uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -66,37 +56,8 @@ jobs:
       - name: Install huggingface_hub CLI (minor-pinned)
         run: pip install "huggingface_hub[cli]~=0.35.0"
 
-      - name: Resolve the playwright-core pin
-        id: pin
-        env:
-          IN_VERSION: ${{ github.event.inputs.playwright_version || github.event.client_payload.playwright_version }}
-          ENGINE_REPO: anggipradana/vacti-pentest-engine
-          GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-          VER="${IN_VERSION:-}"
-          if [ -z "$VER" ] && [ -n "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
-            # Read the exact playwright-core version the engine pins, without a full checkout.
-            lock="$(gh api "repos/${ENGINE_REPO}/contents/package-lock.json" \
-                      --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)"
-            if [ -n "$lock" ]; then
-              VER="$(printf '%s' "$lock" | node -e '
-                const fs=require("fs");
-                const j=JSON.parse(fs.readFileSync(0,"utf8"));
-                const p=(j.packages&&j.packages["node_modules/playwright-core"])||null;
-                const d=(j.dependencies&&j.dependencies["playwright-core"])||null;
-                const v=(p&&p.version)||(d&&d.version)||"";
-                process.stdout.write(String(v));
-              ' 2>/dev/null || true)"
-            fi
-          fi
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "[pin] playwright-core = ${VER:-<latest>}"
-
       - name: Build the vacti-engine-chromium .deb (${{ matrix.arch }}, native runner)
         id: build
-        env:
-          PLAYWRIGHT_VERSION: ${{ steps.pin.outputs.version }}
         run: |
           set -euo pipefail
           chmod +x distro/chromium/build-chromium-deb.sh
