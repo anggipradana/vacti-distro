@@ -129,9 +129,17 @@ jobs:
         run: ci/lint.sh
 
   # --- the golden disk: built ONCE, shared by all VM/cloud forms --------------
+  # PINNED ubuntu-24.04: GitHub promoted ubuntu-latest to 26.04 on 2026-11-13 and the
+  # new libguestfs 1.58.1 + passt networking helper breaks the virt-customize
+  # appliance VM entirely (no outbound network, link-local dhcpcd lease, the
+  # build-golden.sh static-address fallback does not trigger because the lease is
+  # already set). Last green run was 24.04 on 2026-11-13. See audit RF5
+  # (scratchpad/regression-check/research/RF5-golden-ova-dns.md) for the root cause
+  # and the Option G follow-up (remove passt + fall through to SLIRP) that will
+  # replace this pin once 24.04 is retired.
   golden:
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -207,9 +215,10 @@ jobs:
           if-no-files-found: error
 
   # --- fan-out: each VM/cloud form is a repackaging of the SAME golden disk ----
+  # PINNED ubuntu-24.04 (same libguestfs reason as golden above).
   fanout:
     needs: golden
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The no-secret scan below guestmounts the converted qcow2, so this job needs
     # the SAME libguestfs runner environment as golden: the direct backend plus
     # the kernel/KVM/passt-AppArmor/userns workarounds in the composite action.
@@ -296,9 +305,10 @@ jobs:
           retention-days: 2
 
   # --- smoke boot: prove each image enrolls + claims a job vs staging ----------
+  # PINNED ubuntu-24.04 (same libguestfs reason as golden above).
   smoke:
     needs: [fanout]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Same squeeze as golden/fanout: on the full matrix smoke fetches every
       # built form (~25GB: cloud qcow2 + raw.gz, both OVAs, both ISOs, golden)
@@ -339,9 +349,10 @@ jobs:
         run: ci/smoke-boot.sh out
 
   # --- publish as PRIVATE GitHub Release assets on this private repo -----------
+  # PINNED ubuntu-24.04 (same libguestfs reason as golden above).
   publish:
     needs: smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The final no-secret scan below guestmounts each published qcow2/ova, so this
     # job needs the SAME libguestfs runner environment as golden/fanout: the
     # direct backend plus the readable-kernel / KVM / passt-AppArmor / userns
