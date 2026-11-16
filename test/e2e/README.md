@@ -2,11 +2,13 @@
 
 Empirical, end-to-end verification that the published appliance images enroll
 correctly through the **short-code** pairing flow (and the backward-compatible
-full-token flow), across all three shipped forms:
+full-token flow), across the shipped forms:
 
 - the **amd64/arm64 GUI OVA** (GTK4 pre-login kiosk), and
-- the **amd64/arm64 headless OVA** (whiptail `vacti-netsetup` console), and
 - the **multi-arch Docker image** (`ghcr.io/anggipradana/vacti-distro`).
+
+The **headless OVA** (whiptail `vacti-netsetup` console, scenario 2) is no longer published by
+CI; scenario 2 is kept as a legacy check for locally built headless images.
 
 It exercises the `POST /api/pentest/enroll/exchange` short-code endpoint
 end-to-end against the real appliance clients, plus the enroll handshake and the
@@ -25,7 +27,7 @@ expiry, single-use).
 | # | Form | Credential | Drives | Verifies |
 |---|------|-----------|--------|----------|
 | 1 | GUI OVA | short code | qemu + VNC (`vncdotool`) | boot → kiosk → exchange → apt pull → enroll |
-| 2 | headless OVA | short code | qemu + serial (`expect`) | boot → whiptail → exchange → apt pull → enroll |
+| 2 | headless OVA (legacy, local builds only) | short code | qemu + serial (`expect`) | boot → whiptail → exchange → apt pull → enroll |
 | 3 | Docker | short code | `docker run` | exchange → apt pull (exchanged token) → enroll → runner |
 | 4 | Docker | full token | `docker run` | **no** exchange → apt pull (supplied token) → enroll → runner |
 | 5 | exchange API | — | `curl` | 10×{404/410} then **429** lockout |

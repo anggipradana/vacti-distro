@@ -1,5 +1,9 @@
 # distro/live-build-config - PLAN (Phase-2, scaffolded in Phase-1)
 
+> STATUS (2026-11): the ISO (GUI and headless) is not part of the published CI build shape; CI
+> ships only VMware OVA + VirtualBox OVA (GUI) plus the multi-arch Docker image. This tree is
+> still maintained for local and opt-in ISO builds via `build-iso.sh`.
+
 The Debian `live-build` config tree that produces the installable/live **ISO**. It consumes the
 **same** package manifest, config overlay, and branding assets as the golden image (one source of
 truth), so the ISO's installed rootfs matches the cloud/VM forms.

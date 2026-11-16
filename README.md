@@ -12,16 +12,16 @@ If you only want to *use* an appliance, you do not need this repository — down
 
 ## What you get
 
-One source tree produces four distribution forms, all carrying the same engine:
+One source tree produces the published distribution forms, all carrying the same engine:
 
 | Form | Best for |
 |---|---|
-| **Cloud image** (`qcow2`, `raw.gz`) | provisioning on a cloud or VPS provider |
-| **Installable ISO** | on-premises and standalone appliances, with a desktop or headless |
-| **VMware OVA** | Workstation, Player, Fusion and ESXi |
-| **VirtualBox OVA** | VirtualBox on a desktop |
+| **VMware OVA** (GUI, amd64 + arm64) | Workstation, Player, Fusion and ESXi |
+| **VirtualBox OVA** (GUI, amd64 + arm64) | VirtualBox on a desktop |
+| **Docker image** (multi-arch, amd64 + arm64) | fastest, smallest footprint on any Docker host |
 
-A universal multi-architecture Docker image is also built from the same sources.
+The cloud-image (`qcow2`/`raw.gz`) and installable-ISO sources remain in the tree for local or
+opt-in builds, but they are not part of the published CI build shape.
 
 ## Why the appliance is safe to hand out
 

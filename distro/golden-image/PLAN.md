@@ -1,5 +1,12 @@
 # distro/golden-image - PLAN (Phase-1)
 
+> STATUS (2026-11): implemented. CI publishes only the `vbox-vmware-gui` shape (VMware OVA +
+> VirtualBox OVA, GUI, amd64 + arm64) plus the multi-arch Docker image; the cloud form is no longer
+> built in CI (`convert-cloud.sh` is kept for local use). The image is now a FAT bake: engine and
+> chromium are baked in at build time rather than apt-installed at provision. Later additions not
+> listed below: `install-ctf-arsenal.sh`, `install-ghidra.sh`, `install-rea.sh`,
+> `install-engine-extras.sh`, `docker-entrypoint.sh`, `oom/`, `os-patch/`.
+
 The golden-image is the **single source of truth** for the cloud and VM forms. Build it once with
 `virt-customize` against the official Debian cloud image, then repackage it into every target
 format (the convert fan-out). This keeps cloud / VMware OVA / VirtualBox OVA bit-identical.

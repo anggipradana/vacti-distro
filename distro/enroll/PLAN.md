@@ -1,4 +1,9 @@
-# distro/enroll - PLAN (Phase-1)
+# distro/enroll - first-boot enrollment layer
+
+> STATUS (2026-11): implemented. Operator-facing usage (GUI kiosk pairing, Docker, NoCloud seed)
+> lives in [`distro/README.md`](../README.md) sections 1 and 3. Besides the directories below, this
+> tree also carries `activate/` (pre-login activation kiosk), `common/` (short-code pairing
+> exchange), `install/` and `netsetup/` (network setup console).
 
 The universal first-boot enrollment layer. The shared image carries **zero credentials**; this
 directory bakes the *mechanism* only. The *secret* (a short-lived, single-use enroll token) arrives
@@ -16,22 +21,12 @@ per-instance via a NoCloud seed, provider metadata, or VMware guestinfo - never 
 - `nocloud/` - the NoCloud seed template (the lingua franca across cloud / VMware / VBox / ISO):
   - `user-data.example` - the cloud-init user-data template with a `__ENROLL_TOKEN__` placeholder.
   - `meta-data.example` - minimal instance metadata.
-  - `make-seed.sh` (**stub**) - takes a freshly-minted token, fills `user-data`, and
-    `genisoimage`s a `cidata.iso` (volume label `CIDATA`) to attach as a second CD-ROM. Ships as a
-    template + one-liner; the published image is never pre-filled.
+  - `make-seed.sh --token <TOKEN> --url <CP_URL> [--out cidata.iso]` - takes a freshly-minted
+    token, fills `user-data`, and builds a `cidata.iso` (volume label `CIDATA`) to attach as a
+    second CD-ROM. The published image is never pre-filled.
 - `guestinfo/` - optional VMware `DataSourceVMwareGuestInfo` notes (set `guestinfo.userdata` /
   `.metadata`, base64 or gzip+base64, via OVF vApp property / `.vmx` / `govc`) layered on the same
   firstboot unit.
-
-## make-seed.sh (stub shape)
-
-```sh
-# make-seed.sh <enroll-token>  ->  cidata.iso
-# 1. sed "s/__ENROLL_TOKEN__/$1/" user-data.example > user-data
-# 2. cp meta-data.example meta-data
-# 3. genisoimage -output cidata.iso -volid CIDATA -joliet -rock user-data meta-data
-# TODO Phase-1: implement + validate the token is a live, unexpired, single-use token
-```
 
 ## Rules
 
