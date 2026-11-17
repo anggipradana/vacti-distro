@@ -40,6 +40,10 @@ if [[ ! -f "$CTF_LIST" ]]; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
+# Keep any already-staged conffile (e.g. /etc/default/earlyoom) and take the
+# package default otherwise, so dpkg never prompts on the closed virt-customize
+# stdin. DEBIAN_FRONTEND alone does not answer conffile prompts.
+APT_CONFOLD='-o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef'
 export PIP_BREAK_SYSTEM_PACKAGES=1   # trixie PEP-668; pipx is isolated anyway
 export GEM_HOME="${GEM_HOME:-/var/lib/gems}"
 
@@ -56,10 +60,10 @@ if [[ -f "$CTF_LIST" ]]; then
   mapfile -t CTF_PKGS < <(sed -e 's/#.*$//' -e 's/[[:space:]]\+$//' "$CTF_LIST" | grep -vE '^[[:space:]]*$')
   log "apt: installing ${#CTF_PKGS[@]} CTF packages from $(basename "$CTF_LIST")"
   apt-get update -y || warn "apt-get update failed; continuing best-effort"
-  if ! apt-get install -y --no-install-recommends "${CTF_PKGS[@]}"; then
+  if ! apt-get install -y $APT_CONFOLD --no-install-recommends "${CTF_PKGS[@]}"; then
     warn "bulk CTF apt install hit a snag; retrying per-package"
     for p in "${CTF_PKGS[@]}"; do
-      apt-get install -y --no-install-recommends "$p" \
+      apt-get install -y $APT_CONFOLD --no-install-recommends "$p" \
         || warn "apt package '$p' not installable here (self-heal/operator covers it)"
     done
   fi

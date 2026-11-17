@@ -280,6 +280,18 @@ cat > "${WORK}/provision.sh" <<PROV
 #!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+# Non-interactive dpkg conffile policy for EVERY build-time apt-get install below.
+# DEBIAN_FRONTEND=noninteractive alone does NOT answer dpkg conffile prompts: when
+# a package (e.g. earlyoom) ships /etc/default/earlyoom and the golden stage has
+# already written that same path (build-golden.sh stages earlyoom.default before
+# this script runs), dpkg detects a conffile conflict and prompts on stdin. stdin
+# is closed inside virt-customize, so dpkg aborts with "end of file on stdin at
+# conffile prompt", half-configures the package, and the next apt call (the engine
+# bake) dies -> [prov][FATAL] engine bake failed. --force-confold keeps the
+# already-on-disk (staged) conffile; --force-confdef lets dpkg take the package
+# default for conffiles the operator never touched. Build-time only (not persisted
+# to the shipped image), so runtime apt/unattended-upgrades behaviour is unchanged.
+APT_CONFOLD='-o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef'
 
 # Build-time networking for the in-guest apt pulls. virt-customize runs this
 # script in the libguestfs appliance with the guest chrooted, but the appliance
@@ -330,7 +342,7 @@ curl -fsS -m 20 -o /dev/null -w '[prov][diag] curl 1.1.1.1 -> HTTP %{http_code}\
 
 echo "[prov] base deps"
 apt-get update -y
-apt-get install -y --no-install-recommends ca-certificates curl gnupg jq
+apt-get install -y \$APT_CONFOLD --no-install-recommends ca-certificates curl gnupg jq
 
 # --- grow the root filesystem to fill the resized (100G) virtual disk ---------
 # build-golden.sh ran 'qemu-img resize 100G', which enlarges the BLOCK DEVICE but
@@ -341,7 +353,7 @@ apt-get install -y --no-install-recommends ca-certificates curl gnupg jq
 # install. cloud-guest-utils provides growpart; resize2fs ships in e2fsprogs
 # (already present). growpart exits non-zero when the partition is already maximal.
 echo "[prov] growing root partition + filesystem to fill the 100G virtual disk"
-apt-get install -y --no-install-recommends cloud-guest-utils
+apt-get install -y \$APT_CONFOLD --no-install-recommends cloud-guest-utils
 growpart /dev/sda 1 || echo "[prov] growpart: no change (root partition already full-size?)"
 resize2fs /dev/sda1
 df -h / || true
@@ -381,9 +393,9 @@ VACTI_FULL_ARSENAL="${VACTI_FULL_ARSENAL}" VACTI_CTF_ARSENAL="${VACTI_CTF_ARSENA
 mapfile -t PKGS < <(grep -vE '^[[:space:]]*(#|\$)' /opt/vacti-build/arsenal.list 2>/dev/null || true)
 echo "[prov] installing arsenal (\${#PKGS[@]} packages)"
 if [ "\${#PKGS[@]}" -gt 0 ]; then
-  apt-get install -y --no-install-recommends "\${PKGS[@]}" || {
+  apt-get install -y \$APT_CONFOLD --no-install-recommends "\${PKGS[@]}" || {
     echo "[prov] bulk arsenal install hit a snag; retrying best-effort per-package"
-    for p in "\${PKGS[@]}"; do apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] \$p not installable here (runtime self-heal will cover it)"; done
+    for p in "\${PKGS[@]}"; do apt-get install -y \$APT_CONFOLD --no-install-recommends "\$p" || echo "[prov][warn] \$p not installable here (runtime self-heal will cover it)"; done
   }
 else
   echo "[prov][warn] arsenal list empty; relying on runtime self-heal"
@@ -457,14 +469,14 @@ echo "[prov] appliance: wrote /etc/vacti-engine-appliance-image marker + VACTI_E
 
 if compgen -G "/opt/vacti-build/engine-debs/vacti-engine_"*.deb >/dev/null 2>&1; then
   echo "[prov] FAT-OVA: installing baked vacti-engine + vacti-engine-chromium from local .debs"
-  apt-get install -y /opt/vacti-build/engine-debs/vacti-engine-chromium_*.deb \
+  apt-get install -y \$APT_CONFOLD /opt/vacti-build/engine-debs/vacti-engine-chromium_*.deb \
                      /opt/vacti-build/engine-debs/vacti-engine_*.deb \
     || { echo "[prov] bulk engine bake hit a snag; retrying per-package"
-         apt-get install -y /opt/vacti-build/engine-debs/vacti-engine-chromium_*.deb || echo "[prov][warn] chromium bake failed (runtime self-heal covers it)"
+         apt-get install -y \$APT_CONFOLD /opt/vacti-build/engine-debs/vacti-engine-chromium_*.deb || echo "[prov][warn] chromium bake failed (runtime self-heal covers it)"
          # P1-4 fail-loud: a staged engine that will not install fails the build
          # (virt-customize propagates the exit), instead of a FATAL line that only
          # lands in the in-image log while CI reports green.
-         apt-get install -y /opt/vacti-build/engine-debs/vacti-engine_*.deb        || { echo "[prov][FATAL] engine bake failed"; exit 1; }; }
+         apt-get install -y \$APT_CONFOLD /opt/vacti-build/engine-debs/vacti-engine_*.deb        || { echo "[prov][FATAL] engine bake failed"; exit 1; }; }
   _baked="\$(dpkg-query -W -f='\${Version}' vacti-engine 2>/dev/null || true)"
   echo "[prov] FAT-OVA: vacti-engine \${_baked:-<none>} installed${_ENGINE_REF:+ (pin ${_ENGINE_REF})}"
   if [ -n "${_ENGINE_REF}" ]; then
@@ -518,7 +530,7 @@ fi
 
 # guest integration (both hypervisors coexist in one rootfs) + tailscale client
 echo "[prov] guest tools + tailscale client (no auth key baked)"
-apt-get install -y --no-install-recommends open-vm-tools virtualbox-guest-utils || echo "[prov][warn] guest tools partial"
+apt-get install -y \$APT_CONFOLD --no-install-recommends open-vm-tools virtualbox-guest-utils || echo "[prov][warn] guest tools partial"
 curl -fsSL https://tailscale.com/install.sh | sh || echo "[prov][warn] tailscale install deferred to runtime"
 systemctl enable tailscaled 2>/dev/null || true
 
@@ -538,7 +550,7 @@ systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
 # is host-expanded into this build-only script.
 if [[ "${VACTI_HEADLESS_NM}" =~ ^(1|true|yes|on)\$ ]]; then
   echo "[prov] VACTI_HEADLESS_NM=1 - installing NetworkManager, masking systemd-networkd"
-  apt-get install -y --no-install-recommends network-manager || echo "[prov][warn] network-manager install partial"
+  apt-get install -y \$APT_CONFOLD --no-install-recommends network-manager || echo "[prov][warn] network-manager install partial"
   systemctl mask systemd-networkd.service systemd-networkd.socket 2>/dev/null || true
   systemctl enable NetworkManager.service 2>/dev/null || true
   install -d -m0755 /etc/cloud/cloud.cfg.d
@@ -565,7 +577,7 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
   # The premium pre-login kiosk is a GTK4 + libadwaita Python app (chosen over a
   # webkit webview: ~45MB vs ~200MB, and far more robust in a bare-X VM). yad +
   # zenity stay as the fail-soft fallback if GTK4/Adw ever fail to import.
-  apt-get install -y --no-install-recommends \
+  apt-get install -y \$APT_CONFOLD --no-install-recommends \
     xfce4 xfce4-terminal xfce4-whiskermenu-plugin \
     firefox-esr xfce4-screenshooter \
     lightdm lightdm-gtk-greeter \
@@ -584,7 +596,7 @@ if [[ "${VACTI_FLAVOR}" == "gui" ]]; then
                network-manager network-manager-gnome network-manager-openvpn-gnome \
                network-manager-openconnect-gnome wireguard-tools openconnect \
                python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 yad zenity; do
-        apt-get install -y --no-install-recommends "\$p" || echo "[prov][warn] GUI pkg \$p not installable here (runtime self-heal covers it)"
+        apt-get install -y \$APT_CONFOLD --no-install-recommends "\$p" || echo "[prov][warn] GUI pkg \$p not installable here (runtime self-heal covers it)"
       done
     }
   # No kernel swap: the generic cloud base already ships the full
@@ -674,7 +686,7 @@ systemctl daemon-reload 2>/dev/null || true
 # (required; set as the GH Actions repo secret ARPARP_PASSWORD) and is NEVER
 # baked into source. Rotation = flip the secret + rebuild.
 echo "[prov] creating default login user 'arparp' (sudo group, bash shell)"
-apt-get install -y --no-install-recommends sudo 2>/dev/null || true
+apt-get install -y \$APT_CONFOLD --no-install-recommends sudo 2>/dev/null || true
 if ! id arparp >/dev/null 2>&1; then
   useradd -m -s /bin/bash -c "Vacti operator" -G sudo arparp
 else

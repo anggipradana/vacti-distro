@@ -47,6 +47,9 @@ log()  { echo "[ghidra] $*"; }
 warn() { echo "[ghidra][warn] $*" >&2; }
 
 export DEBIAN_FRONTEND=noninteractive
+# Keep any already-staged conffile and take the package default otherwise, so dpkg
+# never prompts on the closed virt-customize stdin (DEBIAN_FRONTEND alone does not).
+APT_CONFOLD='-o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef'
 
 # Ghidra itself is pure-Java (arch-agnostic); the Temurin JDK is per-arch. This
 # runs native-arch (virt-customize in-guest on a native runner), so uname -m is
@@ -63,8 +66,8 @@ case "$ARCH" in
 esac
 
 need() { command -v "$1" >/dev/null 2>&1; }
-need curl  || { apt-get install -y --no-install-recommends curl  >/dev/null 2>&1 || warn "curl install failed"; }
-need unzip || { apt-get install -y --no-install-recommends unzip >/dev/null 2>&1 || warn "unzip install failed"; }
+need curl  || { apt-get install -y $APT_CONFOLD --no-install-recommends curl  >/dev/null 2>&1 || warn "curl install failed"; }
+need unzip || { apt-get install -y $APT_CONFOLD --no-install-recommends unzip >/dev/null 2>&1 || warn "unzip install failed"; }
 
 # verify <sha256> <file>  -> 0 if match
 verify() { echo "$1  $2" | sha256sum -c - >/dev/null 2>&1; }

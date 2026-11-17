@@ -37,6 +37,9 @@ log()  { echo "[rea] $*"; }
 warn() { echo "[rea][warn] $*" >&2; }
 
 export DEBIAN_FRONTEND=noninteractive
+# Keep any already-staged conffile and take the package default otherwise, so dpkg
+# never prompts on the closed virt-customize stdin (DEBIAN_FRONTEND alone does not).
+APT_CONFOLD='-o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef'
 
 # REA requires Node ^22.19.0 || ^24.11.0 || >=26.0.0 (and npm on PATH).
 node_satisfies() {
@@ -60,7 +63,7 @@ if node_satisfies; then
 else
   log "Node missing or below REA floor; installing NodeSource Node.js 22.x"
   if curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; then
-    apt-get install -y --no-install-recommends nodejs || warn "nodejs install failed"
+    apt-get install -y $APT_CONFOLD --no-install-recommends nodejs || warn "nodejs install failed"
   else
     warn "NodeSource setup failed (runtime self-heal / minting covers REA's Node)"
   fi
