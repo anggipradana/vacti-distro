@@ -2,7 +2,7 @@
 
 Ephemeral state for `.github/workflows/watch-engine-apt.yml`.
 
-After that workflow dispatches `build.yml` + `build-arm64.yml` for a newly
+After that workflow dispatches `build.yml` + `build-arm64.yml` + `build-docker.yml` for a newly
 published `vacti-engine` apt version, it commits an empty marker file here:
 
     dispatched-<version>.marker

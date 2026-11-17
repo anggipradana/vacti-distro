@@ -16,16 +16,29 @@
 # (VirtualBox 7.1+ / VMware Fusion 13 on Apple Silicon); the real-import check
 # stays the dev-box ovftool/VBoxManage lane, same as AMD64.
 #
-# Triggered manually, or by the same engine-deb-published dispatch build.yml uses.
+# Triggered manually (watch-engine-apt self-dispatches it), or by the same
+# engine-deb-published dispatch build.yml uses. After the ARM64 assets are appended to
+# the amd64-created images-v<ver> release (never creating that tag itself - P1-3), the
+# large images publish to Hugging Face inline (publish-hf -> publish-images-hf.yml).
 name: build-images-arm64
+run-name: build-images-arm64 ${{ inputs.release || github.event.client_payload.release || '' }}
 
 on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Release version to stamp (e.g. 0.1.0)"
+        description: "Engine release X.Y.Z to stamp + bake (the 0.1.0 placeholder is refused unless allow_legacy_release=true)"
         required: true
         default: "0.1.0"
+      engine_ref:
+        description: "Optional explicit vacti-engine version to bake (default: = release)"
+        required: false
+        default: ""
+      allow_legacy_release:
+        description: "Override the guard that refuses release=0.1.0 / < 0.2.400 (never advances the HF headline)"
+        required: false
+        type: boolean
+        default: false
       full_arsenal:
         description: "Bake the full arsenal (1) or lean web+infra (0)"
         required: false
@@ -75,7 +88,9 @@ env:
   # pull). The "Fetch engine + chromium .debs" step stages the _arm64.deb variants
   # into ENGINE_DEBS_DIR; build-golden.sh falls back to THIN if they're unavailable.
   VACTI_FAT_OVA: ${{ github.event.inputs.fat_ova || '1' }}
-  VACTI_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF || github.event.client_payload.release || '' }}
+  # Fallback default only; the authoritative pin is ci/resolve-release.sh's output
+  # (needs.lint.outputs.engine_ref), threaded into the golden job (P1-2).
+  VACTI_ENGINE_REF: ${{ github.event.inputs.engine_ref || github.event.client_payload.release || vars.VACTI_ENGINE_REF || '' }}
   VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
   VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
   # Build-time appliance login password for the default 'arparp' local admin user
@@ -90,20 +105,43 @@ jobs:
   # --- light gate: shellcheck + yaml/xml sanity (arch-agnostic) ----------------
   lint:
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.rel.outputs.release }}
+      engine_ref: ${{ steps.rel.outputs.engine_ref }}
+      legacy: ${{ steps.rel.outputs.legacy }}
+      publish_latest: ${{ steps.rel.outputs.publish_latest }}
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve release + engine ref (refuses the 0.1.0 placeholder unless overridden)
+        id: rel
+        env:
+          IN_RELEASE: ${{ github.event.inputs.release }}
+          IN_ENGINE_REF: ${{ github.event.inputs.engine_ref }}
+          IN_ALLOW_LEGACY: ${{ github.event.inputs.allow_legacy_release }}
+          PAYLOAD_RELEASE: ${{ github.event.client_payload.release }}
+          VAR_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: ci/resolve-release.sh
       - name: Install linters
         run: sudo apt-get update && sudo apt-get install -y shellcheck python3-yaml libxml2-utils
       - name: Auto-revendor arsenal manifest (engine-deb-published only)
         if: ${{ github.event_name == 'repository_dispatch' }}
+        env:
+          VACTI_ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
         run: ci/revendor-arsenal.sh
       - name: Lint build sources
+        env:
+          VACTI_ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
         run: ci/lint.sh
 
   # --- the golden disk (arm64): built ONCE, shared by both OVA forms -----------
   golden:
     needs: lint
     runs-on: ubuntu-24.04-arm
+    env:
+      # P1-2: the exact arm64 engine version to stage + bake (fail-closed on drift).
+      VACTI_ENGINE_REF: ${{ needs.lint.outputs.engine_ref }}
     strategy:
       fail-fast: false
       matrix:
@@ -132,12 +170,13 @@ jobs:
       - name: Fetch engine + chromium .debs for the FAT-OVA bake (arm64)
         # FAT-OVA (VACTI_FAT_OVA=1): stage the arm64 vacti-engine + vacti-engine-chromium
         # .debs so build-golden.sh bakes them into the arm64 golden disk. Private apt
-        # pool first (producer token, CI-host only), GitHub release fallback. Soft: an
-        # empty ENGINE_DEBS_DIR makes build-golden.sh fall back to THIN first-boot.
+        # pool first (producer token, CI-host only), GitHub release fallback.
+        # FAIL-LOUD (P1-4): a missing/mismatched/wrong-version .deb fails this step
+        # instead of silently baking a stale or THIN arm64 image.
         if: ${{ env.VACTI_FAT_OVA != '0' }}
         env:
           VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
-          VACTI_ENGINE_REF: ${{ env.VACTI_ENGINE_REF }}
+          VACTI_ENGINE_REF: ${{ needs.lint.outputs.engine_ref }}
           GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           ENGINE_DEBS_DIR="${{ github.workspace }}/engine-debs"
@@ -294,6 +333,11 @@ jobs:
     # golden/fanout jobs already scan natively on ubuntu-24.04-arm, so match that
     # here to keep the fail-closed gate working.
     runs-on: ubuntu-24.04-arm
+    # actions: read lets the P1-3 guard below see whether the amd64 run for this
+    # release is still in flight; contents: write appends to the release.
+    permissions:
+      contents: write
+      actions: read
     # The final no-secret scan guestmounts each published OVA, so this job needs the
     # SAME libguestfs runner environment as golden/fanout: the direct backend plus
     # the readable-kernel / KVM / passt-AppArmor / userns workarounds the composite
@@ -357,7 +401,42 @@ jobs:
         # release/ with a warning so the publish never hard-fails; the full-fidelity
         # path is 'gh run download' + the operator-gated R2 mirror.
         run: ci/cap-release-assets.sh release 2147483648
+      - name: Guard - amd64 must have created images-v<ver> (arm64 never creates the tag)
+        # P1-3: softprops/action-gh-release CREATES the release + tag when it does not
+        # exist. When the amd64 run failed, the arm64 append used to create
+        # images-v<ver> on its own, watch-engine-apt then saw the tag and believed the
+        # release was fully built. Now the append runs only once the amd64 publish has
+        # created the release: wait (up to 150 min) while an amd64 build-images run for
+        # this release is still in flight; if there is none and no release, skip the
+        # append (the arm64 artifacts stay on this run and still go to HF).
+        id: amd64gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: images-v${{ env.VACTI_RELEASE }}
+          REL: ${{ env.VACTI_RELEASE }}
+          WAIT_MINUTES: "150"
+        run: |
+          set -uo pipefail
+          for _ in $(seq 1 "$WAIT_MINUTES"); do
+            if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "[amd64gate] ${TAG} exists (created by the amd64 publish); appending arm64 assets"
+              echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            active="$(gh run list -R "$GITHUB_REPOSITORY" --workflow build.yml -L 30 \
+                        --json status,displayTitle \
+                        --jq "[.[] | select(.status != \"completed\") | select(.displayTitle == \"build-images ${REL}\")] | length" \
+                      2>/dev/null || echo 0)"
+            if [ "${active:-0}" -eq 0 ]; then
+              break
+            fi
+            echo "[amd64gate] ${TAG} not yet created; amd64 build-images ${REL} still running - waiting"
+            sleep 60
+          done
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::[amd64gate] ${TAG} was NOT created by an amd64 publish (amd64 failed or never ran); NOT creating the tag from arm64. Re-run build.yml for ${REL}; the arm64 OVAs remain downloadable from this run and HF."
+          echo "amd64gate: ${TAG} missing - arm64 GitHub Release append skipped (P1-3)" >> "$GITHUB_STEP_SUMMARY"
       - name: Append ARM64 assets to the PRIVATE GitHub Release
+        if: ${{ steps.amd64gate.outputs.ok == 'true' }}
         # APPEND only: tag_name + files, no name/body, so this never clobbers the
         # release notes the AMD64 publish (build.yml) wrote to the same tag. The two
         # ARM64 OVA forms (VMware OVA + VirtualBox OVA, gui) are added alongside the
@@ -370,3 +449,20 @@ jobs:
           files: |
             release/*.ova
             release/MANIFEST-arm64.sha256
+
+  # --- Hugging Face publish, INLINE (P0-2) --------------------------------------
+  # Replaces the old `workflow_run` listener, which never fired for these
+  # GITHUB_TOKEN-dispatched runs. Uploads THIS run's form-*-arm64 artifacts. A legacy
+  # (allow_legacy_release) build never publishes to HF.
+  publish-hf:
+    needs: [lint, publish]
+    if: ${{ always() && needs.publish.result == 'success' && needs.lint.outputs.legacy != 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/publish-images-hf.yml
+    with:
+      run_id: ${{ format('{0}', github.run_id) }}
+      version: ${{ needs.lint.outputs.release }}
+      arch: arm64
+    secrets: inherit

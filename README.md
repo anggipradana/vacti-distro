@@ -53,7 +53,8 @@ are in [`distro/README.md`](distro/README.md).
 
 ## Building
 
-The images are heavy, so the build runs in CI (`.github/workflows/build.yml`) and never on a
+The images are heavy, so the build runs in CI (`.github/workflows/build.yml` for amd64,
+`build-arm64.yml` for arm64, `build-docker.yml` for the multi-arch Docker image) and never on a
 production control plane. A local build is possible for development; see the `Makefile`
 targets and the operator quickstart in [`distro/README.md`](distro/README.md).
 

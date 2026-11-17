@@ -349,7 +349,7 @@
   },
   "pins": {
     "caido_cli": "v0.57.0",
-    "caido_mcp": "v1.1.0",
+    "caido_mcp": "v4.3.0",
     "mobile_mcp": "1.0.4",
     "jadx": "1.5.0",
     "frida": "17.24.3",

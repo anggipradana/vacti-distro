@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- VMware-flavoured OVF 1.0 descriptor (VirtualSystemType=vmx-13, LSI Logic
-     SCSI). Placeholders @VMDK@ @DISK_CAPACITY@ @DISK_POPULATED@ @PRODUCT@
-     @VERSION@ are filled by convert-vmware-ova.sh. Imports to Workstation /
-     Player / Fusion / ESXi. -->
+<!-- VMware-flavoured OVF 1.0 descriptor. Placeholders @VMDK@ @DISK_CAPACITY@
+     @DISK_POPULATED@ @PRODUCT@ @VERSION@ plus the arch-keyed hardware set
+     (@VMW_HWVER@ @VMW_FIRMWARE@ @VMW_CTRL_*@) are filled by convert-vmware-ova.sh:
+     amd64 = vmx-13 + LSI Logic SCSI + BIOS (Workstation / Player / ESXi / Intel
+     Fusion); arm64 = vmx-20 + SATA AHCI + EFI (Fusion 13 on Apple Silicon, which
+     has no LSI Logic SCSI and boots arm guests UEFI-only). -->
 <Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
           xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
           xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
@@ -35,7 +37,7 @@
         <vssd:ElementName>Virtual Hardware Family</vssd:ElementName>
         <vssd:InstanceID>0</vssd:InstanceID>
         <vssd:VirtualSystemIdentifier>@PRODUCT@</vssd:VirtualSystemIdentifier>
-        <vssd:VirtualSystemType>vmx-13</vssd:VirtualSystemType>
+        <vssd:VirtualSystemType>@VMW_HWVER@</vssd:VirtualSystemType>
       </System>
       <Item>
         <rasd:AllocationUnits>hertz * 10^6</rasd:AllocationUnits>
@@ -55,10 +57,10 @@
       </Item>
       <Item>
         <rasd:Address>0</rasd:Address>
-        <rasd:ElementName>SCSI Controller 0</rasd:ElementName>
+        <rasd:ElementName>@VMW_CTRL_NAME@</rasd:ElementName>
         <rasd:InstanceID>3</rasd:InstanceID>
-        <rasd:ResourceSubType>lsilogic</rasd:ResourceSubType>
-        <rasd:ResourceType>6</rasd:ResourceType>
+        <rasd:ResourceSubType>@VMW_CTRL_SUBTYPE@</rasd:ResourceSubType>
+        <rasd:ResourceType>@VMW_CTRL_RTYPE@</rasd:ResourceType>
       </Item>
       <Item>
         <rasd:AddressOnParent>0</rasd:AddressOnParent>
@@ -77,6 +79,7 @@
         <rasd:ResourceSubType>vmxnet3</rasd:ResourceSubType>
         <rasd:ResourceType>10</rasd:ResourceType>
       </Item>
+      <vmw:Config ovf:required="false" vmw:key="firmware" vmw:value="@VMW_FIRMWARE@"/>
     </VirtualHardwareSection>
   </VirtualSystem>
 </Envelope>

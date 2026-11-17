@@ -22,6 +22,13 @@
 #   7. The VMDK is a readable VMDK (qemu-img info).
 #   8. Default RAM is the shipped baseline (>= MIN_RAM_MB, default 10240) - guards
 #      the 10GB engine capacity floor from silently regressing.
+#   9. Disk/@ovf:capacity (x capacityAllocationUnits) == the VMDK's VIRTUAL size
+#      (qemu-img, top-level node) and > populatedSize. Fail-closed: a missing,
+#      non-numeric or file-size-valued capacity (the 5.8GB-on-100GB bug VirtualBox
+#      refuses to boot) fails the gate.
+#  10. arm64 OVAs (*-arm64-*) declare hardware an Apple Silicon hypervisor can run:
+#      no LSI Logic / SCSI controller (ResourceType 6), and EFI firmware (VMware:
+#      vmw:Config firmware=efi; VirtualBox: vbox:OSType *_arm64, EFI-only platform).
 #
 # Open-source tools only; READ-ONLY. Exit non-zero on any violation.
 #
@@ -41,6 +48,7 @@ bad()  { echo "[validate-ovf][FAIL] $*" >&2; FAIL=1; }
 
 command -v xmllint  >/dev/null 2>&1 || { echo "[validate-ovf] xmllint required (apt-get install libxml2-utils)" >&2; exit 2; }
 command -v qemu-img >/dev/null 2>&1 || { echo "[validate-ovf] qemu-img required (apt-get install qemu-utils)" >&2; exit 2; }
+command -v python3  >/dev/null 2>&1 || { echo "[validate-ovf] python3 required (capacity check parses qemu-img JSON)" >&2; exit 2; }
 
 # namespace-agnostic xpath helper (local-name() so we need not register the OVF
 # / RASD / VSSD namespaces on the xmllint CLI).
@@ -160,6 +168,53 @@ validate_one() {
   else
     bad "${base}: could not read a numeric memory VirtualQuantity (got '${ram:-unset}')"
   fi
+
+  # --- 9. advertised capacity == VMDK virtual size --------------------------
+  local cap units mult=1 vsize cap_bytes
+  cap="$(xp "string(//*[local-name()='Disk']/@*[local-name()='capacity'])" "$ovf")"
+  units="$(xp "string(//*[local-name()='Disk']/@*[local-name()='capacityAllocationUnits'])" "$ovf")"
+  units="${units// /}"
+  case "$units" in
+    ""|byte|bytes) mult=1 ;;
+    byte\*2^[0-9]*) mult=$(( 1 << ${units#byte\*2^} )) ;;
+    *) mult=0; bad "${base}: unsupported Disk/@capacityAllocationUnits '${units}'" ;;
+  esac
+  # Top-level virtual size (JSON parser; the human line as fallback). Never a
+  # first-match on --output=json: the "children" file node sorts first.
+  vsize="$(qemu-img info --output=json "$vmdk" 2>/dev/null \
+           | python3 -I -c 'import json,sys; print(int(json.load(sys.stdin)["virtual-size"]))' 2>/dev/null || true)"
+  [[ "$vsize" =~ ^[0-9]+$ ]] || vsize="$(qemu-img info "$vmdk" 2>/dev/null | sed -n 's/^virtual size:.*(\([0-9]*\) bytes).*/\1/p' | head -1)"
+  if [[ ! "$cap" =~ ^[0-9]+$ ]]; then
+    bad "${base}: Disk/@ovf:capacity is missing or non-numeric (got '${cap:-unset}')"
+  elif [[ ! "$vsize" =~ ^[0-9]+$ ]]; then
+    bad "${base}: could not read the VMDK virtual size via qemu-img"
+  elif [[ "$mult" -gt 0 ]]; then
+    cap_bytes=$(( cap * mult ))
+    if [[ "$cap_bytes" -ne "$vsize" ]]; then
+      bad "${base}: Disk/@ovf:capacity ${cap_bytes} bytes != VMDK virtual size ${vsize} bytes (file-size-as-capacity bug?)"
+    elif [[ -n "$pop_sz" && "$pop_sz" =~ ^[0-9]+$ && "$cap_bytes" -le "$pop_sz" ]]; then
+      bad "${base}: Disk/@ovf:capacity ${cap_bytes} <= populatedSize ${pop_sz} (capacity is not the virtual size)"
+    else
+      ok "${base}: Disk/@ovf:capacity == VMDK virtual size (${vsize} bytes)"
+    fi
+  fi
+
+  # --- 10. arm64 hardware descriptors ----------------------------------------
+  case "$base" in
+    *-arm64-*|*-arm64.*)
+      local n_scsi n_lsi fw vbos
+      n_scsi="$(xpnum "count(//*[local-name()='Item'][*[local-name()='ResourceType']='6'])" "$ovf")"
+      n_lsi="$(xpnum "count(//*[local-name()='Item'][contains(translate(*[local-name()='ResourceSubType'],'LSIOGC','lsiogc'),'lsilogic')])" "$ovf")"
+      [[ "$n_scsi" -eq 0 && "$n_lsi" -eq 0 ]] && ok "${base}: arm64 has no LSI Logic / SCSI controller" \
+        || bad "${base}: arm64 OVF declares an LSI Logic / SCSI controller (unsupported on Apple Silicon hypervisors)"
+      fw="$(xp "string(//*[local-name()='Config'][@*[local-name()='key']='firmware']/@*[local-name()='value'])" "$ovf")"
+      vbos="$(xp "string(//*[local-name()='OSType'])" "$ovf")"
+      if [[ "$fw" == "efi" ]]; then ok "${base}: arm64 firmware=efi declared"
+      elif [[ "$vbos" == *_arm64 ]]; then ok "${base}: arm64 vbox:OSType ${vbos} (EFI-only ARM platform)"
+      else bad "${base}: arm64 OVF declares no EFI firmware (vmw:Config firmware='${fw:-unset}', vbox:OSType='${vbos:-unset}')"
+      fi
+      ;;
+  esac
 
   rm -rf "$d"
 }

@@ -220,12 +220,31 @@ chmod 0755 "${STAGE}/opt/vacti-build/install-engine-extras.sh"
 # installs them (chromium first, then the engine). Gracefully falls back to the
 # THIN-BOOTSTRAP path when VACTI_FAT_OVA is off OR no .debs are supplied, so an
 # unconfigured local build (no ENGINE_DEBS_DIR) still produces a valid thin image.
+# P1-2: the engine baked into the image MUST be the release the image is stamped
+# with. VACTI_ENGINE_REF (CI threads inputs.release / client_payload.release into
+# it) pins the staged .deb: a staged vacti-engine at any other version is FATAL here,
+# before virt-customize spends an hour baking the wrong engine. A CI run that set
+# ENGINE_DEBS_DIR but staged nothing is FATAL too (a silent THIN image is how stale
+# OVAs shipped); only an unset ENGINE_DEBS_DIR (local dev build) or the explicit
+# VACTI_FETCH_ALLOW_THIN=1 opt-in still falls back to THIN.
+_ENGINE_REF="${VACTI_ENGINE_REF:-}"; _ENGINE_REF="${_ENGINE_REF#v}"
 if [[ "${VACTI_FAT_OVA:-1}" =~ ^(1|true|yes|on)$ ]]; then
   if [[ -n "${ENGINE_DEBS_DIR:-}" ]] && compgen -G "${ENGINE_DEBS_DIR}/vacti-engine_"*.deb >/dev/null 2>&1; then
+    for _deb in "${ENGINE_DEBS_DIR}"/vacti-engine_*.deb; do
+      _v="$(dpkg-deb -f "$_deb" Version 2>/dev/null || true)"
+      [[ -n "$_v" ]] || die "cannot read the Version of staged $(basename "$_deb")"
+      if [[ -n "$_ENGINE_REF" && "$_v" != "$_ENGINE_REF" && "$_v" != "$_ENGINE_REF"+* \
+            && "$_v" != "$_ENGINE_REF"-* && "$_v" != "$_ENGINE_REF"~* ]]; then
+        die "staged $(basename "$_deb") is vacti-engine ${_v}, but VACTI_ENGINE_REF=${_ENGINE_REF} (refusing to bake a different engine than the release)"
+      fi
+      log "FAT-OVA: staged vacti-engine ${_v}${_ENGINE_REF:+ (matches pin ${_ENGINE_REF})}"
+    done
     log "FAT-OVA: staging baked engine + chromium .debs from ${ENGINE_DEBS_DIR}"
     install -d "${STAGE}/opt/vacti-build/engine-debs"
     cp -a "${ENGINE_DEBS_DIR}"/*.deb "${STAGE}/opt/vacti-build/engine-debs/"
     ls -l "${STAGE}/opt/vacti-build/engine-debs/" | sed 's/^/[golden]   /'
+  elif [[ -n "${ENGINE_DEBS_DIR:-}" && "${VACTI_FETCH_ALLOW_THIN:-0}" != "1" ]]; then
+    die "FAT-OVA requested and ENGINE_DEBS_DIR='${ENGINE_DEBS_DIR}' is set, but no vacti-engine .deb was staged (set VACTI_FETCH_ALLOW_THIN=1 or VACTI_FAT_OVA=0 for a THIN image)"
   else
     log "FAT-OVA requested but no engine .debs found in ENGINE_DEBS_DIR='${ENGINE_DEBS_DIR:-<unset>}' - falling back to THIN bootstrap (engine pulled at first boot)"
   fi
@@ -442,7 +461,18 @@ if compgen -G "/opt/vacti-build/engine-debs/vacti-engine_"*.deb >/dev/null 2>&1;
                      /opt/vacti-build/engine-debs/vacti-engine_*.deb \
     || { echo "[prov] bulk engine bake hit a snag; retrying per-package"
          apt-get install -y /opt/vacti-build/engine-debs/vacti-engine-chromium_*.deb || echo "[prov][warn] chromium bake failed (runtime self-heal covers it)"
-         apt-get install -y /opt/vacti-build/engine-debs/vacti-engine_*.deb        || echo "[prov][FATAL] engine bake failed"; }
+         # P1-4 fail-loud: a staged engine that will not install fails the build
+         # (virt-customize propagates the exit), instead of a FATAL line that only
+         # lands in the in-image log while CI reports green.
+         apt-get install -y /opt/vacti-build/engine-debs/vacti-engine_*.deb        || { echo "[prov][FATAL] engine bake failed"; exit 1; }; }
+  _baked="\$(dpkg-query -W -f='\${Version}' vacti-engine 2>/dev/null || true)"
+  echo "[prov] FAT-OVA: vacti-engine \${_baked:-<none>} installed${_ENGINE_REF:+ (pin ${_ENGINE_REF})}"
+  if [ -n "${_ENGINE_REF}" ]; then
+    case "\${_baked}" in
+      "${_ENGINE_REF}"|"${_ENGINE_REF}"+*|"${_ENGINE_REF}"-*|"${_ENGINE_REF}"~*) ;;
+      *) echo "[prov][FATAL] baked vacti-engine '\${_baked}' != pinned ${_ENGINE_REF}"; exit 1 ;;
+    esac
+  fi
   if [ -e /usr/lib/vacti-engine/dist/runner/cli.js ]; then
     echo "[prov] FAT-OVA: engine marker present (/usr/lib/vacti-engine/dist/runner/cli.js) - bake OK"
     # Drop a build-form marker so ONLY a fat image's first boot kicks the immediate
@@ -452,7 +482,8 @@ if compgen -G "/opt/vacti-build/engine-debs/vacti-engine_"*.deb >/dev/null 2>&1;
     install -d -m0755 /etc/vacti-engine
     printf '# vacti FAT-OVA build marker: engine + chromium were baked at build time.\n' > /etc/vacti-engine/fat-ova
   else
-    echo "[prov][warn] FAT-OVA: engine marker MISSING after bake; first-boot vacti-engine-install.service will self-heal"
+    echo "[prov][FATAL] FAT-OVA: engine marker /usr/lib/vacti-engine/dist/runner/cli.js MISSING after bake"
+    exit 1
   fi
 else
   echo "[prov] THIN bootstrap: no engine .debs staged; engine .deb will be pulled at first boot"

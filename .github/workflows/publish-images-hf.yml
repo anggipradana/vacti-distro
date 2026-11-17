@@ -6,21 +6,45 @@
 # large images. It runs AFTER a successful image build and uploads the large
 # forms to the dataset anggipradana/vacti-distro-images.
 #
+# TRIGGERS (P0-2): it is a REUSABLE workflow. build.yml / build-arm64.yml call it
+# inline (`uses: ./.github/workflows/publish-images-hf.yml`) as their last job, after
+# the OVA publish succeeded, with run_id = their own run. It used to listen on
+# `workflow_run`, but GitHub never emits workflow_run for a run started by
+# GITHUB_TOKEN, and watch-engine-apt dispatches every build with GITHUB_TOKEN, so
+# no automatic publish fired after 0.2.449 (2026-11-11). workflow_dispatch stays for a
+# manual (re-)publish of a known-good run:
+#   gh workflow run publish-images-hf.yml -f run_id=<id> -f version=<X.Y.Z> -f arch=<amd64|arm64|both>
+#
 # DIVISION OF LABOUR (the ">2GiB skip"): build-images / build-images-arm64
 # still attach the SMALL assets (.deb, fingerprint JSON, MANIFEST.sha256 - all
 # well under 2GiB) to the PRIVATE GitHub Release, which stays their canonical
 # home next to the apt repo. The large OVA/ISO/qcow2 images (> 2GiB) are NOT
-# attached to the Release - they are routed here to HF instead. This workflow
-# touches neither build-images.yml nor build-images-arm64.yml.
+# attached to the Release - they are routed here to HF instead.
 #
 # SECRET REQUIRED: this workflow reads HF_PUBLISH_TOKEN from the repo secrets.
 # The operator must add it (the hf_... write token used for the dataset).
 name: publish-images-hf
 
 on:
-  workflow_run:
-    workflows: ["build-images", "build-images-arm64"]
-    types: [completed]
+  workflow_call:
+    inputs:
+      run_id:
+        description: "build-images / build-images-arm64 run id to publish (the caller's github.run_id)"
+        type: string
+        required: true
+      version:
+        description: "Release version X.Y.Z, or 'auto' to derive from artifact filenames"
+        type: string
+        required: false
+        default: "auto"
+      arch:
+        description: "Which arch set the run produced (amd64 | arm64 | both)"
+        type: string
+        required: false
+        default: "both"
+    secrets:
+      HF_PUBLISH_TOKEN:
+        required: false
   workflow_dispatch:
     inputs:
       run_id:
@@ -46,18 +70,17 @@ permissions:
   actions: read
   contents: read
 
-concurrency:
-  group: publish-images-hf-${{ github.event.workflow_run.id || github.event.inputs.run_id }}
-  cancel-in-progress: false
-
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Never publish from a red build. workflow_dispatch is always allowed
-    # (manual re-publish of a known-good run).
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+    # Serialize publishes of the SAME version (amd64 + arm64 both rewrite the README
+    # index and merge SHA256SUMS). Keyed on `inputs.*`, which is populated for both
+    # workflow_call and workflow_dispatch (the event-payload inputs are the CALLER's
+    # under workflow_call, so they must not be used here). "Never publish from a red
+    # build" is structural now: the callers' publish-hf job needs their publish job.
+    concurrency:
+      group: publish-images-hf-${{ inputs.version != 'auto' && inputs.version || inputs.run_id }}
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,44 +96,26 @@ jobs:
       - name: Resolve run id, version, and arch
         id: resolve
         env:
-          # workflow_run context (empty on a manual dispatch).
-          WR_ID: ${{ github.event.workflow_run.id }}
-          WR_NAME: ${{ github.event.workflow_run.name }}
-          WR_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          # workflow_dispatch inputs (empty on an automatic run).
-          IN_RUN_ID: ${{ github.event.inputs.run_id }}
-          IN_VERSION: ${{ github.event.inputs.version }}
-          IN_ARCH: ${{ github.event.inputs.arch }}
+          # `inputs` is filled for both workflow_call (from the caller's `with:`) and
+          # workflow_dispatch.
+          IN_RUN_ID: ${{ inputs.run_id }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_ARCH: ${{ inputs.arch }}
         run: |
           set -euo pipefail
 
-          RUN_ID="${IN_RUN_ID:-$WR_ID}"
-          [ -n "$RUN_ID" ] || { echo "no run id resolved"; exit 1; }
+          RUN_ID="${IN_RUN_ID:-}"
+          echo "$RUN_ID" | grep -Eq '^[0-9]+$' || { echo "run_id must be a numeric run id (got '${RUN_ID}')"; exit 1; }
 
-          # Arch: manual input wins; otherwise derive from the workflow name.
-          if [ -n "${IN_ARCH:-}" ]; then
-            ARCH="$IN_ARCH"
-          elif [ "$WR_NAME" = "build-images-arm64" ]; then
-            ARCH="arm64"
-          elif [ "$WR_NAME" = "build-images" ]; then
-            ARCH="amd64"
-          else
-            ARCH="both"
-          fi
+          ARCH="${IN_ARCH:-both}"
+          case "$ARCH" in amd64|arm64|both) ;; *) echo "arch must be amd64|arm64|both (got '${ARCH}')"; exit 1 ;; esac
 
-          # Version: manual input wins; otherwise try the tag the run was built
-          # from (images-v* / engine-v* / v*). If that is not a clean semver,
-          # fall back to 'auto' (the script derives it from artifact filenames).
-          VERSION="${IN_VERSION:-}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "auto" ]; then
-            cand="${WR_BRANCH#images-v}"
-            cand="${cand#engine-v}"
-            cand="${cand#v}"
-            if echo "$cand" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-              VERSION="$cand"
-            else
-              VERSION="auto"
-            fi
+          # Version: an explicit X.Y.Z, else 'auto' (the script derives it from the
+          # artifact filenames). A leading v is tolerated.
+          VERSION="${IN_VERSION:-auto}"
+          VERSION="${VERSION#v}"
+          if [ "$VERSION" != "auto" ] && ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "version must be X.Y.Z or auto (got '${VERSION}')"; exit 1
           fi
 
           echo "run_id=$RUN_ID"   >> "$GITHUB_OUTPUT"
@@ -125,8 +130,10 @@ jobs:
           RUN_ID: ${{ steps.resolve.outputs.run_id }}
         run: |
           set -euo pipefail
-          # A bare tag push builds ONLY the Docker image (no VM/ISO matrix), so
-          # such a run has no form-* artifacts. Skip cleanly instead of failing.
+          # Called inline the artifacts were uploaded by earlier jobs of the SAME
+          # (still in-progress) run; upload-artifact@v4 artifacts are listable and
+          # downloadable as soon as each upload finishes. A run with no form-*
+          # artifacts (nothing to publish) is skipped cleanly.
           names="$(gh api --paginate \
             "repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
             --jq '.artifacts[].name' 2>/dev/null || true)"

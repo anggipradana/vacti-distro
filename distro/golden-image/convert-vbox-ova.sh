@@ -37,11 +37,37 @@ echo "[vbox] qemu-img -> streamOptimized VMDK"
 qemu-img convert -p -f qcow2 -O vmdk -o subformat=streamOptimized \
   "$GOLDEN" "${WORK}/${VMDK}"
 
+# P0-1: the OVF ovf:capacity MUST be the VIRTUAL disk size (100G), never the image
+# FILE size. Modern `qemu-img info --output=json` nests a "children" file-protocol
+# node that sorts BEFORE the top-level keys and carries its own "virtual-size" (=
+# the ~5.6GB qcow2 file length), so a first-match sed/grep read the file size and
+# shipped capacity=5.8GB on a 100GB disk (VirtualBox refuses to boot it). Parse the
+# TOP-LEVEL key with a real JSON parser; fall back to the human "virtual size: ...
+# (N bytes)" line (the first one is always the top-level node). Fail-closed.
+qemu_virtual_size() { # <image> -> bytes on stdout, or non-zero
+  local img="$1" v=""
+  if command -v python3 >/dev/null 2>&1; then
+    v="$(qemu-img info --output=json "$img" 2>/dev/null \
+         | python3 -I -c 'import json,sys; print(int(json.load(sys.stdin)["virtual-size"]))' 2>/dev/null || true)"
+  fi
+  if ! [[ "$v" =~ ^[0-9]+$ ]]; then
+    v="$(qemu-img info "$img" 2>/dev/null | sed -n 's/^virtual size:.*(\([0-9]*\) bytes).*/\1/p' | head -1)"
+  fi
+  [[ "$v" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$v"
+}
 POP_BYTES="$(stat -c%s "${WORK}/${VMDK}")"
-CAP_BYTES="$(qemu-img info --output=json "$GOLDEN" | sed -n 's/.*"virtual-size": *\([0-9]*\).*/\1/p' | head -1)"
+GOLDEN_VSIZE="$(qemu_virtual_size "$GOLDEN")" || { echo "[vbox] cannot read the golden virtual size" >&2; exit 1; }
+CAP_BYTES="$(qemu_virtual_size "${WORK}/${VMDK}")" || { echo "[vbox] cannot read the VMDK virtual size" >&2; exit 1; }
+# The descriptor advertises the disk INSIDE the package (the VMDK). It must not be
+# smaller than the golden it came from, and it must exceed the compressed
+# populated size (capacity <= populated is exactly the file-size-for-capacity bug).
+[[ "$CAP_BYTES" -ge "$GOLDEN_VSIZE" ]] || { echo "[vbox] VMDK virtual size ${CAP_BYTES} < golden virtual size ${GOLDEN_VSIZE}" >&2; exit 1; }
+[[ "$CAP_BYTES" -gt "$POP_BYTES" ]] || { echo "[vbox] capacity ${CAP_BYTES} <= populated ${POP_BYTES}: refusing a file-size-as-capacity OVF" >&2; exit 1; }
+echo "[vbox] disk capacity ${CAP_BYTES} bytes (virtual), populated ${POP_BYTES} bytes"
 OVF="${NAME}.ovf"
 sed -e "s|@VMDK@|${VMDK}|g" \
-    -e "s|@DISK_CAPACITY@|${CAP_BYTES:-107374182400}|g" \
+    -e "s|@DISK_CAPACITY@|${CAP_BYTES}|g" \
     -e "s|@DISK_POPULATED@|${POP_BYTES}|g" \
     -e "s|@PRODUCT@|${VACTI_PRODUCT_PRETTY}|g" \
     -e "s|@VERSION@|${VACTI_RELEASE}|g" \

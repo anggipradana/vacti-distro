@@ -13,7 +13,10 @@
 # THE FIX (this workflow)
 # A scheduled job in THIS repo polls the engine apt repo every 15 min for the newest
 # published vacti-engine version and, when it is newer than any images-v* release this
-# repo has built, SELF-dispatches build.yml + build-arm64.yml. Self-dispatch in the
+# repo has built, SELF-dispatches build.yml + build-arm64.yml + build-docker.yml (the
+# Docker image is its own workflow since P0-3; the OVA builds publish to HF inline via
+# publish-images-hf.yml, since a GITHUB_TOKEN-started run never fires workflow_run).
+# Self-dispatch in the
 # SAME repo works with the default GITHUB_TOKEN (permissions: actions: write), so NO
 # PAT and NO operator action are ever required. It works whether the engine release
 # went via CI or on-box (both publish the .deb to the same apt repo), and converges
@@ -50,7 +53,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write   # self-dispatch build.yml + build-arm64.yml
+  actions: write   # self-dispatch build.yml + build-arm64.yml + build-docker.yml
   contents: write  # commit the per-version dispatch marker (idempotency source of truth)
 
 concurrency:
@@ -131,20 +134,23 @@ jobs:
             exit 0
           fi
 
-          # --- 5. dispatch both image builds for the new version ----------------------
-          # Inputs mirror build.yml / build-arm64.yml defaults (full arsenal + CTF +
-          # FAT-OVA) so an auto-rebuild never silently reverts :latest to a lean set.
+          # --- 5. dispatch the image builds for the new version -----------------------
+          # Inputs mirror the workflow defaults (full arsenal + CTF + FAT-OVA) so an
+          # auto-rebuild never silently reverts :latest to a lean set. release=<apt_ver>
+          # is also the pinned engine version every build bakes (P1-2).
           rc=0
-          for wf in build.yml build-arm64.yml; do
+          for wf in build.yml build-arm64.yml build-docker.yml; do
+            extra=(-f fat_ova=1)
+            [ "$wf" = "build-docker.yml" ] && extra=()   # Docker is always FAT; no fat_ova input
             if gh workflow run "$wf" -R "${REPO}" \
-                 -f release="${apt_ver}" -f full_arsenal=1 -f ctf_arsenal=1 -f fat_ova=1 2>&1; then
+                 -f release="${apt_ver}" -f full_arsenal=1 -f ctf_arsenal=1 "${extra[@]}" 2>&1; then
               echo "dispatched ${wf} for ${apt_ver}"
             else
               echo "::warning::failed to dispatch ${wf} for ${apt_ver}"; rc=1
             fi
           done
           if [ "$rc" = 0 ]; then
-            # BOTH builds dispatched. Write the persisted marker so later polls skip
+            # ALL builds dispatched. Write the persisted marker so later polls skip
             # this version, and flag the commit step to land it. Partial dispatch
             # (rc=1) deliberately writes NO marker, so the next poll retries.
             mkdir -p "$marker_dir"
@@ -164,7 +170,7 @@ jobs:
               echo "dispatched=true"
               echo "apt_ver=${apt_ver}"
             } >> "$GITHUB_OUTPUT"
-            summary "watch-engine-apt: DISPATCHED build.yml + build-arm64.yml for ${apt_ver} (was images-v${distro_ver}); marker ${marker} written."
+            summary "watch-engine-apt: DISPATCHED build.yml + build-arm64.yml + build-docker.yml for ${apt_ver} (was images-v${distro_ver}); marker ${marker} written."
           else
             summary "watch-engine-apt: partial dispatch for ${apt_ver} (see warnings); no marker written, next poll retries."
           fi
@@ -172,7 +178,7 @@ jobs:
           exit 0
 
       - name: Commit the dispatch marker (idempotency state)
-        # Runs only after BOTH builds were dispatched. Persists the marker (and any
+        # Runs only after ALL builds were dispatched. Persists the marker (and any
         # prune from the step above) to the repo so later polls skip this version.
         # GITHUB_TOKEN + contents:write authorizes the push; a non-fast-forward (a
         # concurrent commit to the default branch) is handled with one rebase-retry.
@@ -192,7 +198,7 @@ jobs:
           # Explicit remote+refspec so the push works regardless of whether checkout
           # left HEAD on a branch or detached, with one rebase-retry if a concurrent
           # commit advanced the branch. A branch push by GITHUB_TOKEN does not trigger
-          # further workflows (and build.yml's push trigger is tags-only), so this
+          # further workflows (and only build-docker.yml has a push trigger, tags-only), so this
           # commit cannot re-fire the watch or the build.
           branch="${GITHUB_REF_NAME:-main}"
           git push origin "HEAD:${branch}" \

@@ -21,7 +21,7 @@ fi
 
 echo "== yaml sanity =="
 if command -v python3 >/dev/null 2>&1; then
-  for y in distro/packages/manifest.yml .github/workflows/build.yml; do
+  for y in distro/packages/manifest.yml .github/workflows/*.yml; do
     python3 -c "import sys,yaml; yaml.safe_load(open('$y'))" 2>/dev/null \
       && echo "  ok: $y" || { echo "  YAML parse FAILED: $y" >&2; rc=1; }
   done
@@ -83,6 +83,26 @@ if [[ -x distro/test/chromium-hf-contract.sh ]]; then
   bash distro/test/chromium-hf-contract.sh || rc=1
 else
   echo "  distro/test/chromium-hf-contract.sh missing; skipping"
+fi
+
+echo "== CI release contract (resolver guard, fetch fail-loud, workflow wiring, pins) =="
+# Offline: resolve-release.sh legacy guard + engine-ref pin, fetch-engine-debs.sh
+# fail-loud against a file:// fake pool, HF inline call / Docker split / smoke-before-
+# promote / arm64 tag guard structure, caido-mcp + Dockerfile engine pins.
+if [[ -x distro/test/ci-release-contract.sh ]]; then
+  bash distro/test/ci-release-contract.sh || rc=1
+else
+  echo "  distro/test/ci-release-contract.sh missing; skipping"
+fi
+
+echo "== OVF capacity + arm64 hardware contract (real qemu-img) =="
+# EMPIRICAL: sparse 100G qcow2 -> the real convert scripts (amd64 + arm64) ->
+# validate-ovf.sh; capacity must be the VIRTUAL size and a file-size capacity must
+# fail the gate. LOUD SKIP without qemu-img/xmllint.
+if [[ -x distro/test/ovf-capacity-contract.sh ]]; then
+  bash distro/test/ovf-capacity-contract.sh || rc=1
+else
+  echo "  distro/test/ovf-capacity-contract.sh missing; skipping"
 fi
 
 [[ $rc -eq 0 ]] && echo "== lint PASS ==" || echo "== lint FAIL ==" >&2

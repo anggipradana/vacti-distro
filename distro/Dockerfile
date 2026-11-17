@@ -50,6 +50,10 @@ FROM debian:trixie-slim AS builder
 # CI supplies the real value with --build-arg VACTI_APT_URL=...
 ARG VACTI_APT_URL=""
 ARG VACTI_ENGINE_PKG="vacti-engine"
+# Pinned engine version for the FAT bake (P1-2). CI always passes the release the
+# image is tagged with; the FAT RUN installs EXACTLY that version (X.Y.Z, or the
+# pool's X.Y.Z+build/-rev/~pre spelling of it) and fails the build if the apt pool
+# does not carry it for this arch. Empty = floating newest-in-pool (local dev only).
 ARG VACTI_ENGINE_REF=""
 ARG VACTI_FULL_ARSENAL="0"
 # VACTI_CTF_ARSENAL=1 additionally bakes the apt-installable CTF tool set
@@ -273,7 +277,23 @@ RUN --mount=type=secret,id=vacti_apt_token,required=false \
         ${NODE_MAJOR}.*) echo "[docker] FAT bake: nodejs candidate is ${NODE_CAND} (NodeSource ${NODE_MAJOR}.x resolved)" ;; \
         *) rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] nodejs candidate is '${NODE_CAND}' (< ${NODE_MAJOR}); NodeSource ${NODE_MAJOR}.x did not resolve at FAT bake - refusing to fall back to Debian nodejs, which cannot satisfy ${VACTI_ENGINE_PKG} Depends nodejs (>= ${NODE_MAJOR})"; exit 1 ;; \
       esac; \
-      apt-get install -y --no-install-recommends "${VACTI_ENGINE_PKG}" "${CHROMIUM_DEB}"; \
+      ENGINE_REF="${VACTI_ENGINE_REF#v}"; \
+      if [ -n "${ENGINE_REF}" ]; then \
+        ENGINE_VER="$(apt-cache madison "${VACTI_ENGINE_PKG}" 2>/dev/null | awk -F'|' '{gsub(/[ \t]/,"",$2); print $2}' \
+                      | awk -v r="${ENGINE_REF}" '$0==r || index($0, r "+")==1 || index($0, r "-")==1 || index($0, r "~")==1' | head -n1)"; \
+        [ -n "${ENGINE_VER}" ] || { rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] VACTI_ENGINE_REF=${ENGINE_REF}: ${VACTI_ENGINE_PKG} is not in the apt pool for ${DEB_ARCH} (pool has: $(apt-cache madison "${VACTI_ENGINE_PKG}" 2>/dev/null | awk -F'|' '{gsub(/[ \t]/,"",$2); printf "%s ", $2}' | cut -c1-200)) - refusing to bake a different engine than the tagged release"; exit 1; }; \
+        ENGINE_SPEC="${VACTI_ENGINE_PKG}=${ENGINE_VER}"; \
+        echo "[docker] FAT bake: pinned ${ENGINE_SPEC} (VACTI_ENGINE_REF=${ENGINE_REF})"; \
+      else \
+        ENGINE_SPEC="${VACTI_ENGINE_PKG}"; \
+        echo "[docker][warn] FAT bake: VACTI_ENGINE_REF empty - installing the newest ${VACTI_ENGINE_PKG} in the pool (unpinned; CI always pins)"; \
+      fi; \
+      apt-get install -y --no-install-recommends "${ENGINE_SPEC}" "${CHROMIUM_DEB}"; \
+      GOT_VER="$(dpkg-query -W -f='${Version}' "${VACTI_ENGINE_PKG}" 2>/dev/null || true)"; \
+      if [ -n "${ENGINE_REF}" ] && [ "${GOT_VER}" != "${ENGINE_VER}" ]; then \
+        rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] installed ${VACTI_ENGINE_PKG} ${GOT_VER} != pinned ${ENGINE_VER}"; exit 1; \
+      fi; \
+      echo "[docker] FAT bake: ${VACTI_ENGINE_PKG} ${GOT_VER} installed"; \
       MARKER=/usr/lib/vacti-engine/dist/runner/cli.js; \
       [ -e "${MARKER}" ] || { rm -f /etc/apt/auth.conf.d/vacti-engine.conf /etc/apt/sources.list.d/vacti-engine.list; echo "[docker][error] engine install reported success but ${MARKER} is missing"; exit 1; }; \
       echo "[docker] FAT bake: engine present at ${MARKER}"; \

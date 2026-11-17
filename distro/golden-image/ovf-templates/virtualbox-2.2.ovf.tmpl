@@ -28,6 +28,11 @@
     <OperatingSystemSection ovf:id="96">
       <Info>The kind of installed guest operating system</Info>
       <Description>@VBOX_OSTYPE@</Description>
+      <!-- P1-6: vbox:OSType is what VirtualBox's importer actually keys the guest
+           type on (ovf:id 96 alone maps to the x86 Debian_64). Debian_arm64 selects
+           the ARM platform, whose recommended (and only) firmware is EFI, so the
+           arm64 OVA imports as a UEFI VM; Debian_64 keeps BIOS on amd64. -->
+      <vbox:OSType ovf:required="false">@VBOX_OSTYPE@</vbox:OSType>
     </OperatingSystemSection>
     <VirtualHardwareSection>
       <Info>Virtual hardware requirements for a virtual machine</Info>

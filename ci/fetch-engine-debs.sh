@@ -8,14 +8,24 @@
 # the plaintext methodology the thin model exists to protect).
 #
 # This is a BUILD-TIME helper only: the producer token is used solely on the CI host
-# and is never baked. If neither source yields the .debs, the script exits 0 with an
-# empty OUTDIR so build-golden.sh gracefully falls back to the THIN first-boot path.
+# and is never baked.
+#
+# FAIL-LOUD (P1-4): the script exits NON-ZERO (with a ::error:: annotation on the CI
+# log, not just a line in an in-image log file) when
+#   - an apt-pool HTTP request fails (curl 4xx/5xx on the index or a .deb),
+#   - a downloaded .deb's SHA256 does not match the apt index / HF SHA256SUMS,
+#   - VACTI_ENGINE_REF is set and the staged vacti-engine is a different version,
+#   - either .deb (engine or chromium) could not be obtained from any tier.
+# A silent THIN fallback shipped stale/empty images before. The THIN fallback is
+# now an explicit opt-in: VACTI_FETCH_ALLOW_THIN=1 restores the old exit-0 behaviour.
 #
 # Usage: ci/fetch-engine-debs.sh <arch> <outdir>
 # Env:
 #   VACTI_APT_PRODUCER_TOKEN   producer token for the private apt pool (apt-pool path)
 #   VACTI_APT_URL              apt base URL (required; e.g. https://apt.example.com)
-#   VACTI_ENGINE_REF           optional: pin the vacti-engine version; empty = latest
+#   VACTI_ENGINE_REF           optional: pin the vacti-engine version (exact; X.Y.Z matches
+#                              X.Y.Z and X.Y.Z+build / X.Y.Z-rev / X.Y.Z~pre); empty = latest
+#   VACTI_FETCH_ALLOW_THIN     1 = exit 0 even when the .debs are missing (explicit THIN opt-in)
 #   VACTI_ENGINE_REPO          GH fallback repo (default anggipradana/vacti-pentest-engine)
 #   GH_TOKEN                   token with read access to the engine repo (GH fallback)
 #   VACTI_CHROMIUM_HF_BASE     HF dataset resolve base for the chromium .deb backfill
@@ -27,10 +37,22 @@ ARCH="${1:?usage: fetch-engine-debs.sh <arch> <outdir>}"
 OUTDIR="${2:?usage: fetch-engine-debs.sh <arch> <outdir>}"
 TOKEN="${VACTI_APT_PRODUCER_TOKEN:-}"
 REF="${VACTI_ENGINE_REF:-}"
+REF="${REF#v}"
 REPO="${VACTI_ENGINE_REPO:-anggipradana/vacti-pentest-engine}"
+ALLOW_THIN="${VACTI_FETCH_ALLOW_THIN:-0}"
+HARD_ERR=0
 
 log()  { echo "[fetch-engine-debs] $*"; }
 warn() { echo "[fetch-engine-debs][warn] $*" >&2; }
+# A HARD error (HTTP failure, hash mismatch) is never downgraded to a THIN fallback.
+hard() { echo "::error::[fetch-engine-debs] $*" >&2; HARD_ERR=1; }
+
+# version_matches <version> <pin>: exact, or pin followed by a Debian separator
+# (+build, -revision, ~pre). The old substring match let pin 0.2.47 pick 0.2.471.
+version_matches() {
+  local v="$1" p="$2"
+  [[ -z "$p" || "$v" == "$p" || "$v" == "$p"+* || "$v" == "$p"-* || "$v" == "$p"~* ]]
+}
 
 mkdir -p "$OUTDIR"
 
@@ -43,50 +65,65 @@ have_chromium() { compgen -G "${OUTDIR}/vacti-engine-chromium_"*.deb >/dev/null 
 # --- 1. private apt pool (preferred) -----------------------------------------
 fetch_from_pool() {
   [[ -n "$TOKEN" ]] || { warn "VACTI_APT_PRODUCER_TOKEN unset; skipping apt-pool fetch"; return 1; }
-  local idx
+  local idx code
+  # The index read is the one place a 4xx/5xx is unambiguous: report it as HARD
+  # (wrong token / path / server error), never as a silent "not found".
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -u "vacti:${TOKEN}" "${base}/Packages" 2>/dev/null || true)"
   idx="$(curl -fsSL -u "vacti:${TOKEN}" "${base}/Packages" 2>/dev/null \
          || curl -fsSL -u "vacti:${TOKEN}" "${base}/Packages.gz" 2>/dev/null | gunzip -c 2>/dev/null \
          || true)"
-  [[ -n "$idx" ]] || { warn "could not read the apt index at ${base}/Packages[.gz]"; return 1; }
+  [[ -n "$idx" ]] || { hard "could not read the apt index at ${base}/Packages[.gz] (HTTP ${code:-none})"; return 1; }
 
-  # Emit "version<TAB>filename" for every stanza matching pkg + arch (or arch=all).
+  # Emit "version<TAB>filename<TAB>sha256" for every stanza matching pkg + arch (or all).
   stanzas() { # pkg
     awk -v pkg="$1" -v arch="$ARCH" '
       BEGIN { RS=""; FS="\n" }
       {
-        p=""; v=""; a=""; f=""
+        p=""; v=""; a=""; f=""; s=""
         for (i = 1; i <= NF; i++) {
           if      ($i ~ /^Package: /)      { p = substr($i, 10) }
           else if ($i ~ /^Version: /)      { v = substr($i, 10) }
           else if ($i ~ /^Architecture: /) { a = substr($i, 15) }
           else if ($i ~ /^Filename: /)     { f = substr($i, 11) }
+          else if ($i ~ /^SHA256: /)       { s = substr($i, 9) }
         }
-        if (p == pkg && (a == arch || a == "all") && f != "") { print v "\t" f }
+        if (p == pkg && (a == arch || a == "all") && f != "") { print v "\t" f "\t" s }
       }' <<<"$idx"
   }
 
-  # Choose the pinned version if $3 is set, else the greatest version (dpkg order).
+  # Choose the pinned version if set (exact match rules above), else the greatest (dpkg order).
   choose() { # pkg [pin]
-    local pkg="$1" pin="${2:-}" best_v="" best_f="" v f
-    while IFS=$'\t' read -r v f; do
+    local pkg="$1" pin="${2:-}" best_v="" best_f="" best_s="" v f s
+    while IFS=$'\t' read -r v f s; do
       [[ -n "$v" ]] || continue
-      if [[ -n "$pin" && "$v" != "$pin" && "$v" != "$pin"* && "$v" != *"$pin"* ]]; then
-        continue
-      fi
+      version_matches "$v" "$pin" || continue
       if [[ -z "$best_v" ]] || dpkg --compare-versions "$v" gt "$best_v"; then
-        best_v="$v"; best_f="$f"
+        best_v="$v"; best_f="$f"; best_s="$s"
       fi
     done < <(stanzas "$pkg")
     [[ -n "$best_f" ]] || return 1
-    printf '%s\t%s\n' "$best_v" "$best_f"
+    printf '%s\t%s\t%s\n' "$best_v" "$best_f" "$best_s"
   }
 
   pull() { # pkg [pin]
-    local sel ver fn
+    local sel ver fn want got out rest
     sel="$(choose "$1" "${2:-}")" || { warn "no $1 (${ARCH}) in the apt index${2:+ matching '$2'}"; return 1; }
-    ver="${sel%%$'\t'*}"; fn="${sel#*$'\t'}"
+    ver="${sel%%$'\t'*}"; rest="${sel#*$'\t'}"; fn="${rest%%$'\t'*}"; want="${rest#*$'\t'}"
+    out="${OUTDIR}/$(basename "$fn")"
     log "apt pool: $1 ${ver} -> ${fn}"
-    curl -fSL -u "vacti:${TOKEN}" -o "${OUTDIR}/$(basename "$fn")" "${base}/${fn}"
+    curl -fSL -u "vacti:${TOKEN}" -o "$out" "${base}/${fn}" \
+      || { rm -f "$out"; hard "apt pool download failed (HTTP error) for $1 ${ver}: ${base}/${fn}"; return 1; }
+    if [[ "$want" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      got="$(sha256sum "$out" | cut -d' ' -f1)"
+      if [[ "${got,,}" != "${want,,}" ]]; then
+        rm -f "$out"
+        hard "SHA256 mismatch for $1 ${ver} (index ${want}, got ${got}); .deb rejected"
+        return 1
+      fi
+      log "apt pool: $1 ${ver} sha256 verified"
+    else
+      warn "apt index carries no SHA256 for $1 ${ver}; relying on the signed Release at install time"
+    fi
   }
 
   # Pin the engine app to VACTI_ENGINE_REF when set; chromium is a build-number
@@ -100,7 +137,8 @@ fetch_from_github() {
   command -v gh >/dev/null 2>&1 || { warn "gh CLI not available; skipping GitHub fallback"; return 1; }
   [[ -n "${GH_TOKEN:-}" ]] || warn "GH_TOKEN unset; GitHub fallback may fail on a private repo"
   local tag=()
-  [[ -n "$REF" ]] && tag=("$REF")
+  # Engine release tags are v-prefixed (release-deb.yml runs on v* tags).
+  [[ -n "$REF" ]] && tag=("v${REF}")
   log "GitHub fallback: ${REPO} release ${REF:-<latest>} assets (*_${ARCH}.deb)"
   gh release download "${tag[@]}" --repo "$REPO" \
      --pattern "vacti-engine_*_${ARCH}.deb" \
@@ -160,7 +198,7 @@ fetch_chromium_from_hf() {
   got="$(sha256sum "${OUTDIR}/${name}.part" | cut -d' ' -f1)"
   if [[ "$got" != "$want" ]]; then
     rm -f "${OUTDIR}/${name}.part"
-    warn "HF ${name} SHA256 mismatch (SHA256SUMS ${want}, got ${got}); rejected"
+    hard "HF ${name} SHA256 mismatch (SHA256SUMS ${want}, got ${got}); rejected"
     return 1
   fi
   mv -f "${OUTDIR}/${name}.part" "${OUTDIR}/${name}"
@@ -181,11 +219,37 @@ elif have_engine && fetch_chromium_from_hf; then
   # Continuity fallback: pull chromium from the public HF dataset if the local build could not run
   # (e.g. an upstream archive is unreachable). Public anonymous HTTPS, SHA256SUMS-verified, no token.
   log "fetched engine (apt pool) + chromium (HF backfill)"
-else
-  warn "could not obtain both .debs (engine=$(have_engine && echo yes || echo no), chromium=$(have_chromium && echo yes || echo no)); build-golden.sh will fall back to THIN bootstrap"
 fi
 
 log "OUTDIR contents:"
 ls -l "$OUTDIR" 2>/dev/null | sed 's/^/[fetch-engine-debs]   /' || true
-# Always succeed: a missing .deb is a graceful THIN fallback, not a build failure.
+
+# --- verdict (fail-loud) -------------------------------------------------------
+# The staged engine must be the pinned version: a fallback tier (e.g. a GitHub
+# "latest" asset) must never silently swap the release the image is stamped with.
+if [[ -n "$REF" ]] && have_engine; then
+  for d in "${OUTDIR}"/vacti-engine_*.deb; do
+    v="$(dpkg-deb -f "$d" Version 2>/dev/null || true)"
+    if ! version_matches "$v" "$REF"; then
+      hard "staged $(basename "$d") is version '${v:-unknown}', not the pinned VACTI_ENGINE_REF=${REF}"
+      rm -f "$d"
+    fi
+  done
+fi
+missing=""
+have_engine   || missing="${missing} vacti-engine"
+have_chromium || missing="${missing} vacti-engine-chromium"
+if [[ "$HARD_ERR" -ne 0 ]]; then
+  echo "::error::[fetch-engine-debs] FATAL: hard fetch error(s) above (HTTP failure / SHA256 mismatch / version drift); refusing to continue" >&2
+  exit 1
+fi
+if [[ -n "$missing" ]]; then
+  if [[ "$ALLOW_THIN" == "1" ]]; then
+    warn "missing:${missing} (${ARCH}); VACTI_FETCH_ALLOW_THIN=1 so build-golden.sh falls back to THIN bootstrap"
+    exit 0
+  fi
+  echo "::error::[fetch-engine-debs] FATAL: could not obtain${missing} for ${ARCH}${REF:+ (pin ${REF})} from any tier; set VACTI_FETCH_ALLOW_THIN=1 to build a THIN image on purpose" >&2
+  exit 1
+fi
+log "OK: vacti-engine${REF:+ ${REF}} + vacti-engine-chromium staged for ${ARCH}"
 exit 0

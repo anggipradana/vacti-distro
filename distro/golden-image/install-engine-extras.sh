@@ -35,7 +35,7 @@ set -u
 INTERACTSH_VERSION="${VACTI_INTERACTSH_VERSION:-v1.2.4}"
 GAU_VERSION="${VACTI_GAU_VERSION:-v2.2.4}"
 CAIDO_VERSION="${VACTI_CAIDO_VERSION:-v0.57.0}"
-CAIDO_MCP_TAG="${VACTI_CAIDO_MCP_TAG:-v1.1.0}"
+CAIDO_MCP_TAG="${VACTI_CAIDO_MCP_TAG:-v4.3.0}"
 JWT_TOOL_REPO="https://github.com/ticarpi/jwt_tool.git"
 JWT_TOOL_DIR="/opt/jwt_tool"
 FOUNDRY_DIR="/opt/foundry"
@@ -176,13 +176,19 @@ else
   warn "curl not found; skipping Caido CLI"
 fi
 # caido-mcp-server (community): go build -> /usr/local/bin (so the Caido MCP wires).
-if [ -x /usr/local/bin/caido-mcp-server ]; then
-  log "caido-mcp-server already installed"
+# v2+ (the v4.3.0 pin) moved main into cmd/caido-mcp-server and needs go >= 1.25 while
+# Debian trixie ships 1.24 with GOTOOLCHAIN=local, so build the cmd/ package when present
+# and let GOTOOLCHAIN=auto fetch the go.mod toolchain (same layout probe as the engine's
+# bootstrap-apt.sh step_caido). A binary whose .version sentinel != the pin is rebuilt.
+if [ -x /usr/local/bin/caido-mcp-server ] \
+   && [ "$(cat /usr/local/bin/caido-mcp-server.version 2>/dev/null || true)" = "$CAIDO_MCP_TAG" ]; then
+  log "caido-mcp-server ${CAIDO_MCP_TAG} already installed"
 elif need go && need git; then
   log "caido-mcp-server: building ${CAIDO_MCP_TAG} -> /usr/local/bin"
   _src="$(mktemp -d)"
   if git clone --depth 1 --branch "$CAIDO_MCP_TAG" https://github.com/c0tton-fluff/caido-mcp-server.git "$_src" >/dev/null 2>&1 \
-     && ( cd "$_src" && GOFLAGS=-mod=mod go build -o /usr/local/bin/caido-mcp-server . >/dev/null 2>&1 ); then
+     && ( cd "$_src" || exit 1; _pkg=.; [ -d cmd/caido-mcp-server ] && _pkg=./cmd/caido-mcp-server
+          GOTOOLCHAIN=auto GOFLAGS=-mod=mod go build -o /usr/local/bin/caido-mcp-server "$_pkg" >/dev/null 2>&1 ); then
     chmod +x /usr/local/bin/caido-mcp-server 2>/dev/null || true
     printf '%s\n' "$CAIDO_MCP_TAG" > /usr/local/bin/caido-mcp-server.version 2>/dev/null || true
     log "caido-mcp-server: built (${CAIDO_MCP_TAG})"

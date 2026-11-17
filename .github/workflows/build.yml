@@ -3,25 +3,41 @@
 # This is where the HEAVY build runs: GitHub Actions (OFF-PROD), never on the
 # vacti control plane. It builds the golden disk once (GUI flavor), fans it out to
 # the two GUI OVA forms (VMware OVA + VirtualBox OVA), runs the MANDATORY no-secret
-# scan on every emitted artifact, smoke-boots each, and publishes them as PRIVATE
-# GitHub Release assets on this (private) repo. The universal multi-arch Docker
-# image is built in parallel (docker-publish-ghcr).
+# scan on every emitted artifact, smoke-boots each, publishes them as PRIVATE
+# GitHub Release assets on this (private) repo, then publishes the large images to
+# Hugging Face INLINE (publish-hf job -> publish-images-hf.yml via workflow_call).
+#
+# P0-3: the universal multi-arch Docker image is NOT built here any more. It lives in
+# its own workflow (build-docker.yml), so a Docker failure can never turn this OVA
+# run red, and this run's conclusion reflects the OVA pipeline only.
 #
 # Operator scope (TG 7503/7505): VMware + VirtualBox OVA, GUI only, amd64 (arm64
 # is the companion build-arm64.yml) + multi-arch Docker. The headless, cloud and
 # ISO forms were removed as out-of-scope ("hapus semua yg ga diperlukan").
 #
-# Triggered manually, or by a repository_dispatch from the engine release-deb
-# pipeline after a new vacti-engine .deb is published.
+# Triggered manually (watch-engine-apt self-dispatches it), or by a repository_dispatch
+# from the engine release-deb pipeline after a new vacti-engine .deb is published.
 name: build-images
+# The release is in the run title so build-arm64.yml's publish guard can find the
+# amd64 run for the same release (P1-3).
+run-name: build-images ${{ inputs.release || github.event.client_payload.release || '' }}
 
 on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Release version to stamp (e.g. 0.1.0)"
+        description: "Engine release X.Y.Z to stamp + bake (the 0.1.0 placeholder is refused unless allow_legacy_release=true)"
         required: true
         default: "0.1.0"
+      engine_ref:
+        description: "Optional explicit vacti-engine version to bake (default: = release)"
+        required: false
+        default: ""
+      allow_legacy_release:
+        description: "Override the guard that refuses release=0.1.0 / < 0.2.400 (never advances the HF headline)"
+        required: false
+        type: boolean
+        default: false
       full_arsenal:
         description: "Bake the full arsenal (1) or lean web+infra (0)"
         required: false
@@ -48,14 +64,8 @@ on:
           - "vbox-vmware-gui"   # golden(gui) -> vmware-ova(gui) + vbox-ova(gui) -> smoke -> publish (+ multi-arch Docker)
   repository_dispatch:
     types: [engine-deb-published]
-  # Tag push: builds ONLY the universal Docker image (the docker-publish-ghcr job
-  # gates itself on this event). The heavy VM/OVA matrix skips on a bare tag push
-  # via the event guard on the lint job, which the rest of the matrix depends on.
-  push:
-    tags:
-      - "images-v*"
-      - "engine-v*"
-      - "v*"
+  # (The former tag-push trigger only ever built the Docker image; it moved with the
+  # Docker job to build-docker.yml.)
 
 permissions:
   contents: write   # create/attach PRIVATE release assets on this private repo
@@ -82,10 +92,12 @@ env:
   # and gracefully falls back to THIN if the .debs are unavailable. Pass fat_ova=0 to
   # force a thin image. Docker stays THIN regardless (handled in its own job).
   VACTI_FAT_OVA: ${{ github.event.inputs.fat_ova || '1' }}
-  # Pinned engine ref the image builds against + the arsenal manifest the sync
-  # guard checks. Empty = floating latest (historical behavior). The engine-deb-
-  # published dispatch feeds the just-published version in via client_payload.release.
-  VACTI_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF || github.event.client_payload.release || '' }}
+  # Pinned engine ref the image builds against (P1-2). The authoritative value is
+  # resolved by ci/resolve-release.sh in the lint job (explicit engine_ref input >
+  # client_payload.release > inputs.release > vars.VACTI_ENGINE_REF) and threaded to
+  # the lint steps + golden job as steps.rel / needs.lint.outputs.engine_ref; this
+  # workflow-level value is only a fallback default.
+  VACTI_ENGINE_REF: ${{ github.event.inputs.engine_ref || github.event.client_payload.release || vars.VACTI_ENGINE_REF || '' }}
   # Form scoping. There is now a single build shape (vbox-vmware-gui): golden(gui)
   # -> vmware-ova(gui) + vbox-ova(gui). Both workflow_dispatch and the input-less
   # repository_dispatch (engine-deb-published) resolve to it.
@@ -105,12 +117,25 @@ env:
 jobs:
   # --- light gate: shellcheck + yaml/xml sanity (fast, no image build) --------
   lint:
-    # A bare tag push builds only the Docker image; skip the whole VM/ISO matrix
-    # (golden, fanout, iso, smoke, publish all chain off this job) on that event.
-    if: ${{ github.event_name != 'push' }}
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.rel.outputs.release }}
+      engine_ref: ${{ steps.rel.outputs.engine_ref }}
+      legacy: ${{ steps.rel.outputs.legacy }}
+      publish_latest: ${{ steps.rel.outputs.publish_latest }}
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve release + engine ref (refuses the 0.1.0 placeholder unless overridden)
+        id: rel
+        env:
+          IN_RELEASE: ${{ github.event.inputs.release }}
+          IN_ENGINE_REF: ${{ github.event.inputs.engine_ref }}
+          IN_ALLOW_LEGACY: ${{ github.event.inputs.allow_legacy_release }}
+          PAYLOAD_RELEASE: ${{ github.event.client_payload.release }}
+          VAR_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: ci/resolve-release.sh
       - name: Install linters
         run: sudo apt-get update && sudo apt-get install -y shellcheck python3-yaml libxml2-utils
       # AUTO-REVENDOR (auto-triggered rebuilds only). An engine-deb-published
@@ -124,8 +149,12 @@ jobs:
       # reference is reachable (apt creds absent) - the committed snapshot is kept.
       - name: Auto-revendor arsenal manifest (engine-deb-published only)
         if: ${{ github.event_name == 'repository_dispatch' }}
+        env:
+          VACTI_ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
         run: ci/revendor-arsenal.sh
       - name: Lint build sources
+        env:
+          VACTI_ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
         run: ci/lint.sh
 
   # --- the golden disk: built ONCE, shared by all VM/cloud forms --------------
@@ -140,6 +169,10 @@ jobs:
   golden:
     needs: lint
     runs-on: ubuntu-24.04
+    env:
+      # P1-2: the exact engine version fetch-engine-debs.sh stages and build-golden.sh
+      # verifies before baking (fail-closed on any other version).
+      VACTI_ENGINE_REF: ${{ needs.lint.outputs.engine_ref }}
     strategy:
       fail-fast: false
       matrix:
@@ -170,16 +203,16 @@ jobs:
         with:
           extra-packages: genisoimage xorriso
       - name: Fetch engine + chromium .debs for the FAT-OVA bake (amd64)
-        # FAT-OVA (VACTI_FAT_OVA=1): stage the vacti-engine app .deb + the
-        # vacti-engine-chromium .deb so build-golden.sh bakes them into the golden
-        # disk. Source is the PRIVATE apt pool (producer token, CI-host only, never
-        # baked), GitHub release as fallback. Soft: if the .debs can't be obtained
-        # the script leaves ENGINE_DEBS_DIR empty and build-golden.sh falls back to
-        # the THIN first-boot install path. Set VACTI_FAT_OVA=0 to force thin.
+        # FAT-OVA (VACTI_FAT_OVA=1): stage the vacti-engine app .deb (pinned to
+        # VACTI_ENGINE_REF) + the vacti-engine-chromium .deb so build-golden.sh bakes
+        # them into the golden disk. Source is the PRIVATE apt pool (producer token,
+        # CI-host only, never baked), GitHub release as fallback. FAIL-LOUD (P1-4): an
+        # HTTP error, SHA256 mismatch, version drift or a missing .deb fails this step;
+        # a THIN image is an explicit choice (fat_ova=0).
         if: ${{ env.VACTI_FAT_OVA != '0' }}
         env:
           VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
-          VACTI_ENGINE_REF: ${{ env.VACTI_ENGINE_REF }}
+          VACTI_ENGINE_REF: ${{ needs.lint.outputs.engine_ref }}
           GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           ENGINE_DEBS_DIR="${{ github.workspace }}/engine-debs"
@@ -443,174 +476,21 @@ jobs:
             release/*.ova
             release/MANIFEST.sha256
 
-  # --- universal multi-arch Docker image -> GHCR (TG 7182) --------------------
-  # The container form of the appliance: debian:trixie-slim + the pinned Kali apt
-  # source + the vacti-engine .deb from the private apt repo + the lean arsenal,
-  # reproducing the golden disk's capability in a container (ephemeral
-  # "docker run" pentest sessions, no VM/ISO). Published as a single multi-arch
-  # manifest list (linux/amd64 + linux/arm64) to GHCR. It is INDEPENDENT of the
-  # VM/ISO matrix above (it installs the engine from apt rather than guestmounting
-  # a disk), so it does not need the golden disk and runs in parallel.
-  #
-  # The "depend on the engine .deb being published" requirement is satisfied by
-  # the apt repo: an engine-deb-published dispatch fires only AFTER the upstream
-  # engine release-deb pipeline has published the .deb, and the pre-build resolve
-  # step below confirms the engine version is present for both arches before the
-  # buildx legs pull it. FAT_IMAGE=1 bakes the engine .deb at build time. The apt
-  # producer token stays a BuildKit SECRET MOUNT (never a build-arg/ENV/layer): it
-  # is used by the one FAT RUN and deleted within it, and the published image is
-  # streamed from the finalized builder root, so no credential rides a layer. The
-  # enrollment token is still supplied per-run at "docker run" for the enroll POST.
-  docker-publish-ghcr:
-    # workflow_dispatch and the engine-deb-published dispatch always build; a bare
-    # tag push builds ONLY this job (the VM/ISO matrix is skipped at lint).
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch' || github.event_name == 'push' }}
-    runs-on: ubuntu-latest
+  # --- Hugging Face publish, INLINE (P0-2) ----------------------------------------
+  # publish-images-hf.yml used to listen on `workflow_run`, which GitHub never fires
+  # for a run started by GITHUB_TOKEN - and watch-engine-apt dispatches every build
+  # with GITHUB_TOKEN, so HF stalled at 0.2.449. It is now a reusable workflow called
+  # right here, after the OVA release published, against THIS run's form-* artifacts.
+  # A legacy (allow_legacy_release) build never publishes to HF.
+  publish-hf:
+    needs: [lint, publish]
+    if: ${{ needs.lint.outputs.legacy != 'true' }}
     permissions:
+      actions: read
       contents: read
-      packages: write   # push to ghcr.io/anggipradana/vacti-distro
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve image version + tags
-        id: ver
-        run: |
-          V="${VACTI_ENGINE_REF}"
-          [ -z "$V" ] && V="${VACTI_RELEASE}"
-          [ -z "$V" ] && V="0.2.411"
-          V="${V#v}"
-          IMAGE="ghcr.io/anggipradana/vacti-distro"
-          {
-            echo "version=${V}"
-            echo "image=${IMAGE}"
-            echo "tags=${IMAGE}:latest,${IMAGE}:${V}"
-          } >> "$GITHUB_OUTPUT"
-          echo "[docker] image tags: ${IMAGE}:latest, ${IMAGE}:${V}"
-
-      - name: Pre-build resolve (confirm the engine version is in the apt repo for both arches)
-        # Soft gate: the flat vacti apt repo serves one index for all arches. This
-        # confirms the engine .deb is published (TG 7182 dependency) and reports
-        # which arches are resolvable before the buildx legs pull it. Non-blocking:
-        # the buildx apt install is the hard gate (it fails the build if the arch
-        # .deb is truly absent); this step just surfaces a clear early signal.
-        continue-on-error: true
-        env:
-          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
-          ENGINE_VER: ${{ steps.ver.outputs.version }}
-        run: |
-          base="${VACTI_APT_URL:?VACTI_APT_URL must be set}"
-          base="${base%/}/apt"
-          idx="$(curl -fsSL -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages" 2>/dev/null \
-                 || curl -fsSL -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages.gz" 2>/dev/null | gunzip -c 2>/dev/null \
-                 || true)"
-          if [ -z "$idx" ]; then
-            echo "[docker][warn] could not read the apt index (token/path); the buildx apt install remains the hard gate"
-            exit 0
-          fi
-          echo "[docker] vacti-engine entries matching ${ENGINE_VER} in the apt index:"
-          echo "$idx" | awk 'BEGIN{RS="";FS="\n"} /Package: vacti-engine/ {print}' \
-            | grep -E "Architecture:|Version:" | grep -E "${ENGINE_VER}|Architecture" || true
-          for a in amd64 arm64; do
-            if echo "$idx" | awk 'BEGIN{RS="";FS="\n"} /Package: vacti-engine/' | grep -q "Architecture: ${a}"; then
-              echo "[docker] OK: vacti-engine present for ${a}"
-            else
-              echo "[docker][warn] vacti-engine NOT found for ${a} in the apt index (buildx ${a} leg may fail)"
-            fi
-          done
-
-      - name: Stage vacti-engine-chromium .debs (amd64 + arm64) for the FAT bake
-        # The chromium package is NOT in the apt pool: the ~250MB .deb exceeds the
-        # upstream 100MB request-body cap, so the engine release-deb pipeline tolerates
-        # its 413 and ships it ONLY as a GitHub Release asset (the fleet self-heals the
-        # browser via ensure-browser.sh). The OVA golden bake already stages it with
-        # ci/fetch-engine-debs.sh (signed apt pool preferred, GitHub Release fallback);
-        # the multi-arch Docker FAT bake needs the same for BOTH arches, because one
-        # buildx invocation builds amd64 + arm64 and each leg dpkg-installs the arch-
-        # matched .deb locally (vacti-engine itself still installs from the signed apt
-        # pool inside the build). VACTI_ENGINE_REF is intentionally NOT pinned here:
-        # chromium is a build-number package independent of the engine release, and the
-        # Docker FAT bake installs vacti-engine as latest-in-pool, so the latest release
-        # asset is the right chromium.
-        env:
-          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
-          GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p engine-debs
-          ci/fetch-engine-debs.sh amd64 engine-debs
-          ci/fetch-engine-debs.sh arm64 engine-debs
-          for a in amd64 arm64; do
-            ls engine-debs/vacti-engine-chromium_*_"${a}".deb >/dev/null 2>&1 \
-              || { echo "::error::no vacti-engine-chromium .deb for ${a} (apt pool + GitHub release both missed); cannot bake the FAT image"; exit 1; }
-          done
-          echo "[docker] staged chromium .debs for the FAT bake:"
-          ls -1 engine-debs/vacti-engine-chromium_*.deb
-
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build + push multi-arch image (linux/amd64 + linux/arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: distro/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: false   # keep a clean 2-arch manifest list
-          tags: ${{ steps.ver.outputs.tags }}
-          build-args: |
-            FAT_IMAGE=1
-            VACTI_APT_URL=${{ env.VACTI_APT_URL }}
-            VACTI_ENGINE_PKG=vacti-engine
-            VACTI_ENGINE_REF=${{ steps.ver.outputs.version }}
-            VACTI_FULL_ARSENAL=${{ env.VACTI_FULL_ARSENAL }}
-            VACTI_CTF_ARSENAL=${{ env.VACTI_CTF_ARSENAL }}
-          build-contexts: |
-            engine_debs=engine-debs
-          secrets: |
-            vacti_apt_token=${{ secrets.VACTI_APT_READ_TOKEN }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: "Smoke test (FAT - engine baked, arsenal present, ZERO baked credential)"
-        # Non-blocking: pulls the just-pushed manifest (docker auto-selects the
-        # runner's amd64 child). FAT_IMAGE=1: the engine .deb is baked at build
-        # time, so the published image MUST contain the vacti-engine package and
-        # the /usr/lib/vacti-engine tree, alongside the arsenal. Critically it must
-        # ALSO contain ZERO build-time credentials: no apt auth.conf, no private
-        # apt source, no token in env, and no "password" string in docker history.
-        continue-on-error: true
-        env:
-          IMAGE: ${{ steps.ver.outputs.image }}
-          ENGINE_VER: ${{ steps.ver.outputs.version }}
-        run: |
-          docker pull "${IMAGE}:${ENGINE_VER}"
-          echo "[smoke] asserting the vacti-engine package IS baked (FAT)"
-          got="$(docker run --rm --entrypoint dpkg-query "${IMAGE}:${ENGINE_VER}" \
-                   -W -f='${Version}' vacti-engine 2>/dev/null || true)"
-          if [ -n "$got" ]; then echo "[smoke] OK: vacti-engine ${got} baked"; \
-            else echo "[smoke][warn] vacti-engine package MISSING (FAT bake regression)"; fi
-          echo "[smoke] asserting the engine marker /usr/lib/vacti-engine/dist/runner/cli.js is present"
-          docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
-            -c 'test -e /usr/lib/vacti-engine/dist/runner/cli.js' \
-            && echo "[smoke] OK: engine tree baked" || echo "[smoke][warn] engine marker absent (FAT bake regression)"
-          echo "[smoke] asserting the arsenal is present (e.g. nuclei/sqlmap/nmap)"
-          docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
-            -c 'command -v nuclei >/dev/null || command -v sqlmap >/dev/null || command -v nmap >/dev/null' \
-            && echo "[smoke] OK: arsenal present" || echo "[smoke][warn] arsenal missing (build regression)"
-          echo "[smoke] IP-exposure gate: assert NO build-time credential/source baked"
-          docker run --rm --entrypoint sh "${IMAGE}:${ENGINE_VER}" \
-            -c 'test ! -e /etc/apt/auth.conf.d/vacti-engine.conf && test ! -e /etc/apt/sources.list.d/vacti-engine.list' \
-            && echo "[smoke] OK: no apt credential/source file baked" || echo "[smoke][ERROR] apt credential/source LEAKED into image"
-          echo "[smoke] asserting no token-bearing env var is set on the image"
-          if docker image inspect "${IMAGE}:${ENGINE_VER}" --format '{{json .Config.Env}}' | grep -Eiq 'TOKEN|PASSWORD|SECRET'; then \
-            echo "[smoke][ERROR] a TOKEN/PASSWORD/SECRET env var is baked into the image"; \
-          else echo "[smoke] OK: no credential env var baked"; fi
-          echo "[smoke] asserting docker history has no 'password' in any layer command"
-          if docker history --no-trunc "${IMAGE}:${ENGINE_VER}" | grep -iq 'password'; then \
-            echo "[smoke][ERROR] docker history contains 'password' (credential leak into layer metadata)"; \
-          else echo "[smoke] OK: docker history clean (no password string)"; fi
+    uses: ./.github/workflows/publish-images-hf.yml
+    with:
+      run_id: ${{ format('{0}', github.run_id) }}
+      version: ${{ needs.lint.outputs.release }}
+      arch: amd64
+    secrets: inherit

@@ -1,0 +1,259 @@
+# vacti-distro universal multi-arch Docker image -> GHCR (TG 7182).
+#
+# The container form of the appliance: debian:trixie-slim + the pinned Kali apt
+# source + the vacti-engine .deb from the private apt repo + the arsenal, reproducing
+# the golden disk's capability in a container (ephemeral "docker run" pentest
+# sessions, no VM/ISO). Published as a single multi-arch manifest list (linux/amd64 +
+# linux/arm64) to ghcr.io/anggipradana/vacti-distro.
+#
+# P0-3: this used to be the docker-publish-ghcr job INSIDE build.yml, so a Docker
+# failure turned the amd64 OVA run red (0.2.461 / 0.2.463) even though every OVA job
+# was green, and that red conclusion is what gated HF publishing. It is now its own
+# workflow: the OVA pipeline's conclusion no longer depends on Docker, and Docker
+# failures are visible on their own.
+#
+# P1-2: the image bakes EXACTLY the resolved engine version (Dockerfile
+#   apt-get install vacti-engine=<VACTI_ENGINE_REF>), never newest-in-pool.
+# P1-5: build -> push ONLY a candidate tag (:rc-<ver>) -> BLOCKING smoke test of BOTH
+#   arch children by digest -> promote the tested digest to :<ver> (+ :latest) with
+#   `buildx imagetools create` (a manifest copy, no rebuild). A failed smoke never
+#   reaches :<ver> or :latest.
+# Item 10: ci/resolve-release.sh refuses the 0.1.0 placeholder / any pre-0.2.400
+#   release (the 2026-11-10 manual run overwrote :0.1.0); allow_legacy_release=true
+#   overrides on purpose, and even then :latest is never moved.
+#
+# Triggers: manual dispatch (watch-engine-apt self-dispatches it alongside the two OVA
+# builds), the engine-deb-published repository_dispatch, and a version tag push.
+name: build-docker
+run-name: build-docker ${{ inputs.release || github.event.client_payload.release || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Engine release X.Y.Z to bake + tag (the 0.1.0 placeholder is refused unless allow_legacy_release=true)"
+        required: true
+        default: "0.1.0"
+      engine_ref:
+        description: "Optional explicit vacti-engine version to bake (default: = release)"
+        required: false
+        default: ""
+      full_arsenal:
+        description: "Bake the full arsenal (1) or lean web+infra (0)"
+        required: false
+        default: "1"
+      ctf_arsenal:
+        description: "Also bake the CTF tool set (1) or not (0)"
+        required: false
+        default: "1"
+      allow_legacy_release:
+        description: "Override the guard that refuses release=0.1.0 / < 0.2.400 (pushes only :<ver>, never :latest)"
+        required: false
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [engine-deb-published]
+  push:
+    tags:
+      - "images-v*"
+      - "engine-v*"
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-docker-${{ github.event.inputs.release || github.event.client_payload.release || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '1' }}
+  VACTI_CTF_ARSENAL: ${{ github.event.inputs.ctf_arsenal || '1' }}
+  VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
+
+jobs:
+  docker-publish-ghcr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io/anggipradana/vacti-distro
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release + engine ref (refuses the 0.1.0 placeholder unless overridden)
+        id: rel
+        env:
+          IN_RELEASE: ${{ github.event.inputs.release }}
+          IN_ENGINE_REF: ${{ github.event.inputs.engine_ref }}
+          IN_ALLOW_LEGACY: ${{ github.event.inputs.allow_legacy_release }}
+          PAYLOAD_RELEASE: ${{ github.event.client_payload.release }}
+          VAR_ENGINE_REF: ${{ vars.VACTI_ENGINE_REF }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: ci/resolve-release.sh
+
+      - name: Resolve image version + tags
+        id: ver
+        env:
+          REL: ${{ steps.rel.outputs.release }}
+          ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
+        run: |
+          set -euo pipefail
+          # The image is tagged with the engine version it bakes.
+          V="${ENGINE_REF:-$REL}"
+          V="${V#v}"
+          IMAGE="ghcr.io/anggipradana/vacti-distro"
+          {
+            echo "version=${V}"
+            echo "image=${IMAGE}"
+            echo "candidate=${IMAGE}:rc-${V}"
+          } >> "$GITHUB_OUTPUT"
+          echo "[docker] candidate ${IMAGE}:rc-${V}; promotes to ${IMAGE}:${V} (+ :latest when not legacy) after the smoke"
+
+      - name: Pre-build resolve (the pinned engine version must be in the apt pool for both arches)
+        # HARD gate (was continue-on-error): with the engine pinned (P1-2) the Docker
+        # build cannot fall back to "newest", so a missing arch .deb is caught here in
+        # seconds instead of an hour into the buildx legs.
+        env:
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
+          ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
+        run: |
+          set -uo pipefail
+          base="${VACTI_APT_URL:?VACTI_APT_URL must be set}"
+          base="${base%/}/apt"
+          idx="$(curl -fsSL -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages" 2>/dev/null \
+                 || curl -fsSL -u "vacti:${VACTI_APT_PRODUCER_TOKEN}" "${base}/Packages.gz" 2>/dev/null | gunzip -c 2>/dev/null \
+                 || true)"
+          [ -n "$idx" ] || { echo "::error::could not read the apt index at ${base}/Packages[.gz] (token/path/HTTP)"; exit 1; }
+          if [ -z "${ENGINE_REF}" ]; then
+            echo "::warning::engine ref is floating (legacy override); skipping the per-arch pin check"
+            exit 0
+          fi
+          rc=0
+          for a in amd64 arm64; do
+            vers="$(printf '%s\n' "$idx" | awk -v arch="$a" 'BEGIN{RS="";FS="\n"} {p="";v="";x=""; for(i=1;i<=NF;i++){ if($i=="Package: vacti-engine")p=1; if($i ~ /^Version: /)v=substr($i,10); if($i ~ /^Architecture: /)x=substr($i,15)} if(p && x==arch) print v}')"
+            if printf '%s\n' "$vers" | grep -Eq "^${ENGINE_REF//./\\.}([+~-].*)?$"; then
+              echo "[docker] OK: vacti-engine ${ENGINE_REF} present for ${a}"
+            else
+              echo "::error::vacti-engine ${ENGINE_REF} is NOT in the apt pool for ${a} (newest there: $(printf '%s\n' "$vers" | sort -V | tail -1))"
+              rc=1
+            fi
+          done
+          exit "$rc"
+
+      - name: Stage vacti-engine-chromium .debs (amd64 + arm64) for the FAT bake
+        # The chromium package is NOT in the apt pool (the ~250MB .deb exceeds the
+        # upstream 100MB request-body cap), so it is staged here with
+        # ci/fetch-engine-debs.sh, exactly like the OVA bake, for BOTH arches (one
+        # buildx invocation builds both legs; each dpkg-installs its arch-matched
+        # chromium locally while vacti-engine itself comes from the signed apt pool).
+        # fetch-engine-debs.sh is fail-loud (P1-4) and also verifies the pinned engine.
+        env:
+          VACTI_APT_PRODUCER_TOKEN: ${{ secrets.VACTI_APT_READ_TOKEN }}
+          VACTI_ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
+          GH_TOKEN: ${{ secrets.VACTI_ENGINE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p engine-debs
+          ci/fetch-engine-debs.sh amd64 engine-debs
+          ci/fetch-engine-debs.sh arm64 engine-debs
+          for a in amd64 arm64; do
+            ls engine-debs/vacti-engine-chromium_*_"${a}".deb >/dev/null 2>&1 \
+              || { echo "::error::no vacti-engine-chromium .deb for ${a}; cannot bake the FAT image"; exit 1; }
+          done
+          # Only chromium is consumed from the build-context; vacti-engine installs
+          # from the signed pool inside the build. Drop the engine .debs so they never
+          # enter the build-context transfer.
+          rm -f engine-debs/vacti-engine_*.deb
+          echo "[docker] staged chromium .debs for the FAT bake:"
+          ls -1 engine-debs/vacti-engine-chromium_*.deb
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push CANDIDATE multi-arch image (linux/amd64 + linux/arm64) -> :rc-<ver>
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: distro/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false   # keep a clean 2-arch manifest list
+          tags: ${{ steps.ver.outputs.candidate }}
+          build-args: |
+            FAT_IMAGE=1
+            VACTI_APT_URL=${{ env.VACTI_APT_URL }}
+            VACTI_ENGINE_PKG=vacti-engine
+            VACTI_ENGINE_REF=${{ steps.rel.outputs.engine_ref }}
+            VACTI_FULL_ARSENAL=${{ env.VACTI_FULL_ARSENAL }}
+            VACTI_CTF_ARSENAL=${{ env.VACTI_CTF_ARSENAL }}
+          build-contexts: |
+            engine_debs=engine-debs
+          secrets: |
+            vacti_apt_token=${{ secrets.VACTI_APT_READ_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: "Smoke test BOTH arches (BLOCKING): engine pinned + baked, arsenal present, ZERO baked credential"
+        # P1-5: runs on the candidate DIGEST, BEFORE anything is promoted to :<ver> or
+        # :latest, and fails the job on any regression (no continue-on-error). arm64
+        # runs under the QEMU binfmt handler registered by setup-qemu-action.
+        env:
+          IMAGE: ${{ steps.ver.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
+        run: |
+          set -uo pipefail
+          [ -n "$DIGEST" ] || { echo "::error::build produced no digest"; exit 1; }
+          REF="${IMAGE}@${DIGEST}"
+          fail=0
+          bad() { echo "::error::[smoke][$1] $2"; fail=1; }
+          for a in amd64 arm64; do
+            P="linux/${a}"
+            echo "== [smoke] ${P} ${REF}"
+            docker pull --platform "$P" "$REF" >/dev/null || { bad "$a" "pull failed"; continue; }
+            got="$(docker run --rm --platform "$P" --entrypoint dpkg-query "$REF" -W -f='${Version}' vacti-engine 2>/dev/null || true)"
+            if [ -z "$got" ]; then bad "$a" "vacti-engine package MISSING (FAT bake regression)"
+            elif [ -n "$ENGINE_REF" ] && ! printf '%s' "$got" | grep -Eq "^${ENGINE_REF//./\\.}([+~-].*)?$"; then
+              bad "$a" "vacti-engine ${got} baked, expected pinned ${ENGINE_REF}"
+            else echo "[smoke][$a] OK: vacti-engine ${got} baked"; fi
+            docker run --rm --platform "$P" --entrypoint sh "$REF" -c 'test -e /usr/lib/vacti-engine/dist/runner/cli.js' \
+              && echo "[smoke][$a] OK: engine tree baked" || bad "$a" "engine marker /usr/lib/vacti-engine/dist/runner/cli.js absent"
+            docker run --rm --platform "$P" --entrypoint sh "$REF" \
+              -c 'command -v nuclei >/dev/null || command -v sqlmap >/dev/null || command -v nmap >/dev/null' \
+              && echo "[smoke][$a] OK: arsenal present" || bad "$a" "arsenal missing (none of nuclei/sqlmap/nmap)"
+            docker run --rm --platform "$P" --entrypoint sh "$REF" \
+              -c 'test ! -e /etc/apt/auth.conf.d/vacti-engine.conf && test ! -e /etc/apt/sources.list.d/vacti-engine.list' \
+              && echo "[smoke][$a] OK: no apt credential/source file baked" || bad "$a" "apt credential/source LEAKED into the image"
+            if docker run --rm --platform "$P" --entrypoint sh "$REF" -c 'env' | cut -d= -f1 | grep -Eiq 'TOKEN|PASSWORD|SECRET'; then
+              bad "$a" "a TOKEN/PASSWORD/SECRET env var is baked into the image"
+            else echo "[smoke][$a] OK: no credential env var baked"; fi
+            hist="$(docker history --no-trunc --platform "$P" "$REF" 2>/dev/null || docker history --no-trunc "$REF")"
+            if printf '%s' "$hist" | grep -iq 'password'; then
+              bad "$a" "docker history contains 'password' (credential leak into layer metadata)"
+            else echo "[smoke][$a] OK: docker history clean"; fi
+          done
+          [ "$fail" -eq 0 ] || { echo "::error::[smoke] FAILED - candidate NOT promoted to :<ver> / :latest"; exit 1; }
+          echo "[smoke] PASS on amd64 + arm64"
+
+      - name: Promote the smoke-tested digest -> :<ver> (+ :latest)
+        # Manifest copy of the exact digest the smoke tested (no rebuild). :latest
+        # moves only for a non-legacy release (item 10).
+        env:
+          IMAGE: ${{ steps.ver.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          V: ${{ steps.ver.outputs.version }}
+          PUBLISH_LATEST: ${{ steps.rel.outputs.publish_latest }}
+        run: |
+          set -euo pipefail
+          tags=(-t "${IMAGE}:${V}")
+          [ "$PUBLISH_LATEST" = "true" ] && tags+=(-t "${IMAGE}:latest")
+          docker buildx imagetools create "${tags[@]}" "${IMAGE}@${DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:${V}"
+          echo "[docker] promoted ${IMAGE}@${DIGEST} -> ${IMAGE}:${V}$([ "$PUBLISH_LATEST" = "true" ] && echo ' + :latest')"
