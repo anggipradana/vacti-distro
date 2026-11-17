@@ -95,7 +95,14 @@ while IFS=$'\t' read -r name dir exe url sha size; do
     log "${name}: using cached archive ${CACHE}/${sha}.zip"
   else
     log "${name}: downloading ${url}"
-    curl -fSL --retry 3 --retry-delay 5 --proto '=https' --tlsv1.2 -o "$zip" "$url" || die "${name}: download failed: ${url}" 5
+    # The 100-200MB arm64 archives on the Azure (cdn.playwright.dev) / GCS CDNs regularly drop the
+    # connection mid-transfer -> curl exits 18 (CURLE_PARTIAL_FILE). Plain --retry does NOT treat that
+    # as transient, so a single flaky TCP reset was fatal. --retry-all-errors retries it; -C - resumes
+    # from the partial bytes (Range) instead of re-pulling 187MB from scratch; omitting --retry-delay
+    # gives curl's exponential backoff (1,2,4,8... s). The SHA256 + size checks below still gate the
+    # result, so a Range-ignoring server that corrupts the resume fails closed, never baked.
+    curl -fSL -C - --retry 5 --retry-all-errors --retry-max-time 600 --proto '=https' --tlsv1.2 -o "$zip" "$url" \
+      || die "${name}: download failed after retries: ${url}" 5
   fi
   got_size="$(stat -c %s "$zip")"
   [ "$got_size" = "$size" ] || die "${name}: size mismatch (pin ${size}, got ${got_size}) for ${url}" 6

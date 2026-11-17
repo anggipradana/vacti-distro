@@ -193,8 +193,11 @@ fetch_chromium_from_hf() {
   want="$(awk -v n="$name" '$2 == n { print $1; exit }' <<<"$sums")"
   [[ "$want" =~ ^[0-9a-f]{64}$ ]] || { warn "HF SHA256SUMS has no entry for ${name}; refusing an unverifiable .deb"; return 1; }
   log "HF backfill: ${url} -> ${OUTDIR}"
-  curl -fSL "$url" -o "${OUTDIR}/${name}.part" 2>/dev/null \
-    || { rm -f "${OUTDIR}/${name}.part"; warn "HF pull failed for revision ${rev} (${ARCH}); is it published under chromium/?"; return 1; }
+  # Same transient-resilience as the local build tier: the HF LFS .deb is 100-285MB and the public CDN
+  # can drop mid-transfer (curl 18). --retry-all-errors + -C - retry and resume; the SHA256SUMS check
+  # below still rejects any corrupt/short result, so this never relaxes the fail-closed verification.
+  curl -fSL -C - --retry 5 --retry-all-errors --retry-max-time 600 --proto '=https' --tlsv1.2 "$url" -o "${OUTDIR}/${name}.part" 2>/dev/null \
+    || { rm -f "${OUTDIR}/${name}.part"; warn "HF pull failed for revision ${rev} (${ARCH}) after retries; is it published under chromium/?"; return 1; }
   got="$(sha256sum "${OUTDIR}/${name}.part" | cut -d' ' -f1)"
   if [[ "$got" != "$want" ]]; then
     rm -f "${OUTDIR}/${name}.part"
