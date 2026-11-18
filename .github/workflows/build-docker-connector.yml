@@ -132,12 +132,12 @@ jobs:
             # 1) The connector binary is the entrypoint and runs on this arch:
             #    with no identity + no VACTI_INSTALL_ID it must exit non-zero with
             #    the expected enrollment error (proves it is really the connector).
-            out="$(docker run --rm --platform "$P" "$REF" 2>&1)"; rc=$?
+            out="$(docker run --rm --platform "$P" "$REF" 2>&1)" && rc=0 || rc=$?
             if [ "$rc" -eq 0 ]; then bad "$a" "connector exited 0 with no identity (should refuse)"
             elif printf '%s' "$out" | grep -q "no stored identity"; then echo "[smoke][$a] OK: connector runs + refuses without an install id"
             else bad "$a" "connector ran but gave an unexpected message: ${out}"; fi
             # 2) The scan-side tunnel helper is baked and runs on this arch.
-            out="$(docker run --rm --platform "$P" --entrypoint /usr/local/bin/vacti-tunnel "$REF" 2>&1)"; rc=$?
+            out="$(docker run --rm --platform "$P" --entrypoint /usr/local/bin/vacti-tunnel "$REF" 2>&1)" && rc=0 || rc=$?
             if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "VACTI_TUNNEL_RELAY and VACTI_TUNNEL_TOKEN are required"; then
               echo "[smoke][$a] OK: tunnel helper baked + runs"
             else bad "$a" "tunnel helper missing or misbehaving (rc=${rc}): ${out}"; fi
