@@ -1,0 +1,35 @@
+# Connector image: the ONLY vacti component that runs inside a customer network.
+# Distroless + static binaries, nonroot, no shell: a customer with host access
+# finds nothing of vacti's to read - no prompts, tools, skills, model keys or
+# agent code. Its sole secrets are its enrollment token (state volume) and the
+# CP's grant public key.
+#
+# Build context is the connector/ module root (so COPY paths are module-relative).
+# Multi-arch via buildx: TARGETOS/TARGETARCH are set by the builder per platform.
+FROM golang:1.27 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG TARGETOS TARGETARCH
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/vacti-connector ./cmd/connector
+# The scan/CP-side SOCKS5 tunnel helper ships alongside the connector so the
+# same image can serve the via-connector execution path.
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/vacti-tunnel ./cmd/tunnel
+# Seed the identity dir WITH nonroot ownership. A fresh named volume
+# (-v name:/var/lib/connector, exactly what the install one-liner uses) is
+# initialised from the image's contents at that path; without this seed Docker
+# creates it root-owned and the nonroot connector cannot write state.json -
+# every first-time install would die at "cannot persist identity".
+RUN mkdir -p /out/state && touch /out/state/.keep && chown -R 65532:65532 /out/state
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/vacti-connector /usr/local/bin/vacti-connector
+COPY --from=build /out/vacti-tunnel /usr/local/bin/vacti-tunnel
+COPY --from=build --chown=65532:65532 /out/state/ /var/lib/connector/
+USER nonroot:nonroot
+# No EXPOSE on purpose: the connector never listens.
+ENTRYPOINT ["/usr/local/bin/vacti-connector"]

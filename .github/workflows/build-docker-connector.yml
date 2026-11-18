@@ -1,0 +1,170 @@
+# vacti CONNECTOR multi-arch Docker image -> GHCR.
+#
+# The distroless connector/tunnel trio (apps-disjoint from the FULL-engine
+# vacti-distro image built by build-docker.yml, which is UNCHANGED). This image
+# is the ONLY vacti component that runs inside a customer network: a single
+# static Go binary (+ the scan-side tunnel helper) on distroless/static, nonroot,
+# no shell, no prompts/tools/model keys. Published as a 2-arch manifest list
+# (linux/amd64 + linux/arm64) to ghcr.io/anggipradana/vacti-connector.
+#
+# A NEW repo name (vacti-connector), not a swap of vacti-distro: the two images
+# coexist so existing `docker run .../vacti-distro` full-engine users never break.
+#
+# Pattern (mirrors build-docker.yml): build -> push ONLY a candidate tag
+# (:rc-<ver>) -> BLOCKING smoke test of every built arch child by digest ->
+# promote the tested digest to :<ver> (+ :latest) with `buildx imagetools create`
+# (a manifest copy, no rebuild). A failed smoke never reaches :<ver> or :latest.
+#
+# Triggers: manual dispatch and the connector-build repository_dispatch (so a
+# release pipeline's "dispatch distro rebuild" step can fan this out too).
+name: build-docker-connector
+run-name: build-docker-connector ${{ inputs.version || github.event.client_payload.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Connector image version X.Y.Z to build + tag"
+        required: true
+      arch:
+        description: "amd64 | arm64 | both"
+        required: false
+        default: "both"
+      publish_latest:
+        description: "Also move :latest to this build after the smoke"
+        required: false
+        type: boolean
+        default: true
+  repository_dispatch:
+    types: [connector-build]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-docker-connector-${{ github.event.inputs.version || github.event.client_payload.version }}
+  cancel-in-progress: false
+
+jobs:
+  connector-publish-ghcr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io/anggipradana/vacti-connector
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version + platforms + tags
+        id: ver
+        env:
+          IN_VERSION: ${{ github.event.inputs.version }}
+          IN_ARCH: ${{ github.event.inputs.arch }}
+          IN_LATEST: ${{ github.event.inputs.publish_latest }}
+          PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
+          PAYLOAD_ARCH: ${{ github.event.client_payload.arch }}
+          PAYLOAD_LATEST: ${{ github.event.client_payload.publish_latest }}
+        run: |
+          set -euo pipefail
+          V="${IN_VERSION:-${PAYLOAD_VERSION:-}}"
+          V="${V#v}"
+          [ -n "$V" ] || { echo "::error::no version supplied (input.version / client_payload.version)"; exit 1; }
+          ARCH="${IN_ARCH:-${PAYLOAD_ARCH:-both}}"
+          case "$ARCH" in
+            amd64) PLATFORMS="linux/amd64"; ARCHES="amd64" ;;
+            arm64) PLATFORMS="linux/arm64"; ARCHES="arm64" ;;
+            both|"") PLATFORMS="linux/amd64,linux/arm64"; ARCHES="amd64 arm64" ;;
+            *) echo "::error::arch must be amd64|arm64|both (got '$ARCH')"; exit 1 ;;
+          esac
+          LATEST="${IN_LATEST:-${PAYLOAD_LATEST:-true}}"
+          IMAGE="ghcr.io/anggipradana/vacti-connector"
+          {
+            echo "version=${V}"
+            echo "image=${IMAGE}"
+            echo "candidate=${IMAGE}:rc-${V}"
+            echo "platforms=${PLATFORMS}"
+            echo "arches=${ARCHES}"
+            echo "publish_latest=${LATEST}"
+          } >> "$GITHUB_OUTPUT"
+          echo "[connector] candidate ${IMAGE}:rc-${V} on ${PLATFORMS}; promotes to ${IMAGE}:${V}$([ "$LATEST" = "true" ] && echo ' + :latest') after the smoke"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push CANDIDATE multi-arch image -> :rc-<ver>
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./connector
+          file: ./connector/deploy/Dockerfile.connector
+          platforms: ${{ steps.ver.outputs.platforms }}
+          push: true
+          provenance: false   # keep a clean manifest list
+          tags: ${{ steps.ver.outputs.candidate }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: "Smoke test every built arch (BLOCKING): binary runs, tunnel present, distroless nonroot, no baked secret"
+        # Runs on the candidate DIGEST, BEFORE anything is promoted to :<ver> or
+        # :latest, and fails the job on any regression. arm64 runs under the QEMU
+        # binfmt handler registered by setup-qemu-action. The connector is
+        # distroless (no shell), so assertions invoke the baked binaries directly.
+        env:
+          IMAGE: ${{ steps.ver.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCHES: ${{ steps.ver.outputs.arches }}
+        run: |
+          set -uo pipefail
+          [ -n "$DIGEST" ] || { echo "::error::build produced no digest"; exit 1; }
+          REF="${IMAGE}@${DIGEST}"
+          fail=0
+          bad() { echo "::error::[smoke][$1] $2"; fail=1; }
+          for a in $ARCHES; do
+            P="linux/${a}"
+            echo "== [smoke] ${P} ${REF}"
+            docker pull --platform "$P" "$REF" >/dev/null || { bad "$a" "pull failed"; continue; }
+            # 1) The connector binary is the entrypoint and runs on this arch:
+            #    with no identity + no VACTI_INSTALL_ID it must exit non-zero with
+            #    the expected enrollment error (proves it is really the connector).
+            out="$(docker run --rm --platform "$P" "$REF" 2>&1)"; rc=$?
+            if [ "$rc" -eq 0 ]; then bad "$a" "connector exited 0 with no identity (should refuse)"
+            elif printf '%s' "$out" | grep -q "no stored identity"; then echo "[smoke][$a] OK: connector runs + refuses without an install id"
+            else bad "$a" "connector ran but gave an unexpected message: ${out}"; fi
+            # 2) The scan-side tunnel helper is baked and runs on this arch.
+            out="$(docker run --rm --platform "$P" --entrypoint /usr/local/bin/vacti-tunnel "$REF" 2>&1)"; rc=$?
+            if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "VACTI_TUNNEL_RELAY and VACTI_TUNNEL_TOKEN are required"; then
+              echo "[smoke][$a] OK: tunnel helper baked + runs"
+            else bad "$a" "tunnel helper missing or misbehaving (rc=${rc}): ${out}"; fi
+            # 3) Distroless: there is no shell in the image.
+            if docker run --rm --platform "$P" --entrypoint /bin/sh "$REF" -c 'echo x' >/dev/null 2>&1; then
+              bad "$a" "a /bin/sh shell is present (image is not distroless)"
+            else echo "[smoke][$a] OK: no shell (distroless)"; fi
+            # 4) No TOKEN/PASSWORD/SECRET env var baked into the image config.
+            cfg="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$REF" 2>/dev/null || true)"
+            if printf '%s' "$cfg" | cut -d= -f1 | grep -Eiq 'TOKEN|PASSWORD|SECRET'; then
+              bad "$a" "a TOKEN/PASSWORD/SECRET env var is baked into the image"
+            else echo "[smoke][$a] OK: no credential env var baked"; fi
+          done
+          [ "$fail" -eq 0 ] || { echo "::error::[smoke] FAILED - candidate NOT promoted to :<ver> / :latest"; exit 1; }
+          echo "[smoke] PASS on: ${ARCHES}"
+
+      - name: Promote the smoke-tested digest -> :<ver> (+ :latest)
+        # Manifest copy of the exact digest the smoke tested (no rebuild).
+        env:
+          IMAGE: ${{ steps.ver.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          V: ${{ steps.ver.outputs.version }}
+          PUBLISH_LATEST: ${{ steps.ver.outputs.publish_latest }}
+        run: |
+          set -euo pipefail
+          tags=(-t "${IMAGE}:${V}")
+          [ "$PUBLISH_LATEST" = "true" ] && tags+=(-t "${IMAGE}:latest")
+          docker buildx imagetools create "${tags[@]}" "${IMAGE}@${DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:${V}"
+          echo "[connector] promoted ${IMAGE}@${DIGEST} -> ${IMAGE}:${V}$([ "$PUBLISH_LATEST" = "true" ] && echo ' + :latest')"

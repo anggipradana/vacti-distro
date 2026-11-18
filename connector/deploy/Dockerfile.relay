@@ -1,0 +1,24 @@
+# Relay: pairs scan-side tunnels with customer-network connectors. Dumb
+# forwarder - never interprets traffic, holds no vacti logic or credentials
+# beyond its two shared secrets (relay<->CP callback auth, session-JWT key).
+#
+# Server-side image, deployed in vacti's own cluster (NOT inside a customer
+# network and NOT shipped in the connector image). Built/published separately
+# from build-docker-connector.yml; kept here so the whole trio lives together.
+#
+# Build context is the connector/ module root (module-relative COPY paths).
+FROM golang:1.27 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG TARGETOS TARGETARCH
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/vacti-relay ./cmd/relay
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/vacti-relay /usr/local/bin/vacti-relay
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/vacti-relay"]
