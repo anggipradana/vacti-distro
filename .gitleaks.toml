@@ -1,0 +1,56 @@
+# gitleaks config for vacti public repos.
+# Extends the full upstream default ruleset (AWS / GitHub / GitLab / Hugging Face /
+# OpenAI / Anthropic / OpenRouter / Slack / generic private keys / DB DSNs, etc.)
+# and carves out ONLY the placeholders the secret audit (ae7f325403ee66dec)
+# verified are safe. Keep this allowlist narrow: a broad rule here MASKS real leaks.
+title = "vacti-public-secret-scan"
+
+[extend]
+useDefault = true
+
+# --- Custom rule: OpenRouter ----------------------------------------------------
+# The default ruleset (v8.30.1) has no OpenRouter rule, and this fleet uses
+# OpenRouter heavily (Jev). OpenRouter keys are `sk-or-v1-<64 hex>`.
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''sk-or-v1-[0-9a-fA-F]{64}'''
+keywords = ["sk-or-v1-"]
+
+# --- Verified-safe literal placeholders --------------------------------------
+# A finding is suppressed only when the matched line contains one of these exact
+# strings. regexTarget = "line" so the surrounding context must match, not just a
+# high-entropy fragment that happens to collide.
+[[allowlists]]
+description = "Audit-verified-safe placeholders and public identity values"
+regexTarget = "line"
+regexes = [
+  # AWS documentation example access key — not a live credential (AWS public docs)
+  '''AKIAIOSFODNN7EXAMPLE''',
+  # default local dev DB DSN shipped in compose/docs (user:pass = vacti:vacti)
+  '''postgres://vacti:vacti(?:[@:]|$)''',
+  # env-var substitution token — resolved at runtime, not a literal secret
+  '''\$\{POSTGRES_PASSWORD\}''',
+  # maintainer git-commit email — public by design
+  '''pra7dana@gmail\.com''',
+]
+
+# --- Public-by-design key material (allowlisted by exact path) ----------------
+# vacti-apt.gpg is the PUBLIC OpenPGP key used to verify the apt repo. Only this
+# exact path is allowlisted; private-key content rules still fire everywhere else,
+# including on any *.gpg / *.asc / *.pub committed under a different path.
+[[allowlists]]
+description = "Public apt-signing OpenPGP key (vacti-distro only; path is inert elsewhere)"
+paths = [
+  '''distro/branding/vacti-apt\.gpg''',
+]
+
+# --- OPTIONAL: self-test secret-scanner fixtures -----------------------------
+# The recon module ships deliberately-fake secrets as self-test fixtures. Those
+# live in the private engine repo, NOT these public repos, so no live stanza is
+# added here (an unused path rule that matched nothing would only invite drift).
+# If a public repo is ever found to carry such a fixture, add its EXACT file path
+# below — never a directory glob — e.g.:
+# [[allowlists]]
+# description = "recon secret-scanner self-test fixture (fake secrets by design)"
+# paths = ['''path/to/recon/testdata/fake-secrets\.txt''']

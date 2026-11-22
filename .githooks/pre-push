@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Opt-in local pre-push secret gate. NOT auto-enabled (operator machines vary).
+#
+# Enable it per clone with:
+#     git config core.hooksPath .githooks
+# Disable with:
+#     git config --unset core.hooksPath
+#
+# Requires gitleaks on PATH:
+#     https://github.com/gitleaks/gitleaks/releases   (install to /usr/local/bin)
+#
+# This scans the commits about to be pushed (local range) against .gitleaks.toml.
+# A finding blocks the push. Because GitHub serves leaked blobs by SHA forever
+# once pushed, catching it HERE — before the push — is the only reliable fix.
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "[pre-push] gitleaks not found on PATH; skipping secret scan." >&2
+  echo "[pre-push] install it to re-enable: https://github.com/gitleaks/gitleaks/releases" >&2
+  exit 0
+fi
+
+CONFIG_ARG=()
+if [ -f ".gitleaks.toml" ]; then
+  CONFIG_ARG=(--config .gitleaks.toml)
+fi
+
+status=0
+# stdin gives: <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+  if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+    # new branch on remote: scan full history reachable from the pushed tip
+    range="$local_sha"
+    logopts="--log-opts=$range"
+  else
+    range="${remote_sha}..${local_sha}"
+    logopts="--log-opts=$range"
+  fi
+  echo "[pre-push] gitleaks scanning $range ..." >&2
+  if ! gitleaks detect --source . "${CONFIG_ARG[@]}" --redact --exit-code 1 --no-banner "$logopts"; then
+    status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  echo "" >&2
+  echo "[pre-push] BLOCKED: gitleaks found a potential secret in the commits you are pushing." >&2
+  echo "[pre-push] Remove/rotate the secret and rewrite the offending commit before pushing." >&2
+  echo "[pre-push] To bypass intentionally (NOT recommended): git push --no-verify" >&2
+  exit 1
+fi
+
+echo "[pre-push] gitleaks: no secrets detected in pushed commits." >&2
+exit 0
