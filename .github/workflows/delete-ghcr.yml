@@ -1,0 +1,66 @@
+# Delete obsolete image tags from the GHCR container registry.
+#
+# WHY: post-0.1.0 scope makes OVA the primary distribution and docker the
+# connector-only form, so the per-release engine-in-docker tags on
+# ghcr.io/anggipradana/vacti-distro accumulate (~6 GB each). This prunes the
+# superseded ones, mirroring the delete-hf.yml pattern for the HF dataset.
+#
+# Manual-only (workflow_dispatch). Deletes ONLY the exact tags named in `tags`,
+# never a glob (unless allow_glob=true), never a protected keep-set tag, never a
+# tag on vacti-connector. Logs tag -> version_id -> digest/size BEFORE deleting.
+name: delete-ghcr
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Package name (vacti-distro only; vacti-connector is refused)"
+        required: false
+        default: "vacti-distro"
+      tags:
+        description: "Comma-separated exact tags to delete (e.g. 0.2.474,rc-0.2.474)"
+        required: true
+      allow_glob:
+        description: "Opt in to raw glob/substring matching (DANGEROUS). Leave false for exact-tag deletes."
+        required: false
+        type: boolean
+        default: false
+
+# Nothing in the repo is written. Delete authenticates with GHCR_DELETE_PAT
+# (classic PAT: read:packages + delete:packages), NOT the GITHUB_TOKEN, because
+# GITHUB_TOKEN cannot delete user-owned GHCR packages.
+permissions:
+  contents: read
+
+concurrency:
+  group: delete-ghcr-${{ github.event.inputs.image }}
+  cancel-in-progress: false
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Delete named GHCR tags
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_DELETE_PAT }}
+          IN_IMAGE: ${{ github.event.inputs.image }}
+          IN_TAGS: ${{ github.event.inputs.tags }}
+          ALLOW_GLOB: ${{ github.event.inputs.allow_glob }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "GHCR_DELETE_PAT secret is not set; cannot delete." >&2
+            echo "Add a classic PAT with read:packages + delete:packages in Settings > Secrets." >&2
+            exit 1
+          fi
+          # Input sanitation + exact deletes live in scripts/delete-ghcr.py so they
+          # are unit-testable. Raw substring matching only when allow_glob=true.
+          python scripts/delete-ghcr.py
