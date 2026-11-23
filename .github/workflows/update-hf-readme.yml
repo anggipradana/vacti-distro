@@ -1,0 +1,75 @@
+# Push the curated dataset README to Hugging Face, and NOTHING else.
+#
+# WHY A STANDALONE WORKFLOW: publish-images-hf.yml also writes README.md, but it
+# *auto-generates* the index from whatever OVA artifacts a build run produced
+# (the readme-render block + the arch-completeness rule). It cannot push a
+# hand-curated README (engine-vs-OVA note, connector section), and it requires a
+# run_id with form-* image artifacts. This workflow uploads ONLY the committed
+# README file - it never touches the OVA/SHA256SUMS objects.
+#
+# SECRET REQUIRED: HF_PUBLISH_TOKEN (the hf_... WRITE token for the dataset),
+# already present on this repo for publish-images-hf.yml.
+#
+# TRIGGER: manual only.
+#   gh workflow run update-hf-readme.yml
+#   gh workflow run update-hf-readme.yml -f readme_path=hf/README.md
+name: update-hf-readme
+
+on:
+  workflow_dispatch:
+    inputs:
+      readme_path:
+        description: "Path (in this repo) of the README to push to the dataset root as README.md"
+        required: false
+        default: "hf/README.md"
+
+# Least privilege: only read this repo's checkout. The HF upload authenticates
+# with HF_PUBLISH_TOKEN, not the GitHub token.
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize against the image publisher so a README push and an image publish
+  # never race on the same README.md object.
+  group: hf-readme-anggipradana-vacti-distro-images
+  cancel-in-progress: false
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install huggingface_hub CLI (minor-pinned, matches publish-images-hf)
+        run: pip install "huggingface_hub[cli]~=0.35.0"
+
+      - name: Push README to the dataset
+        env:
+          HF_TOKEN: ${{ secrets.HF_PUBLISH_TOKEN }}
+          README_PATH: ${{ github.event.inputs.readme_path }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "HF_PUBLISH_TOKEN secret is not set on this repo; cannot publish." >&2
+            echo "Add it in Settings > Secrets and variables > Actions (the hf_... write token)." >&2
+            exit 1
+          fi
+          README_PATH="${README_PATH:-hf/README.md}"
+          if [ ! -f "$README_PATH" ]; then
+            echo "README not found at '$README_PATH'" >&2
+            exit 1
+          fi
+          # Upload exactly one file -> dataset-root README.md. No other path is
+          # touched, so the OVA / SHA256SUMS objects are left intact.
+          huggingface-cli upload \
+            anggipradana/vacti-distro-images \
+            "$README_PATH" \
+            README.md \
+            --repo-type dataset \
+            --commit-message "docs: refresh dataset README (engine 0.2.495 apt; OVA headline v0.2.491; connector 0.1.4)"
