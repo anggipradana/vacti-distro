@@ -494,3 +494,30 @@ jobs:
       version: ${{ needs.lint.outputs.release }}
       arch: amd64
     secrets: inherit
+
+  # --- G3a: amd64 vacti-tunnel sidecar binary (belt-and-braces) --------------------
+  # The baked engine .deb already carries /usr/lib/vacti-engine/bin/vacti-tunnel, so the images get the
+  # sidecar for free. This independent job ALSO emits the amd64 binary as a run artifact via the shared
+  # connector helper (byte-for-byte the connector image's build), so this release's image pipeline has a
+  # standalone, version-keyed copy for staging/debugging. No `needs:`, so it never turns the OVA chain red.
+  tunnel-binary:
+    name: cross-build vacti-tunnel (amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: connector/go.mod
+      - name: Resolve connector version
+        id: ver
+        run: echo "version=$(tr -d '[:space:]' < connector/VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Cross-build vacti-tunnel (amd64) via the shared helper
+        run: bash connector/scripts/build-tunnel.sh amd64 "out/vacti-tunnel-amd64"
+      - name: Upload vacti-tunnel (amd64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vacti-tunnel-amd64-${{ steps.ver.outputs.version }}
+          path: out/vacti-tunnel-amd64
+          if-no-files-found: error

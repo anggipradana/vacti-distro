@@ -466,3 +466,30 @@ jobs:
       version: ${{ needs.lint.outputs.release }}
       arch: arm64
     secrets: inherit
+
+  # --- G3a: arm64 vacti-tunnel sidecar binary (belt-and-braces) --------------------
+  # Mirror of build.yml's tunnel-binary job for the arm64 image pipeline. The baked arm64 engine .deb already
+  # carries /usr/lib/vacti-engine/bin/vacti-tunnel; this independent job ALSO emits the arm64 binary as a run
+  # artifact via the shared connector helper (byte-for-byte the connector image's build). No `needs:`, so it
+  # never turns the OVA chain red.
+  tunnel-binary:
+    name: cross-build vacti-tunnel (arm64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: connector/go.mod
+      - name: Resolve connector version
+        id: ver
+        run: echo "version=$(tr -d '[:space:]' < connector/VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Cross-build vacti-tunnel (arm64) via the shared helper
+        run: bash connector/scripts/build-tunnel.sh arm64 "out/vacti-tunnel-arm64"
+      - name: Upload vacti-tunnel (arm64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vacti-tunnel-arm64-${{ steps.ver.outputs.version }}
+          path: out/vacti-tunnel-arm64
+          if-no-files-found: error

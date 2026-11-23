@@ -244,4 +244,26 @@ print("[arsenal-sync] CHECK C ok: chromium pin rev %s (Chrome %s) matches the en
 PY
 fi
 
+# --- CHECK D: engine tunnel pin == this repo's connector/VERSION (G3a 1:1 sync) ----
+# The engine .deb stages the vacti-tunnel sidecar built from THIS repo's connector module; the engine
+# records the pinned version in its manifest's vacti_tunnel.version. That version MUST equal connector/VERSION
+# here, or the engine is pinned to a connector release that diverges from the one this repo would build. An
+# engine too old to declare a vacti_tunnel block (pre-G3a) is a warning, not a failure; a diff is a hard FAIL.
+log "CHECK D: engine vacti_tunnel pin vs this repo's connector/VERSION"
+CONNECTOR_VERSION_FILE="${ROOT}/connector/VERSION"
+if [[ ! -f "$CONNECTOR_VERSION_FILE" ]]; then
+  warn "connector/VERSION missing (${CONNECTOR_VERSION_FILE}); CHECK D skipped"
+else
+  conn_ver="$(tr -d '[:space:]' < "$CONNECTOR_VERSION_FILE")"
+  eng_tunnel_ver="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("vacti_tunnel") or {}).get("version") or "")' "$ENGINE_MANIFEST")"
+  if [[ -z "$eng_tunnel_ver" ]]; then
+    warn "engine manifest declares no vacti_tunnel block at this ref (pre-G3a engine); CHECK D skipped"
+  elif [[ "$eng_tunnel_ver" != "$conn_ver" ]]; then
+    fail "vacti-tunnel pin DIVERGES: engine manifest vacti_tunnel.version=${eng_tunnel_ver} vs this repo connector/VERSION=${conn_ver}.
+  fix: bump connector/VERSION and the engine's packaging/connector-pin.env + packaging/arsenal.env (VACTI_TUNNEL_VERSION) together."
+  else
+    log "CHECK D ok: engine vacti_tunnel pin ${eng_tunnel_ver} matches connector/VERSION"
+  fi
+fi
+
 log "PASS: distro arsenal is in sync with the engine manifest"

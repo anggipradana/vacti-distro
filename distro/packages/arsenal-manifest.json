@@ -324,6 +324,14 @@
       "arch": null
     }
   ],
+  "vacti_tunnel": {
+    "name": "vacti-tunnel",
+    "version": "0.1.4",
+    "install_path": "bin/vacti-tunnel",
+    "source_repo": "anggipradana/vacti-distro",
+    "source_module": "connector/cmd/tunnel",
+    "connector_ref": "6fc33b1d7eae875138086ed8da1a87542e327bc3"
+  },
   "assets": {
     "frida": {
       "version": "17.24.3",

@@ -168,3 +168,41 @@ jobs:
           docker buildx imagetools create "${tags[@]}" "${IMAGE}@${DIGEST}"
           docker buildx imagetools inspect "${IMAGE}:${V}"
           echo "[connector] promoted ${IMAGE}@${DIGEST} -> ${IMAGE}:${V}$([ "$PUBLISH_LATEST" = "true" ] && echo ' + :latest')"
+
+  # --- standalone vacti-tunnel binaries (G3a) ----------------------------------------
+  # The engine .deb stages the scan-side vacti-tunnel sidecar at /usr/lib/vacti-engine/bin/vacti-tunnel.
+  # The ENGINE release CI builds its own copy from the pinned connector ref (with the SAME shared helper, so
+  # no flag drift), but this job also emits the per-arch binaries as a reproducible, version-keyed artifact
+  # straight from THIS repo's connector module: a single authoritative source of the exact binary the
+  # connector image bakes, for the image pipeline + manual staging/debugging. Independent of the image job.
+  tunnel-binaries:
+    name: cross-build standalone vacti-tunnel binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Read the exact Go version from the connector module (keeps the toolchain pinned to go.mod).
+          go-version-file: connector/go.mod
+      - name: Resolve connector version
+        id: ver
+        run: echo "version=$(tr -d '[:space:]' < connector/VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Cross-build vacti-tunnel (amd64 + arm64) via the shared helper
+        run: |
+          set -euo pipefail
+          for a in amd64 arm64; do
+            bash connector/scripts/build-tunnel.sh "$a" "out/vacti-tunnel-${a}"
+          done
+          ( cd out && sha256sum vacti-tunnel-* > SHA256SUMS )
+          cat out/SHA256SUMS
+      - name: Upload vacti-tunnel binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: vacti-tunnel-${{ steps.ver.outputs.version }}
+          path: |
+            out/vacti-tunnel-amd64
+            out/vacti-tunnel-arm64
+            out/SHA256SUMS
+          if-no-files-found: error
