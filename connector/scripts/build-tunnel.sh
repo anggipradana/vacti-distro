@@ -41,11 +41,16 @@ VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 [ -n "$VERSION" ] || { echo "build-tunnel: empty connector VERSION" >&2; exit 1; }
 
 install -d "$(dirname "$OUT")"
+# Resolve OUT to an absolute path BEFORE `cd $MOD_ROOT`, otherwise `go build -o $OUT`
+# inside the subshell writes relative to connector/ (silent miss), then the chmod in
+# the caller CWD fails with "No such file or directory". Three consecutive docker
+# build-images runs failed on exactly this (0.2.493/498/500, 2026-11-23).
+OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 
-echo "build-tunnel: compiling vacti-tunnel ${VERSION} for linux/${ARCH} -> ${OUT}" >&2
+echo "build-tunnel: compiling vacti-tunnel ${VERSION} for linux/${ARCH} -> ${OUT_ABS}" >&2
 ( cd "$MOD_ROOT" \
   && CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath \
        -ldflags "-s -w -X main.version=${VERSION}" \
-       -o "$OUT" ./cmd/tunnel )
-chmod 0755 "$OUT"
-echo "build-tunnel: OK $(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT") (version ${VERSION})" >&2
+       -o "$OUT_ABS" ./cmd/tunnel )
+chmod 0755 "$OUT_ABS"
+echo "build-tunnel: OK ${OUT_ABS} (version ${VERSION})" >&2
