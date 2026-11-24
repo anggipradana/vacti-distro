@@ -507,8 +507,10 @@ headscale_autojoin() {
     return 0
   fi
   log "headscale: joining tailnet via enroll preauth key (login-server=${server}, hostname=${ENGINE_ID}, key not logged)"
-  if tailscale up --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false >>/tmp/tailscale-up.log 2>&1 \
-     || sudo -n tailscale up --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false >>/tmp/tailscale-up.log 2>&1; then
+  # Group so the redirect is owned by the invoking shell, not sudo (shellcheck SC2024):
+  # the subshell owns /tmp/tailscale-up.log fd and both attempts' output flows into it.
+  if { tailscale up --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false \
+       || sudo -n tailscale up --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false; } >>/tmp/tailscale-up.log 2>&1; then
     log "headscale: tailscale up succeeded; the engine should appear in 'headscale nodes list'"
   else
     log "headscale: tailscale up failed (see /tmp/tailscale-up.log); engine continues over public HTTPS, runtime heal will retry"
