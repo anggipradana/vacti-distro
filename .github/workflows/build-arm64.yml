@@ -102,6 +102,14 @@ env:
   OUT_DIR: out
 
 jobs:
+  # --- pre-publish naming/secret guard ----------------------------------------
+  # Scans the release-note corpus for client/engagement names, plaintext secrets
+  # and internal paths BEFORE the ARM64 assets are appended to the release. The
+  # `publish` job gates on `needs.guard.result == 'success'` (see its `if:`), so a
+  # red guard blocks the publish. Serves naming-discipline + client-scrub.
+  guard:
+    uses: ./.github/workflows/forbidden-pattern-guard.yml
+
   # --- light gate: shellcheck + yaml/xml sanity (arch-agnostic) ----------------
   lint:
     runs-on: ubuntu-latest
@@ -324,8 +332,11 @@ jobs:
     # fanout is listed so its result is visible in the needs context; smoke is
     # continue-on-error (non-blocking), so publish runs whenever the build stages
     # produced artifacts and never waits on a green smoke.
-    needs: [fanout, smoke]
-    if: ${{ always() && needs.fanout.result == 'success' }}
+    needs: [fanout, smoke, guard]
+    # always() keeps publish running when smoke (continue-on-error) is skipped/red,
+    # but the guard gate is explicit: a red forbidden-pattern guard MUST block the
+    # publish, so require needs.guard.result == 'success' alongside fanout.
+    if: ${{ always() && needs.fanout.result == 'success' && needs.guard.result == 'success' }}
     # Native arm64 runner: the "Final no-secret scan gate" step runs
     # ci/no-secret-scan.sh, which uses libguestfs guestmount. guestmount cannot
     # mount an aarch64 guest on an x86_64 host (no cross-arch KVM; TCG not wired),

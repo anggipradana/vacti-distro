@@ -40,6 +40,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the forbidden-pattern guard can scan the commit range
+
+      # Pre-publish naming/secret guard (Option-B inline): the README being pushed
+      # to the HF dataset root IS a release-note surface, so scan it (via
+      # FORBIDDEN_RELEASE_BODY) plus the commit range + arsenal manifest before the
+      # push. Serves naming-discipline + client-scrub.
+      - name: Forbidden-pattern guard (pre-publish README push)
+        env:
+          FORBIDDEN_MANIFEST: distro/packages/arsenal-manifest.json
+          FORBIDDEN_RELEASE_BODY: ${{ github.event.inputs.readme_path || 'hf/README.md' }}
+        run: |
+          set -euo pipefail
+          chmod +x .ci/check-forbidden.sh
+          .ci/check-forbidden.sh
 
       - name: Set up Python
         uses: actions/setup-python@v5

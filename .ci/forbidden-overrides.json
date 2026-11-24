@@ -1,0 +1,5 @@
+{
+  "schema": "vacti-forbidden-overrides/v1",
+  "note": "Operator-curated waivers. Entry only takes effect when (a) committed here AND (b) commit range or PR body carries matching [allow-forbidden: SHA] footer. sha256 MUST equal sha256(justification); guard rejects on mismatch. Two-key design keeps overrides operator-only. Empty at seed time: the vacti-distro release-note corpus (commit-range images-v0.2.492..HEAD, arsenal-manifest, release bodies) carries no forbidden token, so no grandfathering waiver is needed.",
+  "overrides": []
+}

@@ -1,0 +1,57 @@
+# .ci/forbidden-patterns.txt
+#
+# Pre-publish forbidden-pattern registry for release-note content.
+# Enforced by .ci/check-forbidden.sh (wired into the forbidden-pattern-guard
+# workflow, which runs BEFORE any tag/release/publish step).
+#
+# One POSIX-ERE (grep -E) pattern per line. Blank lines and lines starting with
+# '#' are ignored. A leading "(?i)" token (anywhere at the start of the line)
+# makes that single pattern case-insensitive; the script strips the token and
+# applies grep -i for that line only.
+#
+# A legitimate match can be waived per-run via .ci/forbidden-overrides.json plus a
+# "[allow-forbidden: <sha256>]" footer in the commit range or PR body. See that
+# file and the script header for the override contract.
+#
+# Scope of what gets scanned (the "release-note corpus"): CHANGELOG unreleased +
+# top section, commit-range messages since the last tag, the GitHub Release body,
+# packaging/arsenal-manifest.json, and a rendered release-drafter output if present.
+#
+# ---------------------------------------------------------------------------
+# 1. Client / engagement / audit-source name tokens
+#    (serves naming-discipline-engine). Canonical list; operator curates it over
+#    time. Class-level names only in the engine repo - never a real instansi,
+#    vendor, product, or audit-source citation.
+# ---------------------------------------------------------------------------
+(?i)\bITSA\b
+(?i)\bBSSN\b
+(?i)TLP:\s*RED
+(?i)\bNIP\b
+# Add curated client/instansi/vendor/product tokens below this line, one per line,
+# as \b<token>\b. Keep them specific enough not to collide with generic English.
+# (left intentionally sparse at seed time; grows as the operator confirms tokens)
+
+# ---------------------------------------------------------------------------
+# 2. Plain-text secrets
+# ---------------------------------------------------------------------------
+sk-[A-Za-z0-9]{20,}
+Bearer [A-Za-z0-9._-]{30,}
+AKIA[0-9A-Z]{16}
+(?i)password\s*[=:]\s*[^[:space:]]{6,}
+AIzaSy[A-Za-z0-9_-]{20,}
+-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----
+xox[baprs]-[A-Za-z0-9-]{10,}
+gh[pousr]_[A-Za-z0-9]{36,}
+
+# ---------------------------------------------------------------------------
+# 3. Internal / host filesystem paths
+# ---------------------------------------------------------------------------
+/home/vacti/
+/root/
+
+# ---------------------------------------------------------------------------
+# 4. IP addresses (OPTIONAL - opt-in). Disabled by default because release notes
+#    legitimately cite CVE/CIDR examples. Enable by uncommenting; pair with
+#    overrides for any intentional example IPs.
+# ---------------------------------------------------------------------------
+# \b(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}\b

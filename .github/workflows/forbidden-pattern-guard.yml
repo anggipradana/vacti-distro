@@ -1,0 +1,86 @@
+# Forbidden-pattern publish guard.
+#
+#   Runs .ci/check-forbidden.sh over the RELEASE-NOTE CORPUS (CHANGELOG section,
+#   commit-range messages, GH release body, the arsenal manifest, and a rendered
+#   release-drafter body if present) and HARD-FAILS on any unwaived match of
+#   .ci/forbidden-patterns.txt (client/engagement names, plaintext secrets,
+#   internal paths). Serves naming-discipline + client-scrub.
+#
+#   This is distinct from secret-scan.yml (gitleaks/trufflehog over git HISTORY):
+#   this guard protects the human-written release surface those tools do not model.
+#
+#   Three ways it runs:
+#     pull_request        -> blocks the PR (required check) before anything merges.
+#     workflow_call       -> the publishing workflows (build.yml, build-arm64.yml,
+#                            release-skin-deb.yml) call it as a BEFORE-publish gate:
+#                            `needs: guard`.
+#     workflow_dispatch   -> on-demand.
+#
+#   vacti-distro note: the arsenal manifest lives at
+#   distro/packages/arsenal-manifest.json (not the script's packaging/ default), so
+#   this workflow points FORBIDDEN_MANIFEST at it. The script itself is byte-verbatim
+#   with the engine copy; only this env override differs.
+#
+# All third-party actions are pinned to a 40-hex commit SHA (supply-chain hardening).
+name: forbidden-pattern-guard
+
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      git_range:
+        description: 'Commit range to scan (e.g. images-v0.2.492..HEAD). Empty => last tag..HEAD.'
+        required: false
+        type: string
+        default: ''
+      release_body:
+        description: 'Literal GH release body text to scan (optional).'
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forbidden-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: forbidden-pattern guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history for commit-range scan)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Run forbidden-pattern guard
+        env:
+          # On pull_request the PR body can carry an [allow-forbidden: <sha256>] footer.
+          FORBIDDEN_PR_BODY: ${{ github.event.pull_request.body }}
+          FORBIDDEN_GIT_RANGE: ${{ inputs.git_range }}
+          # vacti-distro keeps its arsenal manifest under distro/packages/.
+          FORBIDDEN_MANIFEST: distro/packages/arsenal-manifest.json
+        run: |
+          set -euo pipefail
+          chmod +x .ci/check-forbidden.sh
+
+          # When called by a publishing workflow with a literal release body, write it
+          # to a file so the guard scans it too.
+          body='${{ inputs.release_body }}'
+          if [ -n "$body" ]; then
+            printf '%s' "$body" > "${RUNNER_TEMP:-/tmp}/release-body.txt"
+            export FORBIDDEN_RELEASE_BODY="${RUNNER_TEMP:-/tmp}/release-body.txt"
+          fi
+
+          # If release-drafter is configured, render its body and scan that too.
+          if [ -f .github/release-drafter.yml ]; then
+            echo "release-drafter config present - its rendered body should be passed via"
+            echo "FORBIDDEN_DRAFTER_RENDER by the publishing workflow; config file itself is static."
+          fi
+
+          .ci/check-forbidden.sh

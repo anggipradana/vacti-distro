@@ -84,6 +84,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the forbidden-pattern guard can scan the commit range
+
+      # Pre-publish naming/secret guard (Option-B inline): scans the release-note
+      # corpus (commit-range + arsenal manifest + any release body) before the HF
+      # push. The HF dataset card is a release-note surface too. Serves
+      # naming-discipline + client-scrub.
+      - name: Forbidden-pattern guard (pre-publish)
+        env:
+          FORBIDDEN_MANIFEST: distro/packages/arsenal-manifest.json
+        run: |
+          set -euo pipefail
+          chmod +x .ci/check-forbidden.sh
+          .ci/check-forbidden.sh
 
       - name: Set up Python
         uses: actions/setup-python@v5

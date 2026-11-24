@@ -33,6 +33,13 @@ permissions:
   contents: read
 
 jobs:
+  # --- pre-publish naming/secret guard ----------------------------------------
+  # Scans the release-note corpus before the appliance-skin .deb is pushed to the
+  # vacti apt repo. `publish` has `needs: [build-and-smoke, guard]`, so a red guard
+  # blocks the apt publish. Serves naming-discipline + client-scrub.
+  guard:
+    uses: ./.github/workflows/forbidden-pattern-guard.yml
+
   lint-gate:
     runs-on: ubuntu-latest
     steps:
@@ -90,7 +97,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build-and-smoke
+    needs: [build-and-smoke, guard]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

@@ -115,6 +115,14 @@ env:
   OUT_DIR: out
 
 jobs:
+  # --- pre-publish naming/secret guard ----------------------------------------
+  # Scans the release-note corpus (commit-range, arsenal manifest, CHANGELOG/release
+  # body) for client/engagement names, plaintext secrets and internal paths BEFORE
+  # the GitHub Release is created. `publish` has `needs: [smoke, guard]`, so a red
+  # guard blocks the release. Serves naming-discipline + client-scrub.
+  guard:
+    uses: ./.github/workflows/forbidden-pattern-guard.yml
+
   # --- light gate: shellcheck + yaml/xml sanity (fast, no image build) --------
   lint:
     runs-on: ubuntu-latest
@@ -384,7 +392,7 @@ jobs:
   # --- publish as PRIVATE GitHub Release assets on this private repo -----------
   # PINNED ubuntu-24.04 (same libguestfs reason as golden above).
   publish:
-    needs: smoke
+    needs: [smoke, guard]
     runs-on: ubuntu-24.04
     # The final no-secret scan below guestmounts each published qcow2/ova, so this
     # job needs the SAME libguestfs runner environment as golden/fanout: the
