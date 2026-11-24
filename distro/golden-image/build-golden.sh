@@ -129,6 +129,13 @@ cp -a "${ENROLL_DIR}/install/vacti-engine-install.service"  "${STAGE}/etc/system
 # first-boot swapfile sizing (RAM known only at deploy) + its oneshot unit
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot"         "${STAGE}/usr/local/sbin/vacti-swap-firstboot"
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot.service" "${STAGE}/etc/systemd/system/vacti-swap-firstboot.service"
+# every-boot slice-cap reconcile: rewrites /etc/systemd/{user,system}/vacti.slice.d/
+# 10-memmax.conf to match the CURRENT guest /proc/meminfo BEFORE vacti-engine
+# starts, so an OVA whose postinst ran in the build chroot (wrong MemTotal) never
+# brings the engine up under a stale cap on the very first boot. Fail-open; the
+# engine runtime reconcile (reconcileSliceCap) remains the backstop.
+cp -a "${ENROLL_DIR}/firstboot/vacti-slice-cap"              "${STAGE}/usr/local/sbin/vacti-slice-cap"
+cp -a "${ENROLL_DIR}/firstboot/vacti-slice-cap.service"      "${STAGE}/etc/systemd/system/vacti-slice-cap.service"
 # PRE-LOGIN activation: the GUI kiosk (network->enroll before the DM) + its
 # fail-open fallback + the narrow polkit rule, and the headless netsetup TUI.
 # Staged UNCONDITIONALLY (harmless on the headless golden: vacti-activate's
@@ -261,6 +268,7 @@ if [[ "${VACTI_CTF_ARSENAL}" =~ ^(1|true|yes|on)$ ]]; then
   # the engine manifest (VACTI_GEN_MODE=ctf-apt) and hands the path to the installer.
 fi
 chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/vacti-swap-firstboot" \
+           "${STAGE}/usr/local/sbin/vacti-slice-cap" \
            "${STAGE}/usr/local/sbin/vacti-activate" "${STAGE}/usr/local/sbin/vacti-netsetup" \
            "${STAGE}/usr/local/sbin/vacti-netpanel" \
            "${STAGE}/usr/local/sbin/vacti-engine-install" \
@@ -654,6 +662,13 @@ fi
 # branding
 echo "[prov] branding"
 /opt/vacti-build/apply-branding.sh || echo "[prov][warn] branding partial"
+
+# every-boot slice-cap reconcile. Writes /etc/systemd/{user,system}/vacti.slice.d/
+# 10-memmax.conf against the LIVE /proc/meminfo before vacti-engine.service, so a
+# FAT-OVA whose postinst ran in the build chroot (saw the BUILD host's MemTotal,
+# not the guest's) never brings the engine up under a stale cap on the first
+# boot. Fail-open + skipped in containers (ConditionVirtualization=!container).
+systemctl enable vacti-slice-cap.service 2>/dev/null || true
 
 # enable the first-boot enroll unit (no token baked; it fails loudly without one)
 systemctl enable vacti-firstboot.service 2>/dev/null || true

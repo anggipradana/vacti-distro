@@ -10,7 +10,7 @@ rc=0
 echo "== shellcheck =="
 if command -v shellcheck >/dev/null 2>&1; then
   # all our shell scripts (scripts, hooks, auto/config, make-seed, etc.)
-  mapfile -t SH < <(find distro ci -type f \( -name '*.sh' -o -name 'vacti-firstboot' -o -name 'vacti-swap-firstboot' -o -name 'vacti-activate' -o -name 'vacti-netpanel' -o -name 'vacti-netsetup' -o -name 'vacti-engine-install' \) ; \
+  mapfile -t SH < <(find distro ci -type f \( -name '*.sh' -o -name 'vacti-firstboot' -o -name 'vacti-swap-firstboot' -o -name 'vacti-slice-cap' -o -name 'vacti-activate' -o -name 'vacti-netpanel' -o -name 'vacti-netsetup' -o -name 'vacti-engine-install' \) ; \
                     echo distro/live-build-config/auto/config)
   # hooks are /bin/sh; include them too
   mapfile -t HOOKS < <(find distro/live-build-config/config/hooks -type f -name '*.chroot' 2>/dev/null || true)
@@ -58,6 +58,17 @@ if [[ -x distro/test/enroll-boot-contracts.sh ]]; then
   bash distro/test/enroll-boot-contracts.sh || rc=1
 else
   echo "  distro/test/enroll-boot-contracts.sh missing; skipping"
+fi
+
+echo "== slice-cap firstboot contract + docker systemd-less path =="
+# Static + behavioural: asserts the vacti-slice-cap firstboot reconcile is wired
+# into the OVA + ISO build and produces the same drop-in body as the engine's
+# postinst formula; also asserts the docker-entrypoint documents the systemd-less
+# path (null-slice fail-open in boxUnderPressure). No systemd, no network.
+if [[ -x distro/test/slice-cap-contract.sh ]]; then
+  bash distro/test/slice-cap-contract.sh || rc=1
+else
+  echo "  distro/test/slice-cap-contract.sh missing; skipping"
 fi
 
 echo "== docker entrypoint provisioning (fake CP) =="

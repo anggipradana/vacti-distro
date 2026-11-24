@@ -9,6 +9,21 @@
 # runner as PID 1 (it traps SIGTERM for a graceful finish-the-tick shutdown, and
 # it starts Caido and Xvfb itself per engagement, so this entrypoint does not).
 #
+# SLICE-CAP NOTE (parity with the OVA's vacti-slice-cap.service). A container has
+# no systemd manager at all, so the vacti.slice cgroup the OVA's engine-user
+# manager uses to cap transient agent/browser/tool scopes does not exist here. The
+# OVA's firstboot reconcile (/usr/local/sbin/vacti-slice-cap) is therefore NOT
+# invoked in the container path by design, and the service unit it drives is
+# gated by ConditionVirtualization=!container so it would be inert even if
+# systemd were present. The engine's memory guard (src/runner/agent-memory.ts)
+# handles the null-slice case cleanly: readSliceMemory returns null when no
+# vacti.slice cgroup files exist and boxUnderPressure then falls back to the
+# MemAvailable floor (plus PSI from /proc/pressure/memory when the host kernel
+# exposes it). The container's own cgroup MemoryMax (the docker --memory flag) is
+# respected by the kernel independently of this slice cap, so the engine remains
+# memory-guarded in the container-limited case; the distro-side regression test
+# distro/test/slice-cap-contract.sh asserts this contract.
+#
 # Accepted per-run inputs (supplied at "docker run", never on the image):
 #   VACTI_URL or VACTI_CP_URL or CP_URL   control-plane base URL (required)
 #   VACTI_TOKEN                       a producer token (skips the enroll exchange)

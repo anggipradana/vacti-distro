@@ -92,6 +92,22 @@ install -D -m0755 "${DISTRO_DIR}/enroll/firstboot/vacti-firstboot" \
 install -D -m0644 "${HERE}/config/includes.chroot/etc/systemd/system/vacti-firstrun.service" \
   "${HERE}/config/includes.chroot/etc/systemd/system/vacti-firstrun.service" 2>/dev/null || true
 
+# 3-bis. every-boot slice-cap reconcile: rewrites /etc/systemd/{user,system}/
+#        vacti.slice.d/10-memmax.conf to match the LIVE /proc/meminfo BEFORE
+#        vacti-engine starts, so an installed ISO whose engine .deb postinst ran
+#        in the build chroot (saw the BUILD host's MemTotal, not the installed
+#        guest's) never brings the engine up under a stale cap on the very first
+#        boot. Enabled via a wants/ symlink in the squashfs (parity with the
+#        headless-NM path above), so the enablement survives into the installed
+#        system. ConditionVirtualization=!container keeps it inert in a container.
+install -D -m0755 "${DISTRO_DIR}/enroll/firstboot/vacti-slice-cap" \
+  "${HERE}/config/includes.chroot/usr/local/sbin/vacti-slice-cap"
+install -D -m0644 "${DISTRO_DIR}/enroll/firstboot/vacti-slice-cap.service" \
+  "${HERE}/config/includes.chroot/etc/systemd/system/vacti-slice-cap.service"
+install -d "${HERE}/config/includes.chroot/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/vacti-slice-cap.service \
+  "${HERE}/config/includes.chroot/etc/systemd/system/multi-user.target.wants/vacti-slice-cap.service"
+
 # 3a. THIN-BOOTSTRAP first-boot engine install: the unit + wrapper that pull the
 #     vacti-engine .deb from the private apt repo at first boot (no engine baked).
 #     Pulled by Wants=/After= from vacti-firstrun.service, so present-on-disk is

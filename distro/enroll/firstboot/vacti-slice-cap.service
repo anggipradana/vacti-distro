@@ -1,0 +1,42 @@
+# vacti-slice-cap.service - oneshot, every boot. Reconciles the vacti.slice
+# MemoryMax drop-in to the CURRENT guest /proc/meminfo BEFORE the engine starts,
+# so the first engine boot never comes up under a stale cap baked into the OVA at
+# virt-customize time (the postinst in the build chroot sees the BUILD host's
+# MemTotal, not the eventual guest's).
+#
+# NOT a replacement for the engine-runtime self-heal (reconcileSliceCap in
+# src/runner/agent-memory.ts, S11). That runs on every engine process start and
+# repairs post-first-boot RAM resizes; this unit just gets the FIRST engine start
+# right so the engine is never braked against the wrong cap on the very first
+# heartbeat window.
+#
+# Docker containers have no systemd slice to cap and no systemd manager to
+# daemon-reload: ConditionVirtualization=!container skips the unit there. The
+# container entrypoint (distro/golden-image/docker-entrypoint.sh) documents the
+# systemd-less path and relies on the engine's null-slice fail-open in
+# boxUnderPressure (MemAvailable floor) instead.
+[Unit]
+Description=vacti slice-cap reconcile (match vacti.slice MemoryMax to live MemTotal)
+Documentation=https://vacti.example/docs/appliance
+After=local-fs.target
+# Before the enroll chain + the engine, so an enrolled image's engine.service
+# always sees the live-MemTotal cap on its very first start.
+Before=vacti-engine.service
+Before=vacti-firstboot.service
+Before=vacti-firstrun.service
+# A container has no systemd user manager slice and no useful /sys/fs/cgroup/
+# vacti.slice to cap; skip there (the container entrypoint handles it by design).
+ConditionVirtualization=!container
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/vacti-slice-cap
+# Fail-open at the script level; this is a belt on the service too so a non-zero
+# return (should not happen) never cascades into the enroll/engine chain.
+SuccessExitStatus=0 1
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

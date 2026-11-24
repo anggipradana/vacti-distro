@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/vacti-slice-cap - reconcile the vacti.slice MemoryMax drop-in to
+# the CURRENT guest /proc/meminfo on every boot (before vacti-engine.service).
+#
+# WHY THIS EXISTS. The engine .deb postinst writes
+# /etc/systemd/{user,system}/vacti.slice.d/10-memmax.conf from the then-current
+# /proc/meminfo MemTotal. For a FAT-OVA that postinst runs INSIDE the virt-customize
+# chroot, against the BUILD HOST's MemTotal - not the eventual guest's - so the
+# baked drop-in is already wrong for the shipped guest. The same applies when the
+# operator later resizes a running guest's RAM (vacti-arp was provisioned at ~3GB,
+# resized to ~10GB, and stayed capped at the install-time 1207M).
+#
+# The engine runtime carries a self-heal of its own (reconcileSliceCap in
+# src/runner/agent-memory.ts, S11): on every process start it re-reads MemTotal and
+# rewrites the drop-ins if the live cap has drifted > 15%. This firstboot-time
+# writer DOES NOT replace that; it closes the window on the FIRST engine start, so
+# the engine never comes up under a stale cap and the engine's own reconcile is a
+# no-op (drift check passes) on the normal path.
+#
+# FORMULA - 1:1 with packaging/maintainer/postinst:589-605:
+#   SLICE_RESERVE_MB   = ${VACTI_SLICE_RESERVE_MB:-1800}
+#   SLICE_MAX_MB       = max(2048, min(MemTotal_MB, MemTotal_MB - SLICE_RESERVE_MB))
+#   SLICE_HIGH_MB      = SLICE_MAX_MB * 95 / 100
+# Writes to BOTH managers (user + system) because the engine's transient scopes run
+# under the engine-user manager with a sudo/system fallback, and a same-named slice
+# is a DISTINCT cgroup in each.
+#
+# FAIL-OPEN at every step: an unreadable /proc/meminfo, a non-writable /etc, no
+# systemctl - none of them exit non-zero. The script logs one line and returns 0
+# so the firstboot sequence is never blocked (operator-visible kiosk tails the
+# shared progress log via vacti-firstboot).
+#
+# Runs ONCE per boot via vacti-slice-cap.service (Type=oneshot,
+# Before=vacti-engine.service, ConditionVirtualization=!container). Idempotent on
+# the hot path: when the on-disk drop-in already carries the expected cap the
+# script skips the write and the daemon-reload.
+
+set -u
+
+SLICE_RESERVE_MB_DEFAULT=1800
+SLICE_CAP_FLOOR_MB=2048
+SLICE_HIGH_PCT=95
+SYSTEMD_USER_DIR="/etc/systemd/user/vacti.slice.d"
+SYSTEMD_SYSTEM_DIR="/etc/systemd/system/vacti.slice.d"
+DROPIN_NAME="10-memmax.conf"
+
+# Allow the test harness to point writes at a sandbox root.
+#   VACTI_SLICE_CAP_ROOT=/tmp/sandbox  -> writes to /tmp/sandbox/etc/systemd/...
+: "${VACTI_SLICE_CAP_ROOT:=}"
+# And to point MemTotal reads at a fake file.
+: "${VACTI_SLICE_CAP_MEMINFO:=/proc/meminfo}"
+# Suppress the real daemon-reload during tests.
+: "${VACTI_SLICE_CAP_NO_RELOAD:=0}"
+
+log() { echo "[vacti-slice-cap] $*"; }
+
+reserve_from_env() {
+  local raw="${VACTI_SLICE_RESERVE_MB:-}"
+  if [ -z "$raw" ]; then
+    printf '%s' "$SLICE_RESERVE_MB_DEFAULT"
+    return 0
+  fi
+  case "$raw" in
+    ''|*[!0-9]*)
+      printf '%s' "$SLICE_RESERVE_MB_DEFAULT"
+      ;;
+    *)
+      printf '%s' "$raw"
+      ;;
+  esac
+}
+
+# Compute SLICE_MAX_MB from MemTotal (kB) + reserve (MB). Echoes the value, or
+# nothing if MemTotal is unparseable. The caller treats an empty echo as fail-open.
+compute_cap_mb() {
+  local memtotal_kb reserve_mb memtotal_mb cap_mb
+  memtotal_kb="$1"
+  reserve_mb="$2"
+  case "$memtotal_kb" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$memtotal_kb" -gt 0 ] || return 0
+  memtotal_mb=$(( memtotal_kb / 1024 ))
+  [ "$memtotal_mb" -gt 0 ] || return 0
+  cap_mb=$(( memtotal_mb - reserve_mb ))
+  [ "$cap_mb" -lt "$SLICE_CAP_FLOOR_MB" ] && cap_mb="$SLICE_CAP_FLOOR_MB"
+  [ "$cap_mb" -gt "$memtotal_mb" ] && cap_mb="$memtotal_mb"
+  printf '%s' "$cap_mb"
+}
+
+render_dropin() {
+  local cap_mb high_mb
+  cap_mb="$1"
+  high_mb=$(( cap_mb * SLICE_HIGH_PCT / 100 ))
+  printf '[Slice]\nMemoryMax=%sM\nMemoryHigh=%sM\n' "$cap_mb" "$high_mb"
+}
+
+write_dropin() {
+  local dir body path
+  dir="$1"
+  body="$2"
+  path="${dir}/${DROPIN_NAME}"
+  # Idempotent: skip the write when the on-disk body already matches.
+  if [ -f "$path" ]; then
+    local cur
+    cur="$(cat "$path" 2>/dev/null || true)"
+    if [ "$cur" = "$body" ]; then
+      log "already current: ${path}"
+      return 1
+    fi
+  fi
+  if ! install -d -m 0755 "$dir" 2>/dev/null; then
+    log "WARN: cannot create ${dir} (fail-open)"
+    return 2
+  fi
+  # Write to a sibling tmp + atomic rename so a reboot mid-write never leaves a
+  # half-written drop-in that confuses systemd daemon-reload.
+  local tmp="${path}.vacti-tmp.$$"
+  if ! printf '%s' "$body" > "$tmp" 2>/dev/null; then
+    log "WARN: cannot write ${tmp} (fail-open)"
+    rm -f "$tmp" 2>/dev/null || true
+    return 2
+  fi
+  chmod 0644 "$tmp" 2>/dev/null || true
+  if ! mv -f "$tmp" "$path" 2>/dev/null; then
+    log "WARN: cannot rename ${tmp} -> ${path} (fail-open)"
+    rm -f "$tmp" 2>/dev/null || true
+    return 2
+  fi
+  log "wrote ${path}"
+  return 0
+}
+
+main() {
+  local reserve_mb memtotal_kb cap_mb body user_dir system_dir wrote=0
+  reserve_mb="$(reserve_from_env)"
+  memtotal_kb="$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' "$VACTI_SLICE_CAP_MEMINFO" 2>/dev/null | head -1)"
+  if [ -z "$memtotal_kb" ]; then
+    log "SKIP: MemTotal unreadable from ${VACTI_SLICE_CAP_MEMINFO} (fail-open; engine runtime reconcile is the backstop)"
+    return 0
+  fi
+  cap_mb="$(compute_cap_mb "$memtotal_kb" "$reserve_mb")"
+  if [ -z "$cap_mb" ]; then
+    log "SKIP: cannot compute cap from MemTotal=${memtotal_kb}kB reserve=${reserve_mb}MB (fail-open)"
+    return 0
+  fi
+  body="$(render_dropin "$cap_mb")"
+  user_dir="${VACTI_SLICE_CAP_ROOT}${SYSTEMD_USER_DIR}"
+  system_dir="${VACTI_SLICE_CAP_ROOT}${SYSTEMD_SYSTEM_DIR}"
+
+  write_dropin "$user_dir" "$body"
+  case $? in 0) wrote=$(( wrote + 1 )) ;; esac
+  write_dropin "$system_dir" "$body"
+  case $? in 0) wrote=$(( wrote + 1 )) ;; esac
+
+  if [ "$wrote" -eq 0 ]; then
+    log "slice cap reconciled (no change; cap=${cap_mb}M MemTotal=$(( memtotal_kb / 1024 ))M reserve=${reserve_mb}M)"
+    return 0
+  fi
+
+  log "slice cap reconciled: MemoryMax=${cap_mb}M MemoryHigh=$(( cap_mb * SLICE_HIGH_PCT / 100 ))M (MemTotal $(( memtotal_kb / 1024 ))M reserve ${reserve_mb}M, wrote ${wrote}/2 drop-ins)"
+
+  # daemon-reload only when a write landed. Best-effort: systemctl may be absent
+  # in a test sandbox or the manager may not be running yet; swallow either case.
+  if [ "$VACTI_SLICE_CAP_NO_RELOAD" = "1" ] || [ -n "$VACTI_SLICE_CAP_ROOT" ]; then
+    return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || log "WARN: systemctl daemon-reload failed (fail-open; engine runtime reconcile will retry)"
+  else
+    log "WARN: systemctl not found; skipping daemon-reload (fail-open)"
+  fi
+  return 0
+}
+
+main "$@"
+exit 0
