@@ -202,6 +202,34 @@ RUN set -eu; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
+# --- tailscale client + daemon (no auth key baked) + sudo ----------------------
+# Container twin of build-golden.sh's "guest tools + tailscale client" step (OVA:
+# `curl tailscale.com/install.sh | sh` + `systemctl enable tailscaled`). Installed from
+# the official Tailscale Debian apt repo with its signing key fingerprint-pinned, which
+# is the reproducible form of that install script. The entrypoint starts tailscaled
+# (no systemd here); the ENGINE joins the tailnet at runtime with the auth key it gets
+# from engine-config, via `sudo -n tailscale up` - hence sudo (root needs no sudoers
+# rule). No key, no private host: public source only. Best-effort, like the OVA step:
+# a failure warns and the image ships without tailscale (the entrypoint then logs
+# "tailscaled: not installed" and the engine runs without a tailnet).
+# hadolint ignore=DL3008,DL3015
+RUN set -eu; \
+    TS_FPR=2596A99EAAB33821893C0A79458CA832957F5868; \
+    TS_KR=/usr/share/keyrings/tailscale-archive-keyring.gpg; \
+    if curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg -o "${TS_KR}" \
+       && gpg --show-keys --with-colons "${TS_KR}" 2>/dev/null | awk -F: '$1=="fpr"{print $10}' | grep -qx "${TS_FPR}"; then \
+      chmod 0644 "${TS_KR}"; \
+      printf 'deb [signed-by=%s] https://pkgs.tailscale.com/stable/debian trixie main\n' "${TS_KR}" \
+        > /etc/apt/sources.list.d/tailscale.list; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends tailscale sudo \
+        || echo "[docker][warn] tailscale/sudo install failed; image ships without a tailnet daemon"; \
+    else \
+      rm -f "${TS_KR}"; \
+      echo "[docker][warn] tailscale apt key fetch/fingerprint check failed; image ships without a tailnet daemon"; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
+
 # --- FAT image: bake vacti-engine + vacti-engine-chromium at BUILD time --------
 # Operator-requested FAT variant (parallel to the OVA fat golden image). When
 # FAT_IMAGE=1 (the default) the engine .deb is installed HERE, at image build

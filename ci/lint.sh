@@ -60,6 +60,16 @@ else
   echo "  distro/test/enroll-boot-contracts.sh missing; skipping"
 fi
 
+echo "== docker entrypoint provisioning (fake CP) =="
+# Runtime contract: the container first boot persists + exports the X-Engine-Auth
+# secret, starts tailscaled (no key), and keeps enroll failure fatal. Unprivileged,
+# no network (sandboxed fakes); self-skips when jq/node are absent.
+if [[ -x distro/test/docker-entrypoint-provision.sh ]]; then
+  bash distro/test/docker-entrypoint-provision.sh || rc=1
+else
+  echo "  distro/test/docker-entrypoint-provision.sh missing; skipping"
+fi
+
 echo "== kiosk-stuck runtime test (container) =="
 # EMPIRICAL runtime proof that --no-block (vacti-activate:403) + the content-aware
 # engine_env_ready poll (vacti-activate:410) actually change observable behaviour:

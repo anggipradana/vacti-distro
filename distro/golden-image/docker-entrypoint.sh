@@ -25,10 +25,27 @@
 #                                     exchanged for the full enrollment token
 #                                     before anything else runs.
 #   ENGINE_ID                         optional engine id (defaults to the hostname)
+#   VACTI_ENGINE_SHARED_SECRET        optional; normally taken from the enroll response
+#                                     (the X-Engine-Auth edge secret). Pass it with -e
+#                                     only on the direct VACTI_TOKEN path (no enroll).
+#   VACTI_TAILSCALED=0                skip starting tailscaled (default: start it)
 #
-# The scoped tokens obtained from an exchange are persisted to the state volume
-# ($ENGINE_STATE_DIR/engine.env, 0600) so a restart inside the TTL comes back
-# authenticated without re-minting.
+# Recommended for kernel-mode tailscale: --cap-add=NET_ADMIN --device=/dev/net/tun.
+# Without them tailscaled runs in userspace-networking mode (no extra caps).
+#
+# The scoped tokens obtained from an exchange (and the edge shared secret) are
+# persisted to the state volume ($ENGINE_STATE_DIR/engine.env, 0600) so a restart
+# inside the TTL comes back authenticated without re-minting.
+#
+# PROVISIONING ORDER (parity with the OVA's vacti-firstboot + systemd units):
+#   1. enroll -> engine.env: scoped tokens + VACTI_ENGINE_SHARED_SECRET. FATAL on failure.
+#   2. engine binaries/browser/caido-cli self-heal (fail-open).
+#   3. tailscaled daemon up, no key (fail-open) - twin of `systemctl enable tailscaled`.
+#   4. exec the engine. It fetches engine-config WITH X-Engine-Auth (needs step 1), which
+#      delivers tailscale.auth_key/login_server (the engine runs `tailscale up`, needs
+#      step 3) and the Caido email/password (the engine logs Caido in per engagement).
+#      Neither the tailnet join nor the Caido login happens in this script - same as
+#      the OVA, where both are engine-runtime steps.
 set -euo pipefail
 
 APP="${APP:-/usr/lib/vacti-engine}"
@@ -262,6 +279,15 @@ if [[ -z "${VACTI_TOKEN:-}" && -n "${ENROLL_TOKEN}" ]]; then
   fi
   install -d -m0755 "$STATE_DIR"
   umask 077
+  # VACTI_ENGINE_SHARED_SECRET (parity with distro/enroll/firstboot/vacti-firstboot):
+  # Caddy at the public edge 401s every engine writeback - heartbeat, jobs/next,
+  # engine-config - unless the request carries X-Engine-Auth == this secret. Only the
+  # Bearer-exempt /enroll* subtree is reachable without it, so WITHOUT this line a
+  # container ENROLLS fine but its first heartbeat AND its engine-config fetch are 401'd.
+  # The engine-config fetch is what delivers tailscale.auth_key/login_server and the
+  # caido email/password, so a missing secret also leaves the tailnet un-joined and Caido
+  # un-logged-in. Emit ONLY when the CP returned a non-empty value, so an unset CP field
+  # yields a byte-identical engine.env to the pre-fix behaviour.
   {
     echo "VACTI_URL=${BASE}"
     if command -v jq >/dev/null 2>&1; then
@@ -270,6 +296,20 @@ if [[ -z "${VACTI_TOKEN:-}" && -n "${ENROLL_TOKEN}" ]]; then
         "VACTI_VERIFIER_TOKEN=\(.verifier_token // .verifier // "")",
         "VACTI_GATEKEEPER_TOKEN=\(.gatekeeper_token // .gatekeeper // "")"
       ' /tmp/vacti-enroll.out
+      secret="$(jq -r '.engineSharedSecret // .engine_shared_secret // empty' /tmp/vacti-enroll.out 2>/dev/null || true)"
+      [[ -n "$secret" ]] && printf 'VACTI_ENGINE_SHARED_SECRET=%s\n' "$secret"
+      unset secret
+    elif command -v node >/dev/null 2>&1; then
+      # node fallback (node ships in the image): parse + emit only non-empty values.
+      node -e '
+        const fs = require("fs");
+        const j = JSON.parse(fs.readFileSync("/tmp/vacti-enroll.out", "utf8"));
+        const w = (k, v) => { if (v) process.stdout.write(k + "=" + v + "\n"); };
+        w("VACTI_TOKEN", j.producer_token || j.producer);
+        w("VACTI_VERIFIER_TOKEN", j.verifier_token || j.verifier);
+        w("VACTI_GATEKEEPER_TOKEN", j.gatekeeper_token || j.gatekeeper);
+        w("VACTI_ENGINE_SHARED_SECRET", j.engineSharedSecret || j.engine_shared_secret);
+      ' 2>/dev/null || true
     fi
   } > "$STATE_ENV"
   chmod 0600 "$STATE_ENV"
@@ -286,6 +326,9 @@ export VACTI_URL="${BASE}"
 export VACTI_TOKEN
 [[ -n "${VACTI_VERIFIER_TOKEN:-}" ]] && export VACTI_VERIFIER_TOKEN
 [[ -n "${VACTI_GATEKEEPER_TOKEN:-}" ]] && export VACTI_GATEKEEPER_TOKEN
+# X-Engine-Auth edge secret: from engine.env (enroll / persisted) or a `docker run -e`.
+# Must be in the engine's env BEFORE exec - the engine reads it once at module load.
+[[ -n "${VACTI_ENGINE_SHARED_SECRET:-}" ]] && export VACTI_ENGINE_SHARED_SECRET
 
 # Pre-start a virtual display so the first headful evidence capture does not have
 # to fall back (the orchestrator will spawn its own Xvfb otherwise).
@@ -377,6 +420,73 @@ heal_caido() {
   return 0
 }
 heal_caido
+
+# tailscaled daemon - the container twin of the golden image's `systemctl enable
+# tailscaled` (build-golden.sh). Like the OVA, NO auth key is used here and this does
+# NOT run `tailscale up`: the engine itself joins at runtime (runner healTailscaleOnce:
+# `sudo -n tailscale up --authkey=... [--login-server=<headscale>]`) once its
+# engine-config fetch - authenticated by the X-Engine-Auth secret above - delivers
+# tailscale.auth_key/login_server, and its periodic heal keeps it joined. A container
+# has no systemd, so the daemon is started here. Kernel TUN mode when the container
+# was given `--cap-add=NET_ADMIN --device=/dev/net/tun`; otherwise (or if kernel mode
+# exits) userspace networking, which needs no extra caps. Node state lives on the
+# state volume so the tailnet identity survives a container restart. Fail-OPEN: a
+# missing/failed tailscaled only means no tailnet; it never blocks engine start.
+# VACTI_TAILSCALED=0 skips it (operator-managed tailscale, or no tailnet wanted).
+TAILSCALED_STATE="skipped"
+start_tailscaled() {
+  if [[ "${VACTI_TAILSCALED:-1}" =~ ^(0|false|off|no)$ ]]; then
+    TAILSCALED_STATE="disabled"; log "tailscaled: disabled by VACTI_TAILSCALED=${VACTI_TAILSCALED}"; return 0
+  fi
+  if ! command -v tailscaled >/dev/null 2>&1 || ! command -v tailscale >/dev/null 2>&1; then
+    TAILSCALED_STATE="absent"; log "tailscaled: not installed in this image; tailnet join unavailable (engine runs normally)"; return 0
+  fi
+  if pgrep -x tailscaled >/dev/null 2>&1; then
+    TAILSCALED_STATE="already-running"; log "tailscaled: already running"; return 0
+  fi
+  local ts_dir="${STATE_DIR}/tailscale" mode pid
+  install -d -m0700 "$ts_dir" 2>/dev/null || true
+  install -d -m0755 /var/run/tailscale 2>/dev/null || true
+  for mode in kernel userspace; do
+    [[ "$mode" == "kernel" && ! -c /dev/net/tun ]] && continue
+    local tun_arg=()
+    [[ "$mode" == "userspace" ]] && tun_arg=(--tun=userspace-networking)
+    tailscaled --state="${ts_dir}/tailscaled.state" --statedir="${ts_dir}" \
+      ${tun_arg[@]+"${tun_arg[@]}"} >>/tmp/tailscaled.log 2>&1 &
+    pid=$!
+    # Kernel mode without NET_ADMIN exits within a second or two; a live pid after
+    # the settle window means the daemon is up and the engine's `tailscale up` can join.
+    for _ in 1 2 3 4 5 6; do
+      sleep 0.5
+      kill -0 "$pid" 2>/dev/null || break
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      TAILSCALED_STATE="started-${mode}"
+      log "tailscaled: started (${mode} mode, pid ${pid}, state ${ts_dir}); the engine joins the tailnet from engine-config"
+      return 0
+    fi
+    log "tailscaled: ${mode} mode exited (see /tmp/tailscaled.log)$([[ "$mode" == "kernel" ]] && echo '; falling back to userspace networking')"
+  done
+  TAILSCALED_STATE="failed"
+  log "tailscaled: could not start; tailnet join unavailable (engine runs normally)"
+  return 0
+}
+start_tailscaled
+
+# Provisioning-readiness breadcrumb: ONE line naming what this first boot staged, so an
+# operator sees OVA parity at a glance (the OVA's equivalent is the firstboot progress
+# log). States only - the secret VALUE is never logged.
+provision_summary() {
+  local secret_state="unset" caido_state="absent" home="${HOME:-}"
+  [[ -n "${VACTI_ENGINE_SHARED_SECRET:-}" ]] && secret_state="enabled"
+  [[ -n "$home" ]] || home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+  [[ -x "${home:-/root}/caido/caido-cli" ]] && caido_state="present"
+  log "provisioning: engine-shared-secret=${secret_state} tailscaled=${TAILSCALED_STATE} caido-cli=${caido_state} (tailnet join + Caido login run inside the engine from engine-config)"
+  if [[ "$secret_state" == "unset" ]]; then
+    log "provisioning: WARNING no engine-shared-secret - if this control plane gates engine traffic at the edge, heartbeat/config will 401. An engine.env persisted before this fix lacks it: re-enroll with a fresh VACTI_ENROLL_TOKEN on an empty state volume, or pass -e VACTI_ENGINE_SHARED_SECRET."
+  fi
+}
+provision_summary
 
 # If the caller passed an explicit command, honour it; otherwise run the engine
 # the same way the systemd unit does (node dist/runner/cli.js from WorkingDirectory).
