@@ -314,6 +314,18 @@ if [[ -z "${VACTI_TOKEN:-}" && -n "${ENROLL_TOKEN}" ]]; then
   } > "$STATE_ENV"
   chmod 0600 "$STATE_ENV"
   umask 022
+  # VD-4 tailnet AUTO-JOIN: capture the FRESH single-use Headscale preauth key + login server the CP returned
+  # on THIS enroll response, BEFORE the response file is wiped. Both are OPTIONAL (absent on an unconfigured CP
+  # or an old deployment) - we just stash them for the `tailscale up` below. The key is never written to disk or
+  # logged: it lives only in these shell vars and is consumed by `tailscale up`.
+  HS_PREAUTH_KEY=""; HS_LOGIN_SERVER=""
+  if command -v jq >/dev/null 2>&1; then
+    HS_PREAUTH_KEY="$(jq -r '.headscale_preauth_key // empty' /tmp/vacti-enroll.out 2>/dev/null || true)"
+    HS_LOGIN_SERVER="$(jq -r '.headscale_login_server // empty' /tmp/vacti-enroll.out 2>/dev/null || true)"
+  elif command -v node >/dev/null 2>&1; then
+    HS_PREAUTH_KEY="$(node -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync("/tmp/vacti-enroll.out","utf8")).headscale_preauth_key||"")}catch{}' 2>/dev/null || true)"
+    HS_LOGIN_SERVER="$(node -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync("/tmp/vacti-enroll.out","utf8")).headscale_login_server||"")}catch{}' 2>/dev/null || true)"
+  fi
   rm -f /tmp/vacti-enroll.out
   set -a
   # shellcheck source=/dev/null
@@ -472,6 +484,38 @@ start_tailscaled() {
   return 0
 }
 start_tailscaled
+
+# VD-4 Headscale AUTO-JOIN at enrollment. The CP enroll response delivered a FRESH, single-use per-engine
+# preauth key + the login server URL (captured into HS_PREAUTH_KEY / HS_LOGIN_SERVER above). Run `tailscale up`
+# here so the engine joins the operator tailnet IMMEDIATELY at first boot, instead of only later when the runner
+# fetches engine-config and heals. FAIL-OPEN at every step: missing fields, no tailscale CLI, an already-joined
+# node, or a non-zero `tailscale up` exit are logged and ignored - the engine still reaches the CP over public
+# HTTPS and the runtime tailscale-heal re-joins from engine-config. The single-use key is consumed by this call
+# and is NOT persisted; its VALUE is never logged.
+headscale_autojoin() {
+  local key="${HS_PREAUTH_KEY:-}" server="${HS_LOGIN_SERVER:-}"
+  if [[ -z "$key" || -z "$server" ]]; then
+    log "headscale: no preauth key/login server in enroll response; tailnet join deferred to engine-config heal"
+    return 0
+  fi
+  if ! command -v tailscale >/dev/null 2>&1; then
+    log "headscale: tailscale CLI absent; skipping enrollment auto-join (engine runs normally)"
+    return 0
+  fi
+  if tailscale status --json 2>/dev/null | grep -q '"BackendState"[[:space:]]*:[[:space:]]*"Running"'; then
+    log "headscale: node already joined (BackendState Running); skipping enrollment auto-join"
+    return 0
+  fi
+  log "headscale: joining tailnet via enroll preauth key (login-server=${server}, hostname=${ENGINE_ID}, key not logged)"
+  if tailscale up --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false >>/tmp/tailscale-up.log 2>&1 \
+     || sudo -n tailscale up --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false >>/tmp/tailscale-up.log 2>&1; then
+    log "headscale: tailscale up succeeded; the engine should appear in 'headscale nodes list'"
+  else
+    log "headscale: tailscale up failed (see /tmp/tailscale-up.log); engine continues over public HTTPS, runtime heal will retry"
+  fi
+}
+headscale_autojoin
+unset HS_PREAUTH_KEY HS_LOGIN_SERVER
 
 # Provisioning-readiness breadcrumb: ONE line naming what this first boot staged, so an
 # operator sees OVA parity at a glance (the OVA's equivalent is the firstboot progress
