@@ -61,3 +61,18 @@ globalprotect-openconnect
 # the arsenal-sync divergence guard stays satisfied; this file only governs the
 # ISO/Docker install POLICY, not manifest membership.
 scrcpy
+#
+# feroxbuster: Rust-based recursive URL fuzzer. PRESENT in kali/rolling as
+# 2.14.0-0kali1, but THAT build pins Depends: libc6 (>= 2.43). Debian 13 trixie
+# ships libc6 2.41, and backporting glibc is not a reasonable base-image change.
+# Result: on the fail-loud Docker gate the package has an apt candidate but fails
+# install with "libc6 (>= 2.43) but 2.41-12+deb13u5 is to be installed",
+# breaking every build-docker run since the kali pool crossed that pin. The OVA
+# path installs best-effort and only warns; this entry applies the same
+# warn-and-continue semantics to the Docker and ISO paths. Capability coverage
+# is unaffected because the arsenal already ships ffuf, gobuster, dirsearch and
+# dirb; feroxbuster re-installs automatically the moment kali ships a build
+# compatible with trixie's libc (or the engine runtime arsenal-check self-heals
+# via its native installer path). It remains in the engine manifest
+# (apt.grant/apt.core), so the arsenal-sync divergence guard stays satisfied.
+feroxbuster
