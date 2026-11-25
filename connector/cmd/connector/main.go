@@ -47,7 +47,7 @@ type state struct {
 	ConnectorID string `json:"connectorId"`
 	Token       string `json:"token"`
 	RelayURL    string `json:"relayUrl"`
-	GrantKey    string `json:"grantKey"` // base64 raw ed25519 public key
+	GrantKey    string `json:"grantKey"`          // base64 raw ed25519 public key
 	Install     string `json:"install,omitempty"` // sha256 of the consumed install id
 }
 
@@ -55,18 +55,35 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	log.SetPrefix("connector: ")
 
-	stateDir := envOr("VACTI_CONNECTOR_STATE", "/var/lib/connector")
+	// On Windows, when the process is started by the Service Control Manager,
+	// runAsService wraps run() in an SCM handler and returns true. On every other
+	// platform (and for an interactive Windows run) it returns false and we fall
+	// back to the signal-driven path below. See platform_{unix,windows}.go.
+	if runAsService(run) {
+		return
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals()...)
+	defer stop()
+	os.Exit(run(ctx))
+}
+
+// run performs enrollment and keeps a single outbound relay session alive until
+// ctx is cancelled (signal or SCM stop) or access is revoked. It returns the
+// process exit code: 0 on a clean stop, 1 on a startup failure, 3 when the
+// relay reports the connector has been revoked or replaced.
+func run(ctx context.Context) int {
+	stateDir := envOr("VACTI_CONNECTOR_STATE", defaultStateDir())
 	st, err := loadOrEnroll(stateDir)
 	if err != nil {
-		log.Fatalf("enrollment failed: %v", err)
+		log.Printf("enrollment failed: %v", err)
+		return 1
 	}
 	pub, err := base64.StdEncoding.DecodeString(st.GrantKey)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
-		log.Fatalf("stored state is invalid; re-enrol with a new install id")
+		log.Printf("stored state is invalid; re-enrol with a new install id")
+		return 1
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	c := &conn{id: st.ConnectorID, pub: ed25519.PublicKey(pub), grants: map[string]*grant.Verified{}}
 	go c.reapGrants(ctx)
@@ -81,7 +98,7 @@ func main() {
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
 			// Revoked or replaced: stop instead of hammering the relay.
 			log.Printf("access revoked; re-enrol from the dashboard")
-			os.Exit(3)
+			return 3
 		}
 		if time.Since(started) > time.Minute {
 			backoff = time.Second
@@ -96,6 +113,7 @@ func main() {
 		}
 	}
 	log.Printf("stopped")
+	return 0
 }
 
 func errOrNil(err error) any {
@@ -434,32 +452,82 @@ func (c *conn) udp(s *yamux.Stream, g *grant.Verified, dst string) {
 }
 
 // resolver returns the host's own DNS server (the one the connector itself
-// uses), so internal names resolve exactly as they do for machines there.
-func resolver() string {
+// uses) as host:port, so internal names resolve exactly as they do for machines
+// there. The bool is false when no resolver can be determined, in which case the
+// DNS relay is declined rather than forwarded to a Linux-only stub address.
+func resolver() (string, bool) {
 	if v := strings.TrimSpace(os.Getenv("VACTI_CONNECTOR_DNS")); v != "" {
 		if ap, err := netip.ParseAddrPort(v); err == nil {
-			return ap.String()
+			return ap.String(), true
 		}
 		if a, err := netip.ParseAddr(v); err == nil {
-			return netip.AddrPortFrom(a, 53).String()
+			return netip.AddrPortFrom(a, 53).String(), true
 		}
 	}
-	b, err := os.ReadFile("/etc/resolv.conf")
-	if err == nil {
+	// Linux (and macOS, which also maintains one) expose the active servers here.
+	if b, err := os.ReadFile("/etc/resolv.conf"); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
 			f := strings.Fields(line)
 			if len(f) >= 2 && f[0] == "nameserver" {
 				if a, err := netip.ParseAddr(f[1]); err == nil {
-					return netip.AddrPortFrom(a, 53).String()
+					return netip.AddrPortFrom(a, 53).String(), true
 				}
 			}
 		}
 	}
-	return "127.0.0.53:53"
+	// No /etc/resolv.conf (common on Windows, and possible on macOS): ask Go's
+	// own resolver which server the OS has configured. net.Resolver with PreferGo
+	// reads the system DNS servers (GetNetworkParams on Windows, the system
+	// configuration on macOS) and dials them; the Dial hook captures that address
+	// without issuing a real query.
+	if addr, ok := probeSystemDNS(); ok {
+		return addr, true
+	}
+	return "", false
+}
+
+// probeSystemDNS discovers the OS-configured DNS server portably by letting the
+// pure-Go resolver pick it and intercepting the address it would dial. It never
+// completes a lookup: the Dial hook records the server and aborts.
+func probeSystemDNS() (string, bool) {
+	var (
+		mu       sync.Mutex
+		captured string
+	)
+	stop := errors.New("probe complete")
+	r := &net.Resolver{
+		PreferGo: true,
+		Dial: func(_ context.Context, _, address string) (net.Conn, error) {
+			mu.Lock()
+			if captured == "" {
+				captured = address
+			}
+			mu.Unlock()
+			return nil, stop
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = r.LookupHost(ctx, "connector-dns-probe.invalid")
+	mu.Lock()
+	defer mu.Unlock()
+	if captured == "" {
+		return "", false
+	}
+	if _, _, err := net.SplitHostPort(captured); err != nil {
+		captured = net.JoinHostPort(captured, "53")
+	}
+	return captured, true
 }
 
 func (c *conn) dns(s *yamux.Stream) {
-	ap, err := netip.ParseAddrPort(resolver())
+	server, ok := resolver()
+	if !ok {
+		reply(s, false, wire.ErrUnavailable)
+		s.Close()
+		return
+	}
+	ap, err := netip.ParseAddrPort(server)
 	if err != nil {
 		reply(s, false, wire.ErrUnreachable)
 		s.Close()
@@ -482,7 +550,10 @@ func (c *conn) ping(s *yamux.Stream, g *grant.Verified, dst string) {
 		reply(s, false, wire.ErrScope)
 		return
 	}
-	// Unprivileged ICMP ("ping socket"); Docker enables ping_group_range by default.
+	// Unprivileged ICMP ("ping socket"): Docker and macOS allow this for any user,
+	// Linux needs net.ipv4.ping_group_range to include the uid, and Windows has no
+	// such datagram socket. When the OS denies it we degrade cleanly to
+	// ErrUnavailable rather than failing the stream, so TCP/UDP relay still works.
 	pc, err := icmp.ListenPacket("udp4", "0.0.0.0")
 	if err != nil {
 		reply(s, false, wire.ErrUnavailable)

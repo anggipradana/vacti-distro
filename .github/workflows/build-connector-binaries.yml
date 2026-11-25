@@ -1,0 +1,229 @@
+# Native connector binaries -> GitHub release assets.
+#
+# The connector is the only vacti component that runs inside a customer network
+# (see deploy/Dockerfile.connector and cmd/connector/main.go). Beside the
+# distroless container image (build-docker-connector.yml), operators also need a
+# bare binary they can drop on a host that has no Docker: a Linux/macOS box via
+# the install-connector.sh one-liner, or a Windows host via install-connector.ps1
+# which registers it as an SCM service.
+#
+# This workflow builds that binary for the five supported os/arch pairs, packages
+# each as a tarball (zip on Windows), writes a SHA256SUMS the install scripts
+# verify against, and publishes everything, plus the install scripts themselves,
+# as assets on the connector-v<version> GitHub release.
+#
+# Trigger: pushing a tag connector-v<X.Y.Z>. The build asserts the tag matches
+# connector/VERSION so a mistagged release can never ship. workflow_dispatch is
+# available for a dry run that builds + packages but does not publish.
+name: build-connector-binaries
+run-name: build-connector-binaries ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - 'connector-v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish assets to the connector-v<VERSION> release (tag must already exist)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: connector-binaries-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # One matrix leg per shipped binary. The connector is pure Go (CGO disabled),
+  # so every target cross-compiles from the same ubuntu runner with identical
+  # flags (the same -trimpath/-ldflags the Dockerfile and build-tunnel.sh use).
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, archive: tar.gz }
+          - { goos: linux,   goarch: arm64, archive: tar.gz }
+          - { goos: darwin,  goarch: amd64, archive: tar.gz }
+          - { goos: darwin,  goarch: arm64, archive: tar.gz }
+          - { goos: windows, goarch: amd64, archive: zip }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: connector/go.mod
+          cache-dependency-path: connector/go.sum
+
+      - name: Build + package
+        working-directory: connector
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          [ -n "$VERSION" ] || { echo "::error::empty connector/VERSION"; exit 1; }
+
+          # On a tag push the tag MUST be connector-v<VERSION>: refuse a mistag.
+          if [ "${GITHUB_REF_TYPE:-}" = tag ]; then
+            want="connector-v${VERSION}"
+            if [ "${GITHUB_REF_NAME}" != "$want" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match connector/VERSION (${want})"
+              exit 1
+            fi
+          fi
+
+          bin="vacti-connector"
+          ext=""
+          [ "$GOOS" = windows ] && { bin="vacti-connector.exe"; ext=".exe"; }
+
+          stage="$(mktemp -d)"
+          CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "${stage}/${bin}" ./cmd/connector
+
+          mkdir -p "${GITHUB_WORKSPACE}/release"
+          name="vacti-connector_${VERSION}_${GOOS}_${GOARCH}"
+          case "$ARCHIVE" in
+            tar.gz) tar -C "$stage" -czf "${GITHUB_WORKSPACE}/release/${name}.tar.gz" "$bin" ;;
+            zip)    ( cd "$stage" && zip -q -j "${GITHUB_WORKSPACE}/release/${name}.zip" "$bin" ) ;;
+            *)      echo "::error::unknown archive type ${ARCHIVE}"; exit 1 ;;
+          esac
+          echo "packaged ${name}.${ARCHIVE}"
+          ls -l "${GITHUB_WORKSPACE}/release"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: connector-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Gather every built archive, write SHA256SUMS over all of them, and publish the
+  # archives + SHA256SUMS + the two install scripts to the release. Only runs for a
+  # tag push, or a dispatch that explicitly asked to publish.
+  release:
+    name: publish release assets
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.ref_type == 'tag' || inputs.publish
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for the forbidden-pattern commit-range scan
+
+      # House rule: scan the release-note corpus before any publish surface (the
+      # GitHub release body and the HF mirror are both release-note surfaces).
+      - name: Forbidden-pattern guard (pre-publish)
+        env:
+          FORBIDDEN_MANIFEST: distro/packages/arsenal-manifest.json
+        run: |
+          set -euo pipefail
+          chmod +x .ci/check-forbidden.sh
+          .ci/check-forbidden.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: connector-*
+          merge-multiple: true
+          path: release
+
+      - name: Assemble assets
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < connector/VERSION)"
+          TAG="connector-v${VERSION}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+
+          # Ship the install scripts next to the binaries so the operator one-liner
+          # can curl them straight off the release.
+          cp connector/scripts/install-connector.sh  release/install-connector.sh
+          cp connector/scripts/install-connector.ps1 release/install-connector.ps1
+
+          ( cd release && sha256sum -- * > SHA256SUMS )
+          echo "=== release/ ==="
+          ls -l release
+          echo "=== SHA256SUMS ==="
+          cat release/SHA256SUMS
+
+      - name: Publish to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "connector ${TAG#connector-}" \
+              --notes "Native connector binaries for linux/darwin (amd64, arm64) and windows (amd64). Install with connector/scripts/install-connector.sh (Linux/macOS) or install-connector.ps1 (Windows). Verify downloads against SHA256SUMS." \
+              --verify-tag
+          fi
+          gh release upload "$TAG" release/* --clobber
+          echo "published assets to $TAG"
+
+      # Secondary mirror: HuggingFace dataset. GitHub Releases stay primary; this
+      # gives the install scripts a free, stable resolve URL to fall back on (and a
+      # home not subject to GitHub's download rate limits). Mirrors the engine/image
+      # distribution pattern (publish-images-hf.yml + scripts/publish-images-to-hf.sh).
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mirror assets to HuggingFace
+        env:
+          HF_TOKEN: ${{ secrets.HF_PUBLISH_TOKEN }}
+          HF_REPO_ID: anggipradana/vacti-connector
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "HF_PUBLISH_TOKEN secret not set; skipping HuggingFace mirror (GitHub Releases remain primary)." >&2
+            exit 0
+          fi
+          pip install "huggingface_hub[cli]~=0.35.0"
+          huggingface-cli login --token "$HF_TOKEN" >/dev/null 2>&1 || { echo "hf login failed" >&2; exit 1; }
+          # Ensure the dataset exists (no-op if it already does).
+          huggingface-cli repo create "${HF_REPO_ID#*/}" --type dataset -y >/dev/null 2>&1 || true
+          echo "uploading $(ls release | wc -l) files to datasets/${HF_REPO_ID} under v${VERSION}/"
+          huggingface-cli upload "$HF_REPO_ID" release "v${VERSION}/" \
+            --repo-type dataset \
+            --commit-message "connector binaries v${VERSION}"
+          base="https://huggingface.co/datasets/${HF_REPO_ID}/resolve/main/v${VERSION}"
+          echo "HF_BASE=${base}" >> "$GITHUB_ENV"
+          echo "mirrored to ${base}"
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## connector ${TAG:-connector-v?}"
+            echo ""
+            echo "Primary (GitHub Release):"
+            echo '```'
+            echo "https://github.com/${{ github.repository }}/releases/download/${TAG}/<asset>"
+            echo '```'
+            if [ -n "${HF_BASE:-}" ]; then
+              echo ""
+              echo "Mirror (HuggingFace):"
+              echo '```'
+              echo "${HF_BASE}/<asset>"
+              echo '```'
+              echo ""
+              echo "Install from the mirror by pointing the installer's base URL at it, e.g.:"
+              echo '```'
+              echo "VACTI_CONNECTOR_RELEASE_BASE=${HF_BASE} ./install-connector.sh --token <id> --api-url <url>"
+              echo "# PowerShell: -ReleaseBase ${HF_BASE}"
+              echo '```'
+            fi
+            echo ""
+            echo "Assets: vacti-connector_${VERSION}_{linux,darwin}_{amd64,arm64}.tar.gz, vacti-connector_${VERSION}_windows_amd64.zip, SHA256SUMS, install-connector.sh, install-connector.ps1"
+          } >> "$GITHUB_STEP_SUMMARY"
