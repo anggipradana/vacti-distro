@@ -164,4 +164,47 @@ if run_install "${WORK}/bad" "$SHIM_BAD" --token t --api-url https://cp.example 
 fi
 ok "unsupported platform is rejected"
 
+# ============================================================================= #
+# 6. control-plane preflight (initial-enrollment reachability check)
+# ============================================================================= #
+# A curl shim lets us simulate a reachable vs unreachable control-plane without a
+# network. The preflight runs via the __preflight_only test seam (no root/service).
+CURL_OK="${WORK}/curl-ok"; mkdir -p "$CURL_OK"
+cat > "${CURL_OK}/curl" <<'EOF'
+#!/usr/bin/env bash
+# Reachable: succeed on the health probe, pass through anything else.
+exit 0
+EOF
+chmod +x "${CURL_OK}/curl"
+
+CURL_BAD="${WORK}/curl-bad"; mkdir -p "$CURL_BAD"
+cat > "${CURL_BAD}/curl" <<'EOF'
+#!/usr/bin/env bash
+# Unreachable: fail like curl -f against a dead host / 404.
+exit 22
+EOF
+chmod +x "${CURL_BAD}/curl"
+
+# Reachable CP -> preflight reports reachable and exits 0.
+out="$(PATH="${CURL_OK}:${PATH}" bash "$SCRIPT" __preflight_only \
+  --api-url https://cp.example </dev/null 2>&1)" \
+  || die "preflight: reachable CP should exit 0"
+echo "$out" | grep -qi "control-plane reachable" \
+  || die "preflight: reachable CP should log reachability"
+ok "preflight: reachable control-plane passes"
+
+# Unreachable CP, no TTY (piped-install case) -> warns about the unreachable CP and
+# continues (so an automated install is not wedged), surfacing the cause.
+out="$(PATH="${CURL_BAD}:${PATH}" bash "$SCRIPT" __preflight_only \
+  --api-url https://cp.example </dev/null 2>&1)" \
+  || die "preflight: unreachable CP without a TTY should continue (exit 0)"
+echo "$out" | grep -qi "cannot reach the control-plane" \
+  || die "preflight: unreachable CP must surface the reachability warning"
+ok "preflight: unreachable control-plane is caught and surfaced"
+
+# No --api-url -> preflight is a no-op (nothing to probe).
+PATH="${CURL_BAD}:${PATH}" bash "$SCRIPT" __preflight_only </dev/null >/dev/null 2>&1 \
+  || die "preflight: no --api-url should be a no-op (exit 0)"
+ok "preflight: no --api-url is a no-op"
+
 echo "PASS: install-connector.test.sh (${PASS} assertions)"

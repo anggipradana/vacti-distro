@@ -329,6 +329,37 @@ write_unit() {
 # enrollment
 # ---------------------------------------------------------------------------- #
 
+# preflight_cp_reachable fails fast on the single most common initial-enrollment
+# problem: the host cannot reach the control-plane API at all (wrong URL, DNS,
+# firewall, no egress). A liveness probe of ${API_URL}/api/health is unauthenticated
+# and cheap. On an interactive run we let the operator override after the warning;
+# piped into `sudo bash` (no TTY) we warn loudly and continue so an automated
+# install is not wedged, but the cause is now on screen instead of buried in logs.
+preflight_cp_reachable() {
+  [ -n "$API_URL" ] || return 0
+  if [ "$SANDBOX" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  have curl || return 0  # fetch() falls back to wget; skip the probe rather than block.
+  local health="${API_URL%/}/api/health"
+  if curl -sfI --max-time 5 "$health" >/dev/null 2>&1; then
+    log "control-plane reachable at ${health}"
+    return 0
+  fi
+  warn "cannot reach the control-plane at ${health}. Check network / DNS / firewall / the --api-url value."
+  if [ -t 0 ]; then
+    printf 'Proceed anyway? [y/N] ' >&2
+    local ans=""
+    read -r ans || ans=""
+    case "$ans" in
+      y|Y|yes|YES) log "proceeding despite unreachable control-plane (operator override)" ;;
+      *)           die "aborted: control-plane unreachable at ${health}" ;;
+    esac
+  else
+    warn "no TTY to confirm; continuing, but enrollment will fail if ${API_URL} stays unreachable."
+  fi
+}
+
 enroll_once() {
   # Runs the connector once with the install token so it bootstraps state.json,
   # then stops it. Skipped when an identity already exists (the single-use token
@@ -402,10 +433,13 @@ print_status() {
     return 0
   fi
   if [ "$OS" = "linux" ]; then
+    # Give a slow-starting unit a moment before judging it, so a healthy-but-slow boot is not reported as a failure.
+    sleep 10
     if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
       log "connector service is ACTIVE"
     else
-      warn "connector service is not active yet; recent logs:"
+      warn "connector service failed to start. Debug with: sudo journalctl -u ${SERVICE_NAME}.service -n 50"
+      warn "recent logs:"
       journalctl -u "${SERVICE_NAME}.service" -n 15 --no-pager 2>/dev/null || true
     fi
   else
@@ -475,6 +509,7 @@ main() {
   log "installed binary at ${BIN_DIR}/${BIN_NAME}"
 
   mkdir -p "$STATE_DIR"
+  preflight_cp_reachable
   enroll_once
   write_unit
   activate_service
@@ -482,5 +517,16 @@ main() {
 
   log "done"
 }
+
+# Test-only seam: run just the control-plane preflight and exit, with no root,
+# platform detection, download or service control. Used by install-connector.test.sh
+# to exercise reachability detection deterministically (with a stubbed curl). Not
+# part of the public CLI.
+if [ "${1:-}" = "__preflight_only" ]; then
+  shift
+  parse_args "$@"
+  preflight_cp_reachable
+  exit 0
+fi
 
 main "$@"
