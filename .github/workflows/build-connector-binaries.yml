@@ -193,6 +193,11 @@ jobs:
           huggingface-cli login --token "$HF_TOKEN" >/dev/null 2>&1 || { echo "hf login failed" >&2; exit 1; }
           # Ensure the dataset exists (no-op if it already does).
           huggingface-cli repo create "${HF_REPO_ID#*/}" --type dataset -y >/dev/null 2>&1 || true
+          # Publish the dataset card (README.md at the dataset root) so the HF page documents install + verify.
+          echo "uploading dataset card connector/README.md to datasets/${HF_REPO_ID}/README.md"
+          huggingface-cli upload "$HF_REPO_ID" connector/README.md README.md \
+            --repo-type dataset \
+            --commit-message "connector README (dataset card) v${VERSION}"
           echo "uploading $(ls release | wc -l) files to datasets/${HF_REPO_ID} under v${VERSION}/"
           huggingface-cli upload "$HF_REPO_ID" release "v${VERSION}/" \
             --repo-type dataset \
