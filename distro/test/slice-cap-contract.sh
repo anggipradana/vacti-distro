@@ -200,6 +200,41 @@ EOF
   else
     no "idempotent: a re-run against a matching drop-in does not rewrite the file (mt1=$mt1 mt2=$mt2)"
   fi
+
+  # Case 7: THE core scenario. A STALE drop-in baked by the postinst in the build
+  # chroot (build-host MemTotal -> wrong cap, e.g. the observed 1207M on a box that
+  # ships with 10GB) must be REWRITTEN to the live-MemTotal cap. Pre-seed both
+  # drop-ins with a wrong body, run against the 10GB meminfo, assert both are
+  # corrected to 8150M/7742M. (Case 6 only proves a MATCHING cap is left alone;
+  # this proves a MISMATCHING cap is actively corrected - the whole point of S12.)
+  rm -rf "${TMP:?}/etc"
+  stale_body="$(printf '[Slice]\nMemoryMax=1207M\nMemoryHigh=1146M\n')"
+  install -d "$TMP/etc/systemd/user/vacti.slice.d" "$TMP/etc/systemd/system/vacti.slice.d"
+  printf '%s' "$stale_body" > "$USER_DROPIN"
+  printf '%s' "$stale_body" > "$SYS_DROPIN"
+  VACTI_SLICE_CAP_ROOT="$TMP" VACTI_SLICE_CAP_MEMINFO="$TMP/meminfo.10gb" VACTI_SLICE_CAP_NO_RELOAD=1 \
+    bash "$SLICECAP_SH" >/dev/null 2>&1 || true
+  got_u="$(cat "$USER_DROPIN" 2>/dev/null || true)"
+  got_s="$(cat "$SYS_DROPIN"  2>/dev/null || true)"
+  if [ "$got_u" = "$want_10" ] && [ "$got_s" = "$want_10" ]; then
+    ok "stale build-host cap (1207M) is corrected to live-MemTotal cap on both drop-ins (8150M/7742M)"
+  else
+    no "stale build-host cap corrected (user=$got_u sys=$got_s)"
+  fi
+
+  # Case 8: a NON-NUMERIC operator override falls back to the 1800 default rather
+  # than corrupting the cap (reserve_from_env sanitises VACTI_SLICE_RESERVE_MB).
+  # notanumber -> default 1800 -> same cap as Case 1 (8150M/7742M).
+  rm -rf "${TMP:?}/etc"
+  VACTI_SLICE_RESERVE_MB="notanumber" VACTI_SLICE_CAP_ROOT="$TMP" \
+    VACTI_SLICE_CAP_MEMINFO="$TMP/meminfo.10gb" VACTI_SLICE_CAP_NO_RELOAD=1 \
+    bash "$SLICECAP_SH" >/dev/null 2>&1 || true
+  got_u="$(cat "$USER_DROPIN" 2>/dev/null || true)"
+  if [ "$got_u" = "$want_10" ]; then
+    ok "non-numeric VACTI_SLICE_RESERVE_MB falls back to 1800 default (cap 8150M)"
+  else
+    no "non-numeric VACTI_SLICE_RESERVE_MB falls back to 1800 default (got: $got_u)"
+  fi
 fi
 
 echo "== postinst formula cross-reference (if engine source is present) =="
