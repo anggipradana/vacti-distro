@@ -149,13 +149,25 @@ func (r *relay) api(path string, body any, out any) (int, error) {
 	}
 	defer resp.Body.Close()
 	if out != nil && resp.StatusCode == http.StatusOK {
+		// Accept both the enveloped {"data": {...}} shape and a flat body. The
+		// vacti API answers verify-connector FLAT ({"connectorId": ...}); reading
+		// only env.Data failed to decode it, so every connector got a 503 at
+		// /v1/connect and could never come online.
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			return resp.StatusCode, err
+		}
 		var env struct {
 			Data json.RawMessage `json:"data"`
 		}
-		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&env); err != nil {
+		if err := json.Unmarshal(raw, &env); err != nil {
 			return resp.StatusCode, err
 		}
-		if err := json.Unmarshal(env.Data, out); err != nil {
+		body := raw
+		if len(env.Data) > 0 && string(env.Data) != "null" {
+			body = env.Data
+		}
+		if err := json.Unmarshal(body, out); err != nil {
 			return resp.StatusCode, err
 		}
 	}
@@ -370,11 +382,15 @@ func control(cs *connectorSession, o wire.Open) error {
 func (r *relay) handleSession(w http.ResponseWriter, req *http.Request) {
 	claims, err := r.verifySession(bearer(req))
 	if err != nil {
+		// Log the reason (never the token) so a broken session is diagnosable
+		// from the relay side; the tunnel only sees a refused SOCKS connect.
+		log.Printf("session refused from %s: %v", clientIP(req), err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	cs := r.connector(claims.Conn)
 	if cs == nil {
+		log.Printf("session %s (scan %s) refused: connector %s is offline", claims.Sid, claims.Scan, claims.Conn)
 		http.Error(w, "connector offline", http.StatusServiceUnavailable)
 		return
 	}

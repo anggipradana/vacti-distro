@@ -127,7 +127,9 @@ func TestConnectorChainEndToEnd(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"connectorId": "conn-1"}})
+		// FLAT, exactly what the vacti API returns (the relay used to accept only
+		// a {"data": ...} envelope, so this mock hid a prod-breaking mismatch).
+		_ = json.NewEncoder(w).Encode(map[string]any{"connectorId": "conn-1"})
 	})
 	mux.HandleFunc("POST /api/internal/relay/connector-status", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {

@@ -16,6 +16,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -119,6 +120,9 @@ func (t *tunnel) session() (*yamux.Session, error) {
 	h.Set("User-Agent", "tunnel/"+version)
 	nc, status, err := transport.Dial(context.Background(), t.relay+"/v1/session", h)
 	if err != nil {
+		// Logged (never the token): without this a relay that refuses the session
+		// or an unreachable relay was only visible as a failed SOCKS connect.
+		log.Printf("relay dial failed (HTTP %d): %v", status, err)
 		return nil, fmt.Errorf("relay dial failed (HTTP %d): %w", status, err)
 	}
 	sess, err := yamux.Client(nc, transport.YamuxConfig())
@@ -157,6 +161,7 @@ func (t *tunnel) open(typ, dst string) (*yamux.Stream, error) {
 	}
 	if !rp.OK {
 		s.Close()
+		log.Printf("connector refused %s %s: %s", typ, dst, rp.Err)
 		return nil, fmt.Errorf("connector refused: %s", rp.Err)
 	}
 	return s, nil
@@ -167,17 +172,25 @@ func (t *tunnel) open(typ, dst string) (*yamux.Stream, error) {
 func (t *tunnel) socks(c net.Conn) {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(30 * time.Second))
-	buf := make([]byte, 3)
+	// Greeting: VER, NMETHODS, then NMETHODS method bytes. (This used to read
+	// three bytes and treat the first METHOD as the count, which only worked
+	// for a client offering exactly one method: curl built with GSSAPI sends
+	// 05 02 00 01, the stray byte desynced the stream and every connect was
+	// reset, so no curl-based engine tool could use the tunnel.)
+	buf := make([]byte, 2)
 	if _, err := io.ReadFull(c, buf); err != nil || buf[0] != 5 {
 		return
 	}
-	nmeth := int(buf[2])
-	methods := make([]byte, nmeth)
+	methods := make([]byte, int(buf[1]))
 	if _, err := io.ReadFull(c, methods); err != nil {
 		return
 	}
 	// No-auth only: the tunnel binds loopback and the session JWT already
 	// authenticates the engagement; a SOCKS auth layer would add nothing.
+	if !bytes.Contains(methods, []byte{0}) {
+		_, _ = c.Write([]byte{5, 0xff}) // no acceptable method
+		return
+	}
 	if _, err := c.Write([]byte{5, 0}); err != nil {
 		return
 	}
