@@ -154,7 +154,10 @@ echo "== 3. CP omits the secret: pre-fix engine.env + loud breadcrumb =="
 FAKE_ENROLL_JSON="$NO_SECRET" run_case nosecret 1 1 1 VACTI_URL=https://cp.invalid VACTI_ENROLL_TOKEN=vct_enrolltoken_full_length_value
 check "exit 0" test "$RC" -eq 0
 check "no VACTI_ENGINE_SHARED_SECRET line" bash -c "! grep -q '^VACTI_ENGINE_SHARED_SECRET' '${C}/state/engine.env'"
-check "engine.env is exactly the pre-fix 4 lines" bash -c "[[ \"\$(cat '${C}/state/engine.env')\" == \$'VACTI_URL=https://cp.invalid\nVACTI_TOKEN=tok-prod\nVACTI_VERIFIER_TOKEN=tok-ver\nVACTI_GATEKEEPER_TOKEN=tok-gate' ]]"
+# The 4 pre-secret lines + ENGINE_ID (no engine_id in this CP response -> the
+# entrypoint's own id). ENGINE_ID is persisted so the engine never falls back to its
+# kali-engine-01 schema default (tailnet hostname collisions across containers).
+check "engine.env is exactly the pre-secret 4 lines + ENGINE_ID" bash -c "[[ \"\$(cat '${C}/state/engine.env')\" == \$'VACTI_URL=https://cp.invalid\nVACTI_TOKEN=tok-prod\nVACTI_VERIFIER_TOKEN=tok-ver\nVACTI_GATEKEEPER_TOKEN=tok-gate\nENGINE_ID=engine-test' ]]"
 check "breadcrumb says secret unset" log_has "$C" "engine-shared-secret=unset"
 check "remediation warning logged" log_has "$C" "WARNING no engine-shared-secret"
 

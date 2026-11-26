@@ -39,6 +39,25 @@ before you finish, just mint a fresh one.
 5. The GUI OVA also ships **firefox-esr** and **xfce4-screenshooter** for manual operator use
    (browse a target, grab a screenshot) from the XFCE desktop.
 
+### Login and SSH on the OVA
+
+- **Account:** `arparp` (sudo group). This is a fixed default admin login by design (same posture as
+  the stock Kali OVA). Its password is the build-time `ARPARP_PASSWORD` value of the release you
+  imported (one value per release, held by the operator; an OVA keeps the value it was built with,
+  so an image built before a rotation still has the older one). Change it after first login with
+  `passwd` if the appliance leaves your lab.
+- **SSH with the password:** enabled. The Debian cloud base disables password SSH; the appliance
+  re-enables it via `/etc/ssh/sshd_config.d/10-vacti-appliance.conf`.
+  `ssh arparp@<appliance-ip>` works on the LAN and over the tailnet.
+- **SSH with a control-plane key:** add the public key under **Settings > Engine > SSH keys** in the
+  CP. The engine converges it within one heal tick, and `arparp` accepts it (through the root-owned
+  `AuthorizedKeysCommand` helper `/usr/local/libexec/vacti-operator-keys`), so
+  `ssh -i <key> arparp@<tailnet-ip>` works without touching the box. Keys you add to
+  `~arparp/.ssh/authorized_keys` yourself keep working too.
+- **Which tailnet node is which:** after enrollment the appliance joins the tailnet under its
+  **engine id** (the name reserved when you minted the pairing code or token), not a generic
+  `kali-engine-01`.
+
 ---
 
 ## 2. Docker container - fastest, smallest footprint
@@ -74,7 +93,7 @@ Accepted env (supplied at `docker run`, never on the image):
 | `VACTI_PAIRING_CODE` | 8-char pairing code. Exchanged for the full token before anything else runs. |
 | `VACTI_ENROLL_TOKEN` | Full enrollment token (single-use, 3 h). Also accepts an 8-char code as its value. |
 | `VACTI_TOKEN` | A producer token (skips the enroll exchange entirely). |
-| `ENGINE_ID` | Optional engine id (defaults to the hostname). |
+| `ENGINE_ID` | Optional engine id sent on enroll. The id the CP bound to the token / pairing code wins and is persisted to the state volume; the hostname is only the fallback. |
 | `VACTI_LANG` | `en` or `id` for operator-facing messages (default follows `$LANG`). |
 
 Notes:

@@ -50,6 +50,10 @@ progress() { # PHASE message...
 # already present) or fails (no live token). openssh-server is baked and the golden
 # image enables it; '--now' also starts it on this first boot without a reboot.
 # Non-fatal (|| true) so it can never block enrollment under 'set -e'.
+# The golden image strips /etc/ssh/ssh_host_* (fresh identity per box); cloud-init
+# regenerates them only when it runs, and sshd refuses to start without host keys.
+# `ssh-keygen -A` creates ONLY the missing default host keys (no-op otherwise).
+command -v ssh-keygen >/dev/null 2>&1 && ssh-keygen -A >/dev/null 2>&1 || true
 systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
 
 if engine_env_ready; then log "engine.env already present and populated - nothing to do"; exit 0; fi
@@ -192,6 +196,7 @@ else
         "VACTI_VERIFIER_TOKEN=\(.verifier_token // .verifier // "")",
         "VACTI_GATEKEEPER_TOKEN=\(.gatekeeper_token // .gatekeeper // "")"
       ' /run/vacti-enroll.out
+      bound_id="$(jq -r '.engine_id // empty' /run/vacti-enroll.out 2>/dev/null || true)"
       secret="$(jq -r '.engineSharedSecret // .engine_shared_secret // empty' /run/vacti-enroll.out 2>/dev/null || true)"
       [[ -n "$secret" ]] && printf 'VACTI_ENGINE_SHARED_SECRET=%s\n' "$secret"
       unset secret
@@ -207,8 +212,21 @@ else
         w("VACTI_GATEKEEPER_TOKEN", j.gatekeeper_token || j.gatekeeper);
         w("VACTI_ENGINE_SHARED_SECRET", j.engineSharedSecret || j.engine_shared_secret);
       ' 2>/dev/null || true
+      bound_id="$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync("/run/vacti-enroll.out","utf8")).engine_id||""))}catch{}' 2>/dev/null || true)"
     fi
+    # ENGINE_ID: the CP binds the engine identity to the enroll token (the id reserved
+    # when the pairing code / token was minted, e.g. the name typed in Settings > Engine)
+    # and returns it as engine_id. Without this line the engine fell back to its schema
+    # default (kali-engine-01), so EVERY appliance/container joined the tailnet as
+    # kali-engine-01, kali-engine-01-1, ... and the operator could not tell which node
+    # to SSH into. Parity with the terminal installer (bootstrap-apt.sh writes ENGINE_ID).
+    # Sanitised to a hostname-safe token; falls back to the id this script POSTed.
+    bound_id="${bound_id:-}"; bound_id="${bound_id//[^A-Za-z0-9._-]/}"; bound_id="${bound_id:0:60}"
+    if [[ -z "$bound_id" ]]; then bound_id="${ENGINE_ID//[^A-Za-z0-9._-]/}"; bound_id="${bound_id:0:60}"; fi
+    if [[ -n "$bound_id" ]]; then printf 'ENGINE_ID=%s\n' "$bound_id"; fi
   } > "$ENV_TMP"
+  # Use the CP-bound id for the tailnet hostname below too.
+  if [[ -n "${bound_id:-}" ]]; then ENGINE_ID="$bound_id"; fi
   # Validate the inline-written file BEFORE publishing: the scoped producer token must
   # be present and non-empty, else the engine would be inert behind an enrolled-looking
   # engine.env. Fail loud (temp discarded, engine.env never appears) so the next boot
@@ -256,7 +274,11 @@ if [[ -n "${HS_PREAUTH_KEY:-}" && -n "${HS_LOGIN_SERVER:-}" ]] && command -v tai
     progress HS_JOIN "headscale: node already joined (BackendState Running); skipping enrollment auto-join"
   else
     progress HS_JOIN "headscale: joining tailnet via enroll preauth key (login-server=${HS_LOGIN_SERVER}, hostname=${ENGINE_ID}, key not logged)"
-    if tailscale up --login-server="$HS_LOGIN_SERVER" --authkey="$HS_PREAUTH_KEY" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false >>/run/vacti-tailscale-up.log 2>&1; then
+    # --reset: the GUI kiosk may already have run `tailscale up --accept-routes` (exchange-delivered key,
+    # no --login-server). Without --reset this call then dies with "changing settings via 'tailscale up'
+    # requires mentioning all non-default flags" and the enrollment auto-join silently never happened.
+    # --timeout bounds the wait for Running so a dead login server cannot stall the engine start below.
+    if tailscale up --reset --login-server="$HS_LOGIN_SERVER" --authkey="$HS_PREAUTH_KEY" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false --timeout=60s >>/run/vacti-tailscale-up.log 2>&1; then
       progress HS_JOIN_OK "headscale: tailscale up succeeded; engine should appear in 'headscale nodes list'"
     else
       progress HS_JOIN_SKIP "headscale: tailscale up failed (see /run/vacti-tailscale-up.log); engine continues over public HTTPS, runtime heal retries"

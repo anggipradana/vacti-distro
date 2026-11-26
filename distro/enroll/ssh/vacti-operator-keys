@@ -1,0 +1,22 @@
+#!/bin/sh
+# /usr/local/libexec/vacti-operator-keys - sshd AuthorizedKeysCommand for the
+# appliance login account (see /etc/ssh/sshd_config.d/10-vacti-appliance.conf).
+#
+# Runs as the ENGINE user (AuthorizedKeysCommandUser) and prints ONLY the public
+# keys inside the engine-managed block of that user's own ~/.ssh/authorized_keys
+# (written by the engine from the control-plane operator key list). Every printed
+# line is re-validated as a single bare public key of an allowed type, so options
+# such as command= / from= / environment= can never ride through. Prints nothing
+# (and exits 0) when the file is absent, so sshd simply falls back to the account's
+# own authorized_keys. Must stay root-owned and not group/world writable.
+set -u
+home="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)"
+[ -n "$home" ] || exit 0
+f="${home}/.ssh/authorized_keys"
+[ -r "$f" ] || exit 0
+awk '
+  /^# BEGIN vacti-operator-managed/ { inblk = 1; next }
+  /^# END vacti-operator-managed/   { inblk = 0; next }
+  inblk && /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+\/]+=*( [ -~]*)?$/ { print }
+' "$f"
+exit 0

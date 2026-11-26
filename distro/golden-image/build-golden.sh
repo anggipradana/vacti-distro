@@ -94,6 +94,8 @@ rm -rf "$STAGE"; mkdir -p \
   "${STAGE}/etc/apt/apt.conf.d" \
   "${STAGE}/etc/needrestart/conf.d" \
   "${STAGE}/usr/share/keyrings" \
+  "${STAGE}/etc/ssh/sshd_config.d" \
+  "${STAGE}/usr/local/libexec" \
   "${STAGE}/opt/vacti-build"
 # branding assets -> /usr/share/vacti/branding (apply-branding.sh reads these)
 cp -a "${BRAND_DIR}/os-release" "${BRAND_DIR}/issue" "${BRAND_DIR}/issue.net" \
@@ -126,6 +128,13 @@ cp -a "${ENROLL_DIR}/firstboot/vacti-firstboot.service"  "${STAGE}/etc/systemd/s
 # separate enable - only to be present on disk.
 cp -a "${ENROLL_DIR}/install/vacti-engine-install"          "${STAGE}/usr/local/sbin/vacti-engine-install"
 cp -a "${ENROLL_DIR}/install/vacti-engine-install.service"  "${STAGE}/etc/systemd/system/vacti-engine-install.service"
+# appliance SSH login policy: the Debian cloud base disables PasswordAuthentication,
+# and the engine converges the control-plane operator keys into the ENGINE user's
+# home (not the arparp login account). The drop-in re-enables the arparp password
+# login and lets arparp accept the engine-managed operator key block via a root-owned
+# AuthorizedKeysCommand helper. See distro/enroll/ssh/10-vacti-appliance.conf.
+install -m0644 "${ENROLL_DIR}/ssh/10-vacti-appliance.conf" "${STAGE}/etc/ssh/sshd_config.d/10-vacti-appliance.conf"
+install -m0755 "${ENROLL_DIR}/ssh/vacti-operator-keys"     "${STAGE}/usr/local/libexec/vacti-operator-keys"
 # first-boot swapfile sizing (RAM known only at deploy) + its oneshot unit
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot"         "${STAGE}/usr/local/sbin/vacti-swap-firstboot"
 cp -a "${ENROLL_DIR}/firstboot/vacti-swap-firstboot.service" "${STAGE}/etc/systemd/system/vacti-swap-firstboot.service"
@@ -284,10 +293,27 @@ chmod 0755 "${STAGE}/usr/local/sbin/vacti-firstboot" "${STAGE}/usr/local/sbin/va
 # + NodeSource). When no engine .debs were staged (VACTI_FAT_OVA=0 or ENGINE_DEBS_DIR
 # unset), provision.sh skips the bake and the THIN-BOOTSTRAP path applies: the engine
 # .deb is pulled at first boot by vacti-engine-install.service using the enroll token.
+# virt-customize --copy-in (tar-in) preserves the BUILD HOST uid/gid of the staged
+# tree, AND re-stamps existing guest directories it lands on (/etc, /usr, /usr/local,
+# /etc/systemd/system, /opt). On a CI runner that is uid 1001, so a shipped OVA had
+# /etc, /usr and root-executed scripts (vacti-firstboot, unit files) owned by a uid
+# that the FIRST extra local account (`adduser` -> 1001) would inherit = root. It also
+# makes sshd reject the AuthorizedKeysCommand helper (unsafe path ownership). The
+# provision step re-owns everything carrying that uid/gid to root before any account
+# is created. A root build (uid 0) is a no-op; the gid clause only applies to a
+# non-system gid (>= 1000) so a build user whose primary group happens to be a real
+# guest system group never has that group stripped from base-image files.
+_STAGE_UID="$(id -u)"; _STAGE_GID="$(id -g)"
+_STAGE_FIND="-uid ${_STAGE_UID}"
+(( _STAGE_GID >= 1000 )) && _STAGE_FIND="${_STAGE_FIND} -o -gid ${_STAGE_GID}"
 cat > "${WORK}/provision.sh" <<PROV
 #!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+if [ "${_STAGE_UID}" != "0" ]; then
+  echo "[prov] re-owning copy-in tree (build ${_STAGE_FIND}) to root:root"
+  find /etc /usr /opt /boot -xdev \( ${_STAGE_FIND} \) -exec chown -h root:root {} + 2>/dev/null || true
+fi
 # Non-interactive dpkg conffile policy for EVERY build-time apt-get install below.
 # DEBIAN_FRONTEND=noninteractive alone does NOT answer dpkg conffile prompts: when
 # a package (e.g. earlyoom) ships /etc/default/earlyoom and the golden stage has
@@ -550,6 +576,11 @@ systemctl enable tailscaled 2>/dev/null || true
 # first-boot path (enroll/firstboot/vacti-firstboot) does 'enable --now' to also
 # start it on first boot. earlyoom's --avoid list already protects sshd.
 systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
+# The copy-in tree may carry the build host's ownership; sshd refuses an
+# AuthorizedKeysCommand that is not root-owned (StrictModes-style check), so pin it.
+chown root:root /usr/local/libexec/vacti-operator-keys /etc/ssh/sshd_config.d/10-vacti-appliance.conf 2>/dev/null || true
+chmod 0755 /usr/local/libexec/vacti-operator-keys 2>/dev/null || true
+chmod 0644 /etc/ssh/sshd_config.d/10-vacti-appliance.conf 2>/dev/null || true
 
 # Headless NetworkManager opt-in (VACTI_HEADLESS_NM=1). Default stays
 # systemd-networkd + cloud-init (zero-touch seed path untouched). When opted in,

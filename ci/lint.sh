@@ -10,7 +10,7 @@ rc=0
 echo "== shellcheck =="
 if command -v shellcheck >/dev/null 2>&1; then
   # all our shell scripts (scripts, hooks, auto/config, make-seed, etc.)
-  mapfile -t SH < <(find distro ci -type f \( -name '*.sh' -o -name 'vacti-firstboot' -o -name 'vacti-swap-firstboot' -o -name 'vacti-slice-cap' -o -name 'vacti-activate' -o -name 'vacti-netpanel' -o -name 'vacti-netsetup' -o -name 'vacti-engine-install' \) ; \
+  mapfile -t SH < <(find distro ci -type f \( -name '*.sh' -o -name 'vacti-firstboot' -o -name 'vacti-swap-firstboot' -o -name 'vacti-slice-cap' -o -name 'vacti-activate' -o -name 'vacti-netpanel' -o -name 'vacti-netsetup' -o -name 'vacti-engine-install' -o -name 'vacti-operator-keys' \) ; \
                     echo distro/live-build-config/auto/config)
   # hooks are /bin/sh; include them too
   mapfile -t HOOKS < <(find distro/live-build-config/config/hooks -type f -name '*.chroot' 2>/dev/null || true)
@@ -49,6 +49,16 @@ if [[ -x ci/arsenal-sync-check.sh ]]; then
   ci/arsenal-sync-check.sh || rc=1
 else
   echo "  ci/arsenal-sync-check.sh missing; skipping"
+fi
+
+echo "== appliance SSH + enrollment field-bug contracts =="
+# Regression for the OVA/Docker field bugs (missing ENGINE_ID, password SSH disabled by the
+# cloud base, CP operator key never reaching arparp, build-uid leak on /etc+/usr, kiosk
+# pairing exchange eaten by a blocking tailscale up, tailscale up without --reset).
+if [[ -x distro/test/appliance-ssh-enroll-contract.sh ]]; then
+  bash distro/test/appliance-ssh-enroll-contract.sh || rc=1
+else
+  echo "  distro/test/appliance-ssh-enroll-contract.sh missing; skipping"
 fi
 
 echo "== enroll boot-chain contracts =="

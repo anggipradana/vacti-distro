@@ -325,7 +325,14 @@ resolve_exchange() { # url code
       local ts
       ts="$(jq -r '.tsAuthKey // empty' "$out" 2>/dev/null)"
       [[ -z "$ts" ]] && ts="$(sed -n 's/.*"tsAuthKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$out" | head -n1)"
-      [[ -n "$ts" ]] && ts_join_auto "$ts"
+      # DETACHED + fds closed: this function's stdout is the token DATA channel the kiosk captures
+      # under a 40s subprocess timeout. A blocking `tailscale up` here (no --login-server, so on a
+      # Headscale deployment it waits on the public control plane) ran BEFORE the token was printed;
+      # when it outlived the timeout the kiosk killed the subcommand, showed "network error", and the
+      # pairing code was ALREADY consumed server-side - every retry then got 410 and enrollment never
+      # happened (field: pairing code exchanged, no enroll POST, operator re-mints repeatedly). The
+      # firstboot enroll response carries the proper per-engine Headscale key and joins with --reset.
+      if [[ -n "$ts" ]]; then ( ts_join_auto "$ts" ) </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true; fi
       if [[ -n "$tok" ]]; then printf '%s' "$tok"; rc=0; else rc=1; fi
       ;;
     404) rc=44 ;;
@@ -416,7 +423,9 @@ do_resolve_target() {
 ts_join() { # tskey
   local ts="${1:-}"
   if [[ -n "$ts" ]] && command -v tailscale >/dev/null 2>&1; then
-    tailscale up --authkey="$ts" --accept-routes >/dev/null 2>&1 || true
+    # Bounded: --timeout caps the wait for Running, the outer timeout caps a wedged CLI, so the
+    # optional tailnet join can never stall the activation flow (apply_optional runs under a 60s cap).
+    timeout 45 tailscale up --authkey="$ts" --accept-routes --timeout=30s >/dev/null 2>&1 || true
     log "tailscale up attempted (key not logged)"
   fi
 }

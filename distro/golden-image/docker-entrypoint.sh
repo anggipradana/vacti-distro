@@ -314,6 +314,7 @@ if [[ -z "${VACTI_TOKEN:-}" && -n "${ENROLL_TOKEN}" ]]; then
       secret="$(jq -r '.engineSharedSecret // .engine_shared_secret // empty' /tmp/vacti-enroll.out 2>/dev/null || true)"
       [[ -n "$secret" ]] && printf 'VACTI_ENGINE_SHARED_SECRET=%s\n' "$secret"
       unset secret
+      bound_id="$(jq -r '.engine_id // empty' /tmp/vacti-enroll.out 2>/dev/null || true)"
     elif command -v node >/dev/null 2>&1; then
       # node fallback (node ships in the image): parse + emit only non-empty values.
       node -e '
@@ -325,7 +326,15 @@ if [[ -z "${VACTI_TOKEN:-}" && -n "${ENROLL_TOKEN}" ]]; then
         w("VACTI_GATEKEEPER_TOKEN", j.gatekeeper_token || j.gatekeeper);
         w("VACTI_ENGINE_SHARED_SECRET", j.engineSharedSecret || j.engine_shared_secret);
       ' 2>/dev/null || true
+      bound_id="$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync("/tmp/vacti-enroll.out","utf8")).engine_id||""))}catch{}' 2>/dev/null || true)"
     fi
+    # ENGINE_ID (parity with vacti-firstboot + bootstrap-apt.sh): persist the CP-bound
+    # engine id (the name reserved when the token/pairing code was minted). The engine
+    # reads ENGINE_ID from its environment; without it every container ran as the
+    # schema default kali-engine-01 and joined the tailnet as kali-engine-01-N.
+    bound_id="${bound_id:-}"; bound_id="${bound_id//[^A-Za-z0-9._-]/}"; bound_id="${bound_id:0:60}"
+    if [[ -z "$bound_id" ]]; then bound_id="${ENGINE_ID//[^A-Za-z0-9._-]/}"; bound_id="${bound_id:0:60}"; fi
+    if [[ -n "$bound_id" ]]; then printf 'ENGINE_ID=%s\n' "$bound_id"; fi
   } > "$STATE_ENV"
   chmod 0600 "$STATE_ENV"
   umask 022
@@ -356,6 +365,10 @@ export VACTI_TOKEN
 # X-Engine-Auth edge secret: from engine.env (enroll / persisted) or a `docker run -e`.
 # Must be in the engine's env BEFORE exec - the engine reads it once at module load.
 [[ -n "${VACTI_ENGINE_SHARED_SECRET:-}" ]] && export VACTI_ENGINE_SHARED_SECRET
+# Engine identity: from engine.env (enroll / persisted), a `docker run -e ENGINE_ID`, or
+# the hostname fallback above. Exported so the engine never falls back to its
+# kali-engine-01 schema default (tailnet hostname collisions across containers).
+export ENGINE_ID
 
 # Pre-start a virtual display so the first headful evidence capture does not have
 # to fall back (the orchestrator will spawn its own Xvfb otherwise).
@@ -524,8 +537,10 @@ headscale_autojoin() {
   log "headscale: joining tailnet via enroll preauth key (login-server=${server}, hostname=${ENGINE_ID}, key not logged)"
   # Group so the redirect is owned by the invoking shell, not sudo (shellcheck SC2024):
   # the subshell owns /tmp/tailscale-up.log fd and both attempts' output flows into it.
-  if { tailscale up --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false \
-       || sudo -n tailscale up --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false; } >>/tmp/tailscale-up.log 2>&1; then
+  # --reset: a persisted tailscaled state on the volume may carry earlier non-default prefs, which makes a
+  # plain `up` refuse ("requires mentioning all non-default flags"). --timeout bounds the wait for Running.
+  if { tailscale up --reset --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false --timeout=60s \
+       || sudo -n tailscale up --reset --login-server="$server" --authkey="$key" --hostname="$ENGINE_ID" --accept-dns=false --accept-routes=false --timeout=60s; } >>/tmp/tailscale-up.log 2>&1; then
     log "headscale: tailscale up succeeded; the engine should appear in 'headscale nodes list'"
   else
     log "headscale: tailscale up failed (see /tmp/tailscale-up.log); engine continues over public HTTPS, runtime heal will retry"
