@@ -489,12 +489,14 @@ Both installers verify the archive against `SHA256SUMS` and abort on mismatch.
 
 ### About the dashboard one-liner
 
-The CP dashboard can also show a one-liner of the form
+The CP dashboard shows a one-liner of the form
 `curl -fsSL <CP>/api/connector/install.sh | sudo sh -s -- --token ... --api-url ...`.
-That variant is served by the CP itself. It runs the connector **in the foreground
-of your terminal** and does not register a service, and it needs the CP to expose
-`/api/connector/*` publicly. For a connector that survives logout and reboot, use
-the platform commands on this page.
+Since CP commit `09bff785` that script is a small POSIX bootstrap. It downloads this repo's canonical
+`install-connector.sh`, resolves the newest `connector-v*` release, and runs the installer with bash, so it
+verifies `SHA256SUMS`, installs the systemd/launchd service, and supports `--uninstall`, exactly like the
+platform commands on this page. Piping it into plain `sh` is fine. Older CPs served a foreground-only variant;
+if the dashboard command runs the connector in your terminal, use the platform commands above instead. The
+full flow, from engagement creation to tunnel teardown, is in [E2E-GUIDE.md](E2E-GUIDE.md).
 
 ## Security model
 
