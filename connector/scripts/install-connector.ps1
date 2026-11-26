@@ -49,11 +49,17 @@
 
 .EXAMPLE
     .\install-connector.ps1 -Token <id> -ApiUrl https://cp.example
+
+.EXAMPLE
+    $env:VACTI_INSTALL_ID='<id>'; $env:VACTI_API_URL='https://cp.example'
+    iwr -useb <release>/install-connector.ps1 | iex
 #>
 [CmdletBinding()]
 param(
-    [string]$Token,
-    [string]$ApiUrl,
+    # Defaults come from env so the `iwr ... | iex` one-liner (which cannot pass
+    # arguments) works: set $env:VACTI_INSTALL_ID / $env:VACTI_API_URL first.
+    [string]$Token = $env:VACTI_INSTALL_ID,
+    [string]$ApiUrl = $env:VACTI_API_URL,
     [string]$Cidrs,
     [string]$Version,
     [string]$Repo = 'anggipradana/vacti-distro',
@@ -66,6 +72,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Windows PowerShell 5.1 on older .NET defaults to TLS 1.0/1.1, which GitHub and
+# HuggingFace reject ("Could not create SSL/TLS secure channel"). Opt into 1.2.
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch { }
 
 # ---------------------------------------------------------------------------- #
 # constants + layout
@@ -147,17 +159,20 @@ function Get-ConnectorBinary {
     param([Parameter(Mandatory)][string]$Destination, [Parameter(Mandatory)][string]$Arch,
           [Parameter(Mandatory)][string]$Ver)
 
+    # Dry run must never touch an existing install (New-Item -Force on the live
+    # .exe used to truncate it to 0 bytes).
+    if ($DryRun) {
+        if ($Binary) { Write-Step "[dry-run] would install local binary $Binary to $Destination" }
+        else { Write-Step "[dry-run] would download vacti-connector $Ver for windows/$Arch to $Destination" }
+        return
+    }
+
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
 
     if ($Binary) {
         if (-not (Test-Path $Binary)) { Die "-Binary $Binary does not exist" }
         Write-Step "using local binary $Binary"
         Copy-Item -Path $Binary -Destination $Destination -Force
-        return
-    }
-    if ($DryRun) {
-        Write-Step "[dry-run] would download vacti-connector $Ver for windows/$Arch"
-        New-Item -ItemType File -Force -Path $Destination | Out-Null
         return
     }
     if ($Arch -ne 'amd64') {
@@ -298,6 +313,10 @@ function Show-Status {
 # ---------------------------------------------------------------------------- #
 
 function Uninstall-Connector {
+    if ($DryRun) {
+        Write-Step "[dry-run] would stop + delete service $ServiceName and remove $RootDir"
+        return
+    }
     Write-Step 'uninstalling vacti connector'
     if (-not ($Sandbox -or $DryRun)) {
         & sc.exe stop $ServiceName   *> $null
@@ -333,9 +352,10 @@ function Invoke-Main {
     if ($Cidrs) { Write-Step "declared reach (informational): $Cidrs" }
 
     Get-ConnectorBinary -Destination $ExePath -Arch $arch -Ver $ver
-    Write-Step "installed binary at $ExePath"
-
-    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+    if (-not $DryRun) {
+        Write-Step "installed binary at $ExePath"
+        New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+    }
     Invoke-Enroll
     Install-Service
     Show-Status

@@ -42,6 +42,13 @@
 #
 # Exit status: 0 success, non-zero on any failure (set -euo pipefail throughout).
 
+# This is a bash script. Piped into plain `sh` (dash on Debian/Ubuntu) it would
+# die on `set -o pipefail` with a cryptic message, so say what to do instead.
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "error: install-connector.sh needs bash; pipe it into 'sudo bash -s --' (not 'sh')" >&2
+  exit 2
+fi
+
 set -euo pipefail
 
 # ---------------------------------------------------------------------------- #
@@ -94,7 +101,19 @@ run_priv() {
 }
 
 usage() {
-  sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; s/^#$//' | sed '$d'
+  # When piped (curl ... | bash -s -- --help) $0 is "bash", not this file, so the
+  # header comment cannot be re-read; print a compact usage instead.
+  if [ -f "$0" ] && grep -q 'install-connector.sh' "$0" 2>/dev/null; then
+    sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; s/^#$//' | sed '$d'
+  else
+    cat <<'EOF'
+install-connector.sh --token <install-id> --api-url <https://cp.example>
+                     [--cidrs <list>] [--version X.Y.Z] [--repo owner/name]
+                     [--binary <path>] [--dry-run]
+install-connector.sh --uninstall
+Env: VACTI_CONNECTOR_RELEASE_BASE (mirror base URL), VACTI_CONNECTOR_BINARY.
+EOF
+  fi
 }
 
 # ---------------------------------------------------------------------------- #
@@ -165,6 +184,21 @@ require_root_if_needed() {
   fi
 }
 
+# require_service_manager runs BEFORE enrollment: the install token is single-use,
+# so failing on a missing systemd/launchd only after enrolling would burn it.
+require_service_manager() {
+  if [ "$SANDBOX" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$OS" = "linux" ]; then
+    if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+      die "systemd is not running on this host (plain container, WSL without systemd, Alpine/OpenRC...). Use the Docker image or run the binary manually; see the connector README. Your install token was NOT used."
+    fi
+  else
+    command -v launchctl >/dev/null 2>&1 || die "launchctl not found; cannot register the LaunchDaemon"
+  fi
+}
+
 # ---------------------------------------------------------------------------- #
 # download + verify
 # ---------------------------------------------------------------------------- #
@@ -214,17 +248,21 @@ resolve_version() {
 acquire_binary() {
   local dest="$1"
 
-  if [ -n "$LOCAL_BINARY" ]; then
-    [ -f "$LOCAL_BINARY" ] || die "--binary ${LOCAL_BINARY} does not exist"
-    log "using local binary ${LOCAL_BINARY}"
-    cp "$LOCAL_BINARY" "$dest"
-    chmod 0755 "$dest"
+  # Dry run must never touch an existing install (it used to truncate the live
+  # binary to 0 bytes via `: > $dest`).
+  if [ "$DRY_RUN" -eq 1 ]; then
+    if [ -n "$LOCAL_BINARY" ]; then
+      log "[dry-run] would install local binary ${LOCAL_BINARY} to ${dest}"
+    else
+      log "[dry-run] would download vacti-connector ${VERSION} for ${OS}/${ARCH} to ${dest}"
+    fi
     return 0
   fi
 
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] would download vacti-connector ${VERSION} for ${OS}/${ARCH}"
-    : > "$dest"
+  if [ -n "$LOCAL_BINARY" ]; then
+    [ -f "$LOCAL_BINARY" ] || die "--binary ${LOCAL_BINARY} does not exist"
+    log "using local binary ${LOCAL_BINARY}"
+    place_binary "$LOCAL_BINARY" "$dest"
     return 0
   fi
 
@@ -246,9 +284,18 @@ acquire_binary() {
 
   tar -C "$work" -xzf "${work}/${asset}"
   [ -f "${work}/${BIN_NAME}" ] || die "archive did not contain ${BIN_NAME}"
-  cp "${work}/${BIN_NAME}" "$dest"
-  chmod 0755 "$dest"
+  place_binary "${work}/${BIN_NAME}" "$dest"
   rm -rf "$work"
+}
+
+# place_binary copies $1 next to $2 then renames it into place. A rename works
+# even while the old binary is running (a plain cp onto it fails with "Text file
+# busy"), so re-running the installer on a live host upgrades in place.
+place_binary() {
+  local src="$1" dest="$2"
+  cp "$src" "${dest}.new"
+  chmod 0755 "${dest}.new"
+  mv -f "${dest}.new" "$dest"
 }
 
 # ---------------------------------------------------------------------------- #
@@ -315,6 +362,10 @@ EOF
 }
 
 write_unit() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] would write service definition ${UNIT_PATH}"
+    return 0
+  fi
   mkdir -p "$(dirname "$UNIT_PATH")"
   if [ "$OS" = "linux" ]; then
     render_systemd_unit > "$UNIT_PATH"
@@ -384,12 +435,13 @@ enroll_once() {
   # Enrollment writes state.json then the process stays up talking to the relay;
   # we wait for state.json then stop it. A bad token makes it exit early with no
   # state file, which we detect as a failure.
-  local pid rc=1
+  local pid rc=1 enroll_log
+  enroll_log="$(mktemp)"
   VACTI_INSTALL_ID="$TOKEN" \
   VACTI_API_URL="$API_URL" \
   VACTI_CONNECTOR_STATE="$STATE_DIR" \
   VACTI_CONNECTOR_CIDRS="$CIDRS" \
-    "$bin" >/dev/null 2>&1 &
+    "$bin" >"$enroll_log" 2>&1 &
   pid=$!
 
   local waited=0
@@ -405,7 +457,15 @@ enroll_once() {
     wait "$pid" 2>/dev/null || true
   fi
 
-  [ "$rc" -eq 0 ] || die "enrollment failed: no identity was written (check the token and --api-url)"
+  if [ "$rc" -ne 0 ]; then
+    # Surface the connector's own reason (e.g. "bootstrap rejected (HTTP 404)",
+    # "invalid format") instead of a generic message.
+    warn "connector output:"
+    sed 's/^/    /' "$enroll_log" >&2 || true
+    rm -f "$enroll_log"
+    die "enrollment failed: no identity was written (check the token and --api-url)"
+  fi
+  rm -f "$enroll_log"
   log "enrollment succeeded"
 }
 
@@ -416,7 +476,9 @@ enroll_once() {
 activate_service() {
   if [ "$OS" = "linux" ]; then
     run_priv systemctl daemon-reload
-    run_priv systemctl enable --now "${SERVICE_NAME}.service"
+    run_priv systemctl enable "${SERVICE_NAME}.service"
+    # restart (not just --now) so a re-run actually picks up the new binary/unit.
+    run_priv systemctl restart "${SERVICE_NAME}.service"
   else
     # bootout first so a re-run reloads a changed plist (ignore "not loaded").
     if [ "$SANDBOX" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
@@ -456,6 +518,10 @@ print_status() {
 # ---------------------------------------------------------------------------- #
 
 do_uninstall() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] would stop the service and remove ${UNIT_PATH}, ${BIN_DIR}/${BIN_NAME} and ${STATE_DIR}"
+    return 0
+  fi
   log "uninstalling vacti connector"
   if [ "$OS" = "linux" ]; then
     if [ "$SANDBOX" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
@@ -499,16 +565,17 @@ main() {
   fi
 
   require_root_if_needed
+  require_service_manager
 
   log "installing vacti connector ${VERSION:-latest} for ${OS}/${ARCH}"
   [ -n "$CIDRS" ] && log "declared reach (informational): ${CIDRS}"
 
   resolve_version
-  mkdir -p "$BIN_DIR"
+  [ "$DRY_RUN" -eq 1 ] || mkdir -p "$BIN_DIR"
   acquire_binary "${BIN_DIR}/${BIN_NAME}"
-  log "installed binary at ${BIN_DIR}/${BIN_NAME}"
+  [ "$DRY_RUN" -eq 1 ] || log "installed binary at ${BIN_DIR}/${BIN_NAME}"
 
-  mkdir -p "$STATE_DIR"
+  [ "$DRY_RUN" -eq 1 ] || mkdir -p "$STATE_DIR"
   preflight_cp_reachable
   enroll_once
   write_unit

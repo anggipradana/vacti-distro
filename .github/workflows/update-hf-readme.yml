@@ -13,6 +13,7 @@
 # TRIGGER: manual only.
 #   gh workflow run update-hf-readme.yml
 #   gh workflow run update-hf-readme.yml -f readme_path=hf/README.md
+#   gh workflow run update-hf-readme.yml -f readme_path=connector/README.md -f repo_id=anggipradana/vacti-connector
 name: update-hf-readme
 
 on:
@@ -22,6 +23,14 @@ on:
         description: "Path (in this repo) of the README to push to the dataset root as README.md"
         required: false
         default: "hf/README.md"
+      repo_id:
+        description: "Target HF dataset (connector card: readme_path=connector/README.md + vacti-connector)"
+        required: false
+        type: choice
+        default: "anggipradana/vacti-distro-images"
+        options:
+          - anggipradana/vacti-distro-images
+          - anggipradana/vacti-connector
 
 # Least privilege: only read this repo's checkout. The HF upload authenticates
 # with HF_PUBLISH_TOKEN, not the GitHub token.
@@ -68,6 +77,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_PUBLISH_TOKEN }}
           README_PATH: ${{ github.event.inputs.readme_path }}
+          REPO_ID: ${{ github.event.inputs.repo_id || 'anggipradana/vacti-distro-images' }}
         run: |
           set -euo pipefail
           if [ -z "${HF_TOKEN:-}" ]; then
@@ -82,9 +92,13 @@ jobs:
           fi
           # Upload exactly one file -> dataset-root README.md. No other path is
           # touched, so the OVA / SHA256SUMS objects are left intact.
+          case "$REPO_ID" in
+            anggipradana/vacti-distro-images|anggipradana/vacti-connector) ;;
+            *) echo "refusing unknown repo_id '$REPO_ID'" >&2; exit 1 ;;
+          esac
           huggingface-cli upload \
-            anggipradana/vacti-distro-images \
+            "$REPO_ID" \
             "$README_PATH" \
             README.md \
             --repo-type dataset \
-            --commit-message "docs: refresh dataset README (engine 0.2.495 apt; OVA headline v0.2.491; connector 0.1.4)"
+            --commit-message "docs: refresh dataset README from ${README_PATH} (${GITHUB_SHA::7})"

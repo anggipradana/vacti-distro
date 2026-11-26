@@ -80,6 +80,32 @@ Describe 'install-connector.ps1' {
         (Join-Path $prefix 'Vacti\connector\bin\vacti-connector.exe') | Should -Exist
     }
 
+    It 'dry-run on an existing install leaves the binary untouched' {
+        $prefix = Join-Path $script:Work 'install'
+        $exe = Join-Path $prefix 'Vacti\connector\bin\vacti-connector.exe'
+        'live-binary' | Set-Content -Path $exe -Encoding Ascii  # differs from the stub
+        $before = (Get-FileHash -Algorithm SHA256 -Path $exe).Hash
+        $r = Invoke-Installer -Prefix $prefix -InstallerArgs @('-DryRun')
+        $r.Code | Should -Be 0
+        (Get-FileHash -Algorithm SHA256 -Path $exe).Hash | Should -Be $before
+        $u = Invoke-Installer -Prefix $prefix -InstallerArgs @('-Uninstall', '-DryRun')
+        $u.Code | Should -Be 0
+        $exe | Should -Exist
+    }
+
+    It 'reads -Token/-ApiUrl from env so the iwr | iex one-liner works' {
+        $prefix = Join-Path $script:Work 'envdefault'
+        $env:VACTI_INSTALL_ID = 'envtoken000000000001'
+        $env:VACTI_API_URL    = 'https://cp.example'
+        try {
+            $r = Invoke-Installer -Prefix $prefix -InstallerArgs @('-DryRun')
+        } finally {
+            Remove-Item env:VACTI_INSTALL_ID, env:VACTI_API_URL -ErrorAction SilentlyContinue
+        }
+        $r.Code | Should -Be 0
+        $r.Out  | Should -Match 'would enrol with the supplied token against https://cp\.example'
+    }
+
     It 'uninstall removes the install tree' {
         $prefix = Join-Path $script:Work 'install'
         $r = Invoke-Installer -Prefix $prefix -InstallerArgs @('-Uninstall')

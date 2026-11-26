@@ -97,6 +97,36 @@ echo "$out" | grep -qi "skipping enrollment" \
 [ -x "$BIN" ] || die "linux: binary missing after re-run"
 ok "linux: re-run is idempotent and skips enrollment"
 
+# 2b. --dry-run on a live install must touch nothing (it used to truncate the
+# installed binary to 0 bytes and rewrite the unit).
+BIN_SUM_BEFORE="$(sha256sum "$BIN" | awk '{print $1}')"
+rm -f "$UNIT"
+run_install "$LPREFIX" "" --dry-run >/dev/null 2>&1 || die "linux: dry-run returned non-zero"
+[ "$(sha256sum "$BIN" | awk '{print $1}')" = "$BIN_SUM_BEFORE" ] \
+  || die "linux: dry-run modified the installed binary"
+[ ! -e "$UNIT" ] || die "linux: dry-run wrote the service unit"
+printf '%s\n' "$UNIT_BEFORE" > "$UNIT"
+run_install "$LPREFIX" "" --uninstall --dry-run >/dev/null 2>&1 || die "linux: dry-run uninstall returned non-zero"
+[ -x "$BIN" ] && [ -f "$UNIT" ] && [ -f "$STATE" ] || die "linux: dry-run uninstall deleted files"
+ok "linux: dry-run (install + uninstall) leaves an existing install untouched"
+
+# 2c. upgrade over a binary that is currently executing (cp would hit ETXTBSY).
+BUSY="${WORK}/busy-bin"; cp /bin/sleep "$BUSY"
+cp "$BUSY" "$BIN"; "$BIN" 30 & busy_pid=$!
+sleep 0.3
+out="$(run_install "$LPREFIX" "" --token test-token --api-url https://cp.example 2>&1)" \
+  || { kill "$busy_pid" 2>/dev/null; die "linux: re-install over a running binary failed: $out"; }
+kill "$busy_pid" 2>/dev/null || true; wait "$busy_pid" 2>/dev/null || true
+cmp -s "$STUB" "$BIN" || die "linux: running binary was not replaced"
+ok "linux: re-install replaces a running binary (no Text file busy)"
+
+# 2d. piping into plain sh (dash) gives an actionable error, not a cryptic one.
+if command -v dash >/dev/null 2>&1; then
+  out="$(dash "$SCRIPT" --help 2>&1)" && die "linux: dash run should refuse"
+  echo "$out" | grep -q "needs bash" || die "linux: dash run gave no bash hint: $out"
+  ok "sh/dash invocation is refused with a 'needs bash' hint"
+fi
+
 # ============================================================================= #
 # 3. uninstall removes everything
 # ============================================================================= #
