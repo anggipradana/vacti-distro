@@ -143,7 +143,8 @@ function Resolve-Version {
     if ($Version)  { return $Version }
     if ($Binary)   { return 'local' }
     Write-Step "resolving latest connector release from $Repo"
-    $api = "https://api.github.com/repos/$Repo/releases"
+    # per_page=100: images-v* releases push connector-v* off the default 30-entry page.
+    $api = "https://api.github.com/repos/$Repo/releases?per_page=100"
     $releases = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'vacti-connector-installer' }
     $tag = ($releases |
         Where-Object { $_.tag_name -like 'connector-v*' } |

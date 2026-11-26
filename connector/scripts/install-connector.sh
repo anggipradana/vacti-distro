@@ -233,7 +233,9 @@ resolve_version() {
   [ -n "$VERSION" ] && return 0
   [ -n "$LOCAL_BINARY" ] && { VERSION="local"; return 0; }
   log "resolving latest connector release from ${REPO}"
-  local api="https://api.github.com/repos/${REPO}/releases"
+  # per_page=100: frequent images-v* releases push connector-v* off the default
+  # 30-entry first page, after which no connector release would be found.
+  local api="https://api.github.com/repos/${REPO}/releases?per_page=100"
   local tmp; tmp="$(mktemp)"
   fetch "$api" "$tmp" || die "could not query GitHub releases for ${REPO}"
   # First tag_name that starts with connector-v, newest first.
