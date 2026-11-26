@@ -1,7 +1,8 @@
 # Vacti Connector: end-to-end guide
 
-This guide follows one intranet engagement from the control plane (CP) to tunnel teardown. Each step lists the
-expected UI state, database state and log lines, then the failures seen at that step and how to fix them. It was
+This guide follows one intranet engagement from the control plane (CP) to tunnel teardown. Every step has the same
+four parts: **UI** (what the operator sees), **DB** (rows to check), **Logs** (lines to expect), and
+**Troubleshooting** (failures seen at that step and the fix). It was
 written from an empirical run on the production CP on 2026-11-26: a fleet engine (`vacti7`) tested a web server on
 an isolated Docker network (`10.77.0.0/24`) that only the connector could reach. That run's evidence is at the end.
 
@@ -43,6 +44,10 @@ Do this once per CP deployment. Without it, enrollment answers 503 and via-conne
 | Edge (Caddyfile.vps) | `@connector_public` bypass + `handle_path /relay/*` | `curl https://<cp>/api/connector/install.sh` returns 200, not 401 |
 | Deploy | `scripts/deploy.sh` (rolling) | `/api/ready` reports the new build on both replicas |
 
+- **UI:** none yet. Settings > Connectors refuses to mint a token until the relay URL is configured.
+- **DB:** `connectors`, `connector_enrollment_tickets`, `connector_grants` exist (empty).
+- **Logs:** `docker logs vacti-relay-1` shows `relay <version> listening on :8080`.
+
 The relay secrets never go in an env file. The app replicas and the relay read them from the mounted directory
 (`VACTI_RELAY_*_SECRET_FILE`). To rotate one, delete the file, run the script again, then restart `app`, `app2` and
 `relay`. Rotating the session secret invalidates every live engine session.
@@ -62,14 +67,16 @@ UI: **Settings > Connectors > Add connector**. Enter a name and the intranet CID
 (for example `10.77.0.0/24`). This is the ceiling for every future grant. The dialog shows the install token once,
 with per-OS one-liners. The token is single use and expires after 30 minutes.
 
-Expected DB state:
+- **UI:** the connector is listed with status **pending**. The dialog shows the Linux/macOS, Windows and Docker
+  commands with your CP host filled in.
+- **DB:**
 
-```sql
-SELECT name, status, intranet_cidrs FROM connectors;          -- status = pending
-SELECT expires_at, consumed_at FROM connector_enrollment_tickets;  -- consumed_at IS NULL
-```
+  ```sql
+  SELECT name, status, intranet_cidrs FROM connectors;               -- status = pending
+  SELECT expires_at, consumed_at FROM connector_enrollment_tickets;  -- consumed_at IS NULL
+  ```
 
-Audit: `connector.install_created`.
+- **Logs:** audit row `connector.install_created` (Settings > Audit).
 
 Troubleshooting:
 
@@ -100,7 +107,8 @@ The CP-served `install.sh` is a small bootstrap. It downloads the canonical inst
 `SHA256SUMS`, enrolls once, and registers the `vacti-connector` systemd unit (launchd `id.vacti.connector` on macOS,
 `VactiConnector` service on Windows).
 
-Expected installer output (Linux):
+- **UI:** the connector stays **pending** until enrollment, then becomes **offline** (enrolled, not yet connected).
+- **Logs:** expected installer output (Linux):
 
 ```text
 ==> checksum verified
@@ -110,9 +118,9 @@ Expected installer output (Linux):
 ==> connector service is ACTIVE
 ```
 
-Expected state: `/var/lib/connector/state.json` exists with mode 0600. The ticket now has `consumed_at` set and the
-connector row has `enrolled_at`, `token_hash` and `grant_public_b64`, with status `offline` until the first relay
-connect.
+- **DB:** the ticket has `consumed_at` set. The connector row has `enrolled_at`, `token_hash` and
+  `grant_public_b64`, with status `offline` until the first relay connect. On the host,
+  `/var/lib/connector/state.json` exists with mode 0600.
 
 Troubleshooting:
 
@@ -129,16 +137,16 @@ Troubleshooting:
 The connector dials `wss://<cp>/relay/v1/connect` with its bearer token. The relay asks the CP
 (`POST /api/internal/relay/verify-connector`) whether the token is live, then reports presence.
 
-Expected logs:
+- **UI:** the connector shows **online** with its public IP and version. It turns **offline** after 3 minutes
+  without presence.
+- **DB:** `status = online`, `last_ip` = the site's public IP, `version` = the connector version, and
+  `last_seen_at` refreshed every 60 s.
+- **Logs:**
 
-```text
-journalctl -u vacti-connector:   connector: ... connected
-docker logs vacti-relay-1:       connector <id> connected from <public ip>
-```
-
-Expected DB state: `status = online`, `last_ip` = the site's public IP, `version` = the connector version, and
-`last_seen_at` refreshed every 60 s. UI: the connector shows **online**. The UI marks it offline after 3 minutes
-without presence.
+  ```text
+  journalctl -u vacti-connector:   connector: ... connected
+  docker logs vacti-relay-1:       connector <id> connected from <public ip>
+  ```
 
 Troubleshooting:
 
@@ -156,13 +164,17 @@ UI: **AI Pentest > New engagement**. Put the intranet targets in scope (for exam
 the connector under **Reach target via connector**. The picker only appears when the workspace has a connector.
 The readiness tile warns when no picked connector is online.
 
-Expected DB state: `pentest_engagements.run_config.connector_id = <connector id>`. This key is CP-only and is never
-forwarded to the engine.
+- **UI:** the engagement is **queued**. Its readiness tile names the connector and shows whether it is online.
+- **DB:** `pentest_engagements.run_config.connector_id = <connector id>`. This key is CP-only and is never forwarded
+  to the engine.
+- **Logs:** nothing yet. The engine sees the job only when it polls.
 
 Troubleshooting:
 
 - "The chosen connector is not available for this workspace": the connector belongs to another project or is
   revoked. Connectors are workspace-scoped.
+- The picker is missing: the selected project has no connectors. Create the connector in the same workspace.
+- The engagement stays **queued**: no eligible engine is idle, or it is hard-pinned to a busy or offline engine.
 
 ## Step 5: dispatch, grant mint and tunnel start on the engine
 
@@ -177,21 +189,23 @@ response. The engine starts `/usr/lib/vacti-engine/bin/vacti-tunnel` and sets
 `VACTI_TARGET_PROXY=socks5://127.0.0.1:1080`. The target-proxy pre-flight then proves the target is reachable
 through the tunnel before any tool runs.
 
-Expected state:
+- **UI:** the engagement moves **claimed** then **running**, with the engine name. If the tunnel cannot be proven,
+  it goes to **failed** with a "Target proxy pre-flight failed (fail-closed)" reason. It never runs direct.
+- **DB:**
 
-```sql
-SELECT sid, scan_id, scope_cidrs, expires_at, used_at FROM connector_grants;  -- one row, scan_id = engagement id
-```
+  ```sql
+  SELECT sid, scan_id, scope_cidrs, expires_at, used_at FROM connector_grants;  -- one row, scan_id = engagement id
+  ```
 
-Audit `connector.session_minted`. Engine log (`journalctl -u vacti-engine`):
+  Audit `connector.session_minted`, then `connector.session_attached` with `used_at` stamped.
+- **Logs:** engine (`journalctl -u vacti-engine`):
 
 ```text
 connector-tunnel: SOCKS5 listener up at 127.0.0.1:1080
 target-proxy: pre-flighting socks5 proxy socks5://127.0.0.1:1080 to target http://10.77.0.10 (fail-closed)
 ```
 
-Relay log `session <sid> (scan <engagement>) attached to connector <id>`. Connector log `session opened (1 ranges)`.
-DB `connector_grants.used_at` stamped, audit `connector.session_attached`.
+Relay `session <sid> (scan <engagement>) attached to connector <id>`. Connector `session opened (1 ranges)`.
 
 Troubleshooting:
 
@@ -211,9 +225,23 @@ Troubleshooting:
 Every target-bound tool goes through the SOCKS5 proxy. Names resolve through the connector's own DNS, so internal
 names work. The connector refuses any destination outside the grant.
 
-Expected: intranet servers see the connector host as the client (in the run below, nginx logged `10.77.0.20`).
-Out-of-scope destinations fail. With vacti-tunnel >= 0.1.7 the engine log shows
-`connector refused tcp <ip:port>: scope`.
+- **UI:** findings and evidence for intranet targets appear as for any web run. The activity feed shows tools
+  hitting the internal addresses.
+- **DB:** no new connector rows. The grant stays `used_at` set and `revoked_at` empty while the run lasts.
+- **Logs:** intranet servers see the connector host as the client (in the run below, nginx logged `10.77.0.20`).
+  With vacti-tunnel >= 0.1.7, refused destinations appear in the engine log as
+  `connector-tunnel: [vacti-tunnel] connector refused tcp <ip:port>: scope`.
+
+Troubleshooting:
+
+- `scope` refusals for hosts you expected to reach: the grant is `scope_in` intersected with connector CIDRs minus `scope_out`. Widen
+  the connector's CIDRs (re-enroll) or fix the engagement scope.
+- `unreachable` or `timeout`: the connector host itself cannot reach the target (routing, firewall, host down). Test
+  from the connector host with `curl` or `nc`.
+- Internal names do not resolve: the connector uses its host's resolver (`/etc/resolv.conf`, or the OS resolver on
+  Windows and macOS). Set `VACTI_CONNECTOR_DNS=<ip>` in the connector's environment to override it.
+- ICMP shows `unavailable`: unprivileged ping is not permitted on the connector host (Linux
+  `net.ipv4.ping_group_range`, never on Windows). TCP and UDP still work.
 
 ## Step 7: engagement ends (complete, fail, stop or cancel)
 
@@ -222,7 +250,9 @@ does not depend on the engine: the relay re-checks every live session with the C
 (`/api/internal/relay/session-status`). Once the engagement is `completed`, `failed`, `cancelled`, `delivered` or
 `stopped`, the CP answers 403 and the relay closes the session.
 
-Expected logs within one cycle (about 60 s) of a cancel:
+- **UI:** the engagement shows **completed**, **failed**, **stopped** or **cancelled**. The connector stays
+  **online**, ready for the next engagement.
+- **Logs:** within one cycle (about 60 s) of a cancel:
 
 ```text
 relay:      session <sid> revoked by the API; closing
@@ -231,11 +261,20 @@ connector:  session closed
 engine:     relay dial failed (HTTP 403)      (if anything still tries the tunnel)
 ```
 
-Expected DB state: `connector_grants.revoked_at` stamped. Audit: `connector.session_refused` (reason
-`engagement cancelled`) then `connector.session_closed`.
+- **DB:** `connector_grants.revoked_at` stamped. Audit: `connector.session_refused` (reason
+  `engagement cancelled`), then `connector.session_closed`.
 
 A mid-run network drop does NOT revoke the grant. The engine's tunnel redials with the same session, which still
 expires at the engagement cap. A resumed engagement is a new claim with a new grant.
+
+Troubleshooting:
+
+- Session still open more than about 2 minutes after the engagement ended: check the relay can reach the CP
+  callbacks (relay log `session ... report failed`). A transport error never tears a tunnel down. The grant still
+  expires at the engagement cap plus 15 minutes.
+- `revoked_at` empty after a normal completion: the engine closed the tunnel before the engagement reached a
+  terminal status. The `connector.session_closed` audit row still records the end, and the grant expires at its
+  TTL.
 
 ## Step 8: connector disconnect, revoke and uninstall
 
@@ -245,6 +284,17 @@ expires at the engagement cap. A resumed engagement is a new claim with a new gr
 | Start it again | `status = online` within seconds |
 | Revoke in **Settings > Connectors** | within 60 s relay `connector <id> revoked; closing`; connector exits with code 3 (`access revoked`); DB `status = revoked`, `token_hash` cleared, open tickets deleted, grants `revoked_at`; presence reports can never flip it back |
 | Uninstall | `curl -fsSL https://<cp>/api/connector/install.sh \| sudo sh -s -- --uninstall` removes the unit, binary and state |
+
+- **UI:** stop shows **offline**. Revoke shows **revoked**, the row can no longer be picked for an engagement, and
+  its pending tickets are gone.
+- **DB / Logs:** see the table above. Audit `connector.revoked` carries the operator who revoked it.
+
+Troubleshooting:
+
+- Still **online** after stopping the service: the relay could not report presence. The UI flips to offline after
+  3 minutes regardless. Check the relay log for `status report ... failed`.
+- The connector keeps reconnecting after a revoke: it runs a build older than the relay re-verify (it exits on
+  401/403). Stop and uninstall it, and the token is already dead server-side.
 
 A revoked connector cannot be reused. Enroll a fresh one with a new ticket. With a Docker restart policy, a revoked
 container restarts and exits with code 3 again, so remove it.
@@ -261,8 +311,16 @@ SELECT created_at, action, metadata FROM audit_log
 WHERE resource = 'connector:<connector id>' ORDER BY created_at;
 ```
 
-Actions: `connector.install_created`, `connector.session_minted`, `connector.session_attached`,
-`connector.session_refused`, `connector.session_closed`, `connector.revoked`.
+- **UI:** Settings > Audit, filtered on `connector:`.
+- **DB:** the two queries above.
+- **Logs:** the actions `connector.install_created`, `connector.session_minted`, `connector.session_attached`,
+  `connector.session_refused`, `connector.session_closed`, `connector.revoked`.
+
+Troubleshooting:
+
+- No `session_attached` row for a run that claims to have used the connector: the engine never reached the relay.
+  See Step 5.
+- Audit rows older than `AUDIT_RETENTION_DAYS` (default 365) live in the cold NDJSON archive, not the table.
 
 ## Verified run (prod, 2026-11-26)
 
