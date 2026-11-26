@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,11 +36,12 @@ import (
 )
 
 const (
-	sharedSecret  = "test-shared-secret-0123456789abcdef0123456789"
-	sessionSecret = "test-session-secret-0123456789abcdef0123456789"
-	relayListen   = "127.0.0.1:18090"
-	tunnelListen  = "127.0.0.1:18091"
-	echoPort      = "18092"
+	sharedSecret        = "test-shared-secret-0123456789abcdef0123456789"
+	sessionSecret       = "test-session-secret-0123456789abcdef0123456789"
+	relayListen         = "127.0.0.1:18090"
+	tunnelListen        = "127.0.0.1:18091"
+	revokedTunnelListen = "127.0.0.1:18093"
+	echoPort            = "18092"
 )
 
 func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
@@ -128,7 +130,9 @@ func TestConnectorChainEndToEnd(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"connectorId": "conn-1"}})
 	})
 	mux.HandleFunc("POST /api/internal/relay/connector-status", func(w http.ResponseWriter, r *http.Request) {
-		var body struct{ Status string `json:"status"` }
+		var body struct {
+			Status string `json:"status"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body.Status == "online" {
 			select {
@@ -138,6 +142,29 @@ func TestConnectorChainEndToEnd(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+	// Session lifecycle callback: record events; refuse any session whose sid
+	// starts with "revoked-" (an operator revoke / ended engagement).
+	var (
+		evMu   sync.Mutex
+		events []string
+	)
+	mux.HandleFunc("POST /api/internal/relay/session-status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Relay-Secret") != sharedSecret {
+			http.Error(w, "bad secret", http.StatusForbidden)
+			return
+		}
+		var body struct{ Sid, Event string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		evMu.Lock()
+		events = append(events, body.Sid+":"+body.Event)
+		evMu.Unlock()
+		if strings.HasPrefix(body.Sid, "revoked-") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 	api := httptest.NewServer(mux)
 	defer api.Close()
@@ -219,6 +246,47 @@ func TestConnectorChainEndToEnd(t *testing.T) {
 		t.Fatalf("echo mismatch: got %q want %q", got, want)
 	}
 	fmt.Println("e2e: payload round-tripped through tunnel -> relay -> connector")
+
+	evMu.Lock()
+	attached := false
+	for _, e := range events {
+		if e == "sid-e2e:attached" {
+			attached = true
+		}
+	}
+	evMu.Unlock()
+	if !attached {
+		t.Fatalf("relay never reported the session as attached to the API (events %v)", events)
+	}
+
+	// ── a session the API refuses (revoked grant / ended engagement) never opens ──
+	rgrant, _ := json.Marshal(map[string]any{
+		"v": 1, "sid": "revoked-1", "conn": "conn-1", "scan": "scan-e2e",
+		"cidrs": []string{target + "/32"},
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	})
+	rsig := ed25519.Sign(grantPriv, rgrant)
+	rtoken := hs256(map[string]any{
+		"sid": "revoked-1", "conn": "conn-1", "scan": "scan-e2e",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"grant": base64.StdEncoding.EncodeToString(rgrant),
+		"gsig":  base64.StdEncoding.EncodeToString(rsig),
+	})
+	start(tunBin,
+		"VACTI_TUNNEL_LISTEN="+revokedTunnelListen,
+		"VACTI_TUNNEL_RELAY=ws://"+relayListen,
+		"VACTI_TUNNEL_TOKEN="+rtoken,
+	)
+	time.Sleep(500 * time.Millisecond)
+	rdialer, err := proxy.SOCKS5("tcp", revokedTunnelListen, nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, err := rdialer.Dial("tcp", net.JoinHostPort(target, echoPort)); err == nil {
+		c.Close()
+		t.Fatal("a session refused by the API still carried traffic")
+	}
+	fmt.Println("e2e: API-refused session was denied by the relay")
 }
 
 // TestScopeDeniesLoopbackEvenWhenGranted asserts the connector's own gate:

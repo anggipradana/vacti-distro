@@ -66,8 +66,8 @@ func main() {
 	cfg := config{
 		listen:        envOr("RELAY_LISTEN", ":8080"),
 		apiURL:        strings.TrimRight(os.Getenv("RELAY_API_URL"), "/"),
-		sharedSecret:  os.Getenv("RELAY_SHARED_SECRET"),
-		sessionSecret: []byte(os.Getenv("RELAY_SESSION_SECRET")),
+		sharedSecret:  secretFromEnv("RELAY_SHARED_SECRET"),
+		sessionSecret: []byte(secretFromEnv("RELAY_SESSION_SECRET")),
 	}
 	if cfg.apiURL == "" || len(cfg.sharedSecret) < 32 || len(cfg.sessionSecret) < 32 {
 		log.Fatal("RELAY_API_URL, RELAY_SHARED_SECRET (>=32) and RELAY_SESSION_SECRET (>=32) are required")
@@ -99,6 +99,22 @@ func envOr(k, d string) string {
 		return v
 	}
 	return d
+}
+
+// secretFromEnv reads a secret from env var k, or, when that is empty, from the
+// file named by k_FILE (the Docker/Compose secrets convention). Keeping the
+// value in a root-owned file instead of the process environment means it never
+// appears in `docker inspect` or a compose env file.
+func secretFromEnv(k string) string {
+	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+		return v
+	}
+	if p := strings.TrimSpace(os.Getenv(k + "_FILE")); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
 }
 
 func bearer(r *http.Request) string {
@@ -162,9 +178,33 @@ func (r *relay) verifyConnector(token string) (string, int, error) {
 	return out.ConnectorID, status, nil
 }
 
+// sessionEvent tells the API about a scan session's lifecycle so the grant
+// ledger records when the tunnel was actually used and ended. It returns false
+// only when the API EXPLICITLY refuses the session (grant revoked or expired,
+// or the engagement it serves has ended); a transport error or an older API
+// without this route never tears a live tunnel down.
+func (r *relay) sessionEvent(c *sessionClaims, event string) bool {
+	status, err := r.api("/api/internal/relay/session-status", map[string]string{
+		"sid": c.Sid, "connectorId": c.Conn, "scanId": c.Scan, "event": event,
+	}, nil)
+	if err != nil {
+		log.Printf("session %s %s report failed: %v", c.Sid, event, err)
+		return true
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusGone:
+		return false
+	}
+	return true
+}
+
 func (r *relay) reportStatus(id, status, ip, ver string) {
-	if _, err := r.api("/api/internal/relay/connector-status", map[string]string{
-		"connectorId": id, "status": status, "remoteIp": ip, "version": ver,
+	// "online"/"ip" are the field names the API reads; "status"/"remoteIp" are
+	// kept for older APIs. Without "online": false a disconnect never registered
+	// and a dead connector stayed "online" in the dashboard.
+	if _, err := r.api("/api/internal/relay/connector-status", map[string]any{
+		"connectorId": id, "status": status, "online": status == "online",
+		"remoteIp": ip, "ip": ip, "version": ver,
 	}, nil); err != nil {
 		log.Printf("status report for %s failed: %v", id, err)
 	}
@@ -338,6 +378,13 @@ func (r *relay) handleSession(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "connector offline", http.StatusServiceUnavailable)
 		return
 	}
+	// Ask the API whether this grant is still live before installing it: an
+	// operator revoke or an engagement that already ended must not reopen.
+	if !r.sessionEvent(claims, "attached") {
+		log.Printf("session %s (scan %s) refused by the API", claims.Sid, claims.Scan)
+		http.Error(w, "session revoked", http.StatusForbidden)
+		return
+	}
 	if err := control(cs, wire.Open{T: wire.TypeGrant, Grant: claims.Grant, Sig: claims.Sig}); err != nil {
 		log.Printf("grant for scan %s rejected by connector %s: %v", claims.Scan, claims.Conn, err)
 		http.Error(w, "connector rejected session", http.StatusBadGateway)
@@ -359,12 +406,34 @@ func (r *relay) handleSession(w http.ResponseWriter, req *http.Request) {
 		if cs := r.connector(claims.Conn); cs != nil {
 			_ = control(cs, wire.Open{T: wire.TypeRevoke, Sid: claims.Sid})
 		}
+		go r.sessionEvent(claims, "closed")
 		log.Printf("session %s closed", claims.Sid)
 	}()
 
 	expiry := time.Until(time.Unix(claims.Exp, 0))
 	timer := time.AfterFunc(expiry, func() { ws.Close() })
 	defer timer.Stop()
+
+	// Re-check the session with the API every minute, like the connector side
+	// does: cancelling the engagement or revoking the connector in the
+	// dashboard drops the tunnel within one cycle instead of at grant expiry.
+	go func() {
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		closed := ws.CloseChan()
+		for {
+			select {
+			case <-closed:
+				return
+			case <-t.C:
+				if !r.sessionEvent(claims, "alive") {
+					log.Printf("session %s revoked by the API; closing", claims.Sid)
+					ws.Close()
+					return
+				}
+			}
+		}
+	}()
 
 	for {
 		s, err := ws.AcceptStream()
