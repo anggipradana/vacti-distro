@@ -1,0 +1,13 @@
+# Dependabot: weekly github-actions hygiene for the distro build pipeline. This repo ships no npm package
+# (no package.json at the root), so only the github-actions ecosystem is tracked; bumps are grouped into one
+# PR to keep review load low. Keeps the SHA-pinned workflow actions current across the build/release workflows.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - '*'
