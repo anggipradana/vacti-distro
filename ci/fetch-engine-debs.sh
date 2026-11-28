@@ -26,6 +26,12 @@
 #   VACTI_ENGINE_REF           optional: pin the vacti-engine version (exact; X.Y.Z matches
 #                              X.Y.Z and X.Y.Z+build / X.Y.Z-rev / X.Y.Z~pre); empty = latest
 #   VACTI_FETCH_ALLOW_THIN     1 = exit 0 even when the .debs are missing (explicit THIN opt-in)
+#   VACTI_FETCH_POOL_WAIT      seconds to WAIT for the engine .deb to appear in the apt pool before
+#                              failing (default 0 = no wait, fail-loud immediately). The release
+#                              cascade can dispatch the image build before the engine .deb finishes
+#                              publishing; a non-zero wait turns that race from a hard failure into a
+#                              retry-with-timeout. A HARD error (auth/HTTP/hash) still aborts the wait.
+#   VACTI_FETCH_POOL_INTERVAL  poll interval in seconds while waiting (default 30)
 #   VACTI_ENGINE_REPO          GH fallback repo (default anggipradana/vacti-pentest-engine)
 #   GH_TOKEN                   token with read access to the engine repo (GH fallback)
 #   VACTI_CHROMIUM_HF_BASE     HF dataset resolve base for the chromium .deb backfill
@@ -152,11 +158,15 @@ fetch_from_github() {
 # playwright-core involved); ci/build-chromium-deb.sh downloads, verifies and packages them. Any runner arch
 # can build any target arch. It runs after have_engine only to keep the tier order; it no longer reads the
 # engine .deb. Fails soft -> HF tier.
+#
+# DECOUPLED FROM have_engine (W47): chromium is an engine-INDEPENDENT, SHA256-pinned package. It used
+# to gate on have_engine purely to keep the tier order, which meant a transient engine-.deb miss (e.g.
+# the arm64 apt-pool regression) ALSO knocked out chromium and failed the whole fetch. The gate is gone;
+# chromium is obtained on its own so an engine miss can never cascade into a chromium miss.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHROMIUM_PIN="${VACTI_CHROMIUM_PIN:-${SCRIPT_DIR}/../distro/packages/chromium-pin.json}"
 
 build_chromium_local() {
-  have_engine || { warn "no engine .deb present yet; skipping local chromium build"; return 1; }
   local builder="${SCRIPT_DIR}/build-chromium-deb.sh"
   [[ -f "$builder" ]] || { warn "ci/build-chromium-deb.sh missing"; return 1; }
   [[ -f "$CHROMIUM_PIN" ]] || { warn "chromium pin missing: ${CHROMIUM_PIN}"; return 1; }
@@ -209,19 +219,47 @@ fetch_chromium_from_hf() {
   have_chromium
 }
 
-if fetch_from_pool && have_engine && have_chromium; then
-  log "fetched engine + chromium from the private apt pool"
-elif fetch_from_github && have_engine && have_chromium; then
-  log "fetched engine + chromium from the GitHub release fallback"
-elif have_engine && build_chromium_local; then
-  # Steady state for this build: the apt pool serves vacti-engine but NOT chromium (chromium is over
-  # the upstream 100MB upload cap), so chromium is BUILT here from the vacti chromium pin (SHA256-verified
-  # upstream archives, no secret, no cross-repo auth, cross-arch on one runner).
-  log "fetched engine (apt pool) + chromium (built locally from the vacti chromium pin)"
-elif have_engine && fetch_chromium_from_hf; then
-  # Continuity fallback: pull chromium from the public HF dataset if the local build could not run
-  # (e.g. an upstream archive is unreachable). Public anonymous HTTPS, SHA256SUMS-verified, no token.
-  log "fetched engine (apt pool) + chromium (HF backfill)"
+# --- orchestration: engine and chromium are obtained INDEPENDENTLY ------------
+# ENGINE: private apt pool (preferred) -> GitHub release fallback. The engine .deb is the artifact the
+# release cascade RACES (a dispatch can outrun the apt publish by a few minutes), so when
+# VACTI_FETCH_POOL_WAIT>0 we poll the pool for it before giving up, turning the race from a hard failure
+# into a retry-with-timeout. A real HARD error (auth/HTTP/hash) still aborts the wait and fails loud.
+if [[ "${VACTI_FETCH_POOL_WAIT:-0}" -gt 0 ]] && ! have_engine; then
+  pool_wait="${VACTI_FETCH_POOL_WAIT}"; pool_iv="${VACTI_FETCH_POOL_INTERVAL:-30}"
+  deadline=$(( SECONDS + pool_wait ))
+  log "waiting up to ${pool_wait}s for the ${ARCH} vacti-engine .deb to appear in the apt pool"
+  while ! have_engine; do
+    HARD_ERR=0
+    fetch_from_pool || true
+    have_engine && break
+    if [[ "$HARD_ERR" -ne 0 ]]; then warn "hard pool error during wait; aborting wait (fail-loud below)"; break; fi
+    if [[ "$SECONDS" -ge "$deadline" ]]; then warn "pool wait (${pool_wait}s) elapsed; ${ARCH} engine .deb still absent"; break; fi
+    warn "vacti-engine (${ARCH}) not in the apt pool yet; retrying in ${pool_iv}s ..."
+    sleep "$pool_iv"
+  done
+  # Clear any transient HARD flag from the wait; the authoritative tiers + verdict below re-evaluate.
+  HARD_ERR=0
+fi
+
+if ! have_engine; then
+  fetch_from_pool || true
+fi
+if ! have_engine; then
+  warn "engine not in the apt pool; trying the GitHub release fallback"
+  fetch_from_github || true
+fi
+
+# CHROMIUM: engine-INDEPENDENT. The apt pool does NOT serve chromium (it exceeds the edge upload cap),
+# so it is BUILT locally from the vacti chromium pin (SHA256-verified upstream archives, no secret,
+# no cross-repo auth, cross-arch on one runner) and, failing that, pulled from the public HF dataset
+# (SHA256SUMS-verified, no token). fetch_from_pool may already have staged it if the pool ever serves
+# it; otherwise build/backfill it here, with NO dependency on have_engine:
+if ! have_chromium; then
+  build_chromium_local || fetch_chromium_from_hf || true
+fi
+
+if have_engine && have_chromium; then
+  log "staged engine + chromium for ${ARCH} (engine: apt pool/GitHub; chromium: local build/HF)"
 fi
 
 log "OUTDIR contents:"
