@@ -205,6 +205,63 @@ huggingface-cli upload "$REPO_ID" "$RENAMED" "v${VERSION}/" \
   --commit-message "release v${VERSION} (${ARCH})" \
   || fail "huggingface-cli upload failed"
 
+# --- 4b. latest/ alias with STABLE, version-less filenames -------------------
+# (VACTI_HF_PUBLISH_LATEST, default ON.) Consumers want a durable URL that always
+# resolves to the newest image without first discovering the version, e.g.
+#   .../resolve/main/latest/vacti-distro-amd64-gui.vmware.ova
+# Before this, only vX.Y.Z/ dirs existed, so any latest/... URL 404'd, and the
+# versioned names (vacti-distro-<ver>-<arch>-<flavor>.<form>) change every release.
+# We publish a latest/ copy of THIS run's images under version-less names
+# (vacti-distro-<arch>-<flavor>.<form>). HF LFS dedupes by content hash, so the big
+# blobs are NOT re-uploaded, only a small pointer per stable name. latest/ is updated
+# per-arch (amd64 and arm64 publish in separate runs), and latest/SHA256SUMS is
+# remote-merged so the other arch's entries survive.
+PUBLISH_LATEST="${VACTI_HF_PUBLISH_LATEST:-1}"
+if [ "$PUBLISH_LATEST" != "0" ]; then
+  LATEST="${STAGE}/latest"
+  rm -rf "$LATEST"; mkdir -p "$LATEST"
+  lcount=0
+  while IFS= read -r -d '' f; do
+    n="$(basename "$f")"
+    [ "$n" = "SHA256SUMS" ] && continue
+    # Drop the version segment: vacti-distro-<ver>-<rest> -> vacti-distro-<rest>.
+    stable="${n/-${VERSION}-/-}"
+    if [ "$stable" = "$n" ]; then
+      warn "could not derive a version-less name from ${n}; skipping it in latest/"
+      continue
+    fi
+    cp -f "$f" "${LATEST}/${stable}" || fail "latest alias copy failed: ${n}"
+    log "latest alias: ${n} -> latest/${stable}"
+    lcount=$((lcount + 1))
+  done < <(find "$RENAMED" -maxdepth 1 -type f -print0)
+
+  if [ "$lcount" -gt 0 ]; then
+    # Merge latest/SHA256SUMS: remote first (other arch's entries), local stable names override.
+    L_LOCAL="${STAGE}/latest.local.SHA256SUMS"
+    L_REMOTE="${STAGE}/latest.remote.SHA256SUMS"
+    ( cd "$LATEST" && sha256sum -- * ) > "$L_LOCAL" || fail "latest sha256sum failed"
+    if curl -fsSL "${RESOLVE_BASE}/latest/SHA256SUMS" -o "$L_REMOTE" 2>/dev/null; then
+      log "fetched existing latest/SHA256SUMS for merge"
+    else
+      : > "$L_REMOTE"
+    fi
+    awk '
+      FNR == NR { if (NF >= 2) h[$2] = $1; next }
+      { if (NF >= 2) h[$2] = $1 }
+      END { for (n in h) printf "%s  %s\n", h[n], n }
+    ' "$L_REMOTE" "$L_LOCAL" | sort -k2 > "${LATEST}/SHA256SUMS" || fail "latest SHA256SUMS merge failed"
+
+    log "uploading latest/ (${lcount} stable-named files + SHA256SUMS) ..."
+    huggingface-cli upload "$REPO_ID" "$LATEST" "latest/" \
+      --repo-type dataset \
+      --commit-message "latest: v${VERSION} (${ARCH})" \
+      || fail "huggingface-cli latest/ upload failed"
+    log "latest/ alias updated for ${ARCH} (stable version-less URLs)"
+  else
+    warn "no files mapped to version-less names; latest/ alias not updated"
+  fi
+fi
+
 # --- 5. regenerate the README.md index (the 'latest' pointer) ---------------
 # >>> readme-render-begin (anchored for scripts/test/test-readme-render.sh) <<<
 # Rebuilt from the REMOTE tree so it reflects every file in v<version>/,
@@ -328,6 +385,16 @@ EOF
   echo
   echo "Verify: download \`${RESOLVE_BASE}/v${HEADLINE_VERSION}/SHA256SUMS\` and run"
   echo "\`sha256sum -c SHA256SUMS\` next to the images."
+  echo
+  echo "## Stable (latest) URLs"
+  echo
+  echo "Version-less aliases that always resolve to the newest published image are kept"
+  echo "under \`latest/\`, named \`vacti-distro-<arch>-<flavor>.<form>\`, e.g.:"
+  echo
+  echo "- \`${RESOLVE_BASE}/latest/vacti-distro-amd64-gui.vmware.ova\`"
+  echo "- \`${RESOLVE_BASE}/latest/vacti-distro-arm64-gui.vbox.ova\`"
+  echo
+  echo "Checksums for the aliases are at \`${RESOLVE_BASE}/latest/SHA256SUMS\`."
   echo
   echo "## Docker (alternative to the OVA)"
   echo
