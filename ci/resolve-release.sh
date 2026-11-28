@@ -27,7 +27,12 @@
 set -euo pipefail
 
 MIN_RELEASE="${MIN_RELEASE:-0.2.400}"
-strip_v() { local v="${1:-}"; v="${v#images-v}"; v="${v#engine-v}"; printf '%s' "${v#v}"; }
+# strip_v: normalize a tag/version to bare X.Y.Z. Drops the images-v/engine-v/v prefixes AND any
+# Debian/semver BUILD-METADATA suffix (+gitSHA, +buildN). An on-box release stamps the apt version as
+# e.g. 0.2.504+gitd1ad9af1; without this strip that value fails is_semver, the resolver flags it legacy,
+# and the whole build is refused (the 0.2.504/0.2.505 +git dispatch failures). The pre-release markers
+# -rev / ~pre are NOT stripped (they are real version ordering); only +build metadata is cosmetic.
+strip_v() { local v="${1:-}"; v="${v#images-v}"; v="${v#engine-v}"; v="${v#v}"; printf '%s' "${v%%+*}"; }
 is_semver() { [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 ver_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]; }  # $1 >= $2
 

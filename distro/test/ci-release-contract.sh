@@ -54,6 +54,13 @@ else bad "A: payload resolution wrong: $(tr '\n' ' ' < "${T}/rr.out")"; fi
 if rr EVENT_NAME=workflow_dispatch IN_RELEASE=0.2.1000 && [[ "$(get legacy)" == false ]]; then
   pass "A: version compare is numeric (0.2.1000 >= 0.2.400)"
 else bad "A: 0.2.1000 treated as legacy"; fi
+: > "${T}/rr.out"
+# +git build metadata (on-box apt version e.g. 0.2.504+gitd1ad9af1) must normalize to X.Y.Z and NOT
+# be treated as a legacy/non-semver release (the 0.2.504/0.2.505 +git dispatch regression).
+if rr EVENT_NAME=repository_dispatch PAYLOAD_RELEASE=0.2.504+gitd1ad9af1 \
+   && [[ "$(get release)" == 0.2.504 && "$(get engine_ref)" == 0.2.504 && "$(get legacy)" == false ]]; then
+  pass "A: +git build-metadata suffix stripped to X.Y.Z (not legacy)"
+else bad "A: +git suffix not normalized: $(tr '\n' ' ' < "${T}/rr.out")"; fi
 
 # --- B. fetch-engine-debs.sh fail-loud ------------------------------------------
 if command -v dpkg-deb >/dev/null 2>&1; then

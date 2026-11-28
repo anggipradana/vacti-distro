@@ -105,7 +105,13 @@ jobs:
                 if(pkg && ver!="") print ver
               }' | sort -V | uniq | tail -1)"
           [ -n "$apt_ver" ] || warn_exit0 "no 'Package: vacti-engine' stanza with a Version found in the apt index"
-          echo "apt newest vacti-engine version: ${apt_ver}"
+          # Strip any Debian/semver BUILD-METADATA suffix (+gitSHA / +buildN). An on-box release stamps
+          # the apt version as e.g. 0.2.504+gitd1ad9af1; dispatching that verbatim makes resolve-release
+          # flag it non-semver/legacy and refuse the whole build (the 0.2.504/0.2.505 regression). The
+          # pool's version_matches() treats pin X.Y.Z as matching X.Y.Z+* so the fetch still finds the
+          # exact .deb. Comparison, marker and dispatch all use the clean X.Y.Z below.
+          apt_ver="${apt_ver%%+*}"
+          echo "apt newest vacti-engine version (normalized): ${apt_ver}"
 
           # --- 2. newest images-v* release already built by THIS repo -----------------
           distro_ver="$(gh api "/repos/${REPO}/releases" --jq '.[].tag_name' 2>/dev/null \
