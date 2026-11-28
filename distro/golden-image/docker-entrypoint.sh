@@ -67,6 +67,14 @@ APP="${APP:-/usr/lib/vacti-engine}"
 STATE_DIR="${ENGINE_STATE_DIR:-/var/lib/vacti-engine}"
 STATE_ENV="${STATE_DIR}/engine.env"
 
+# Container-start timestamp for the HEALTHCHECK grace window (see distro/Dockerfile).
+# Re-written on every (re)start: the entrypoint is PID 1 and re-execs on each start,
+# so this always reflects THIS boot. The healthcheck compares (now - this) against
+# VACTI_HEALTHCHECK_START_PERIOD to stay "starting" while a THIN image provisions
+# longer than the baked --start-period (THIN install + browser/Caido self-heal). On
+# /run (a per-run tmpfs) so it never carries a stale value across a restart.
+printf '%s\n' "$(date +%s 2>/dev/null || echo 0)" > /run/vacti-engine.boot-ts 2>/dev/null || true
+
 log() { echo "[vacti-docker] $*"; }
 die() { echo "[vacti-docker][FATAL] $*" >&2; exit 1; }
 
@@ -370,10 +378,16 @@ export VACTI_TOKEN
 # kali-engine-01 schema default (tailnet hostname collisions across containers).
 export ENGINE_ID
 
-# Pre-start a virtual display so the first headful evidence capture does not have
-# to fall back (the orchestrator will spawn its own Xvfb otherwise).
-if command -v Xvfb >/dev/null 2>&1 && ! xdpyinfo -display :0 >/dev/null 2>&1; then
-  Xvfb :0 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+# Optional pre-start of a virtual display. OFF by default (VACTI_XVFB_PRESTART unset):
+# the engine orchestrator spawns and owns its own Xvfb per headful capture, so a
+# pre-started :0 here is redundant and just holds a process + a display lock for the
+# container's whole life. Set VACTI_XVFB_PRESTART=1 to restore the eager pre-start
+# (e.g. a workload that attaches to :0 before the engine's first capture).
+if [[ "${VACTI_XVFB_PRESTART:-0}" =~ ^(1|true|on|yes)$ ]]; then
+  if command -v Xvfb >/dev/null 2>&1 && ! xdpyinfo -display :0 >/dev/null 2>&1; then
+    Xvfb :0 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+    log "xvfb: pre-started on :0 (VACTI_XVFB_PRESTART enabled)"
+  fi
 fi
 
 # Best-effort pinned-Chromium self-heal (the .deb postinst/ExecStartPre do this
@@ -394,7 +408,25 @@ fi
 # ensure-browser.sh above); it must never block container start.
 # NOTE: $HOME (/root) is NOT the persisted state volume, so this re-fetches on each
 # fresh container; it is idempotent within a container's lifetime (restart reuses it).
-CAIDO_VERSION="${VACTI_CAIDO_VERSION:-v0.57.0}"
+# Caido version resolution (D7). Precedence: an explicit VACTI_CAIDO_VERSION wins;
+# otherwise read the single source of truth - the engine's installed arsenal manifest
+# (packaging/arsenal-manifest.json -> pins.caido_cli), which the .deb ships and the
+# OVA bake also reads - so the container never drifts from the version the engine was
+# built against. The hardcoded value is only the last-resort fallback if the manifest
+# is unreadable (very early first boot before the engine tree lands).
+resolve_caido_version() {
+  local v="${VACTI_CAIDO_VERSION:-}"
+  if [[ -z "$v" ]]; then
+    local manifest="${APP}/packaging/arsenal-manifest.json"
+    if [[ -r "$manifest" ]]; then
+      v="$(sed -n 's/.*"caido_cli"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null | head -1 || true)"
+      [[ -n "$v" ]] && log "caido: version ${v} sourced from arsenal manifest (${manifest})"
+    fi
+  fi
+  [[ -n "$v" ]] || v="v0.57.0"
+  printf '%s' "$v"
+}
+CAIDO_VERSION="$(resolve_caido_version)"
 heal_caido() {
   # Resolve the engine's effective home exactly as the engine will at exec time:
   # $HOME when set (node os.homedir() + the shell both prefer it), else the passwd entry.
@@ -406,7 +438,6 @@ heal_caido() {
   local caido_dir="${home}/caido"
   local caido_bin="${caido_dir}/caido-cli"
   [[ -x "$caido_bin" ]] && { log "caido self-heal: already present (${caido_bin})"; return 0; }
-  command -v curl >/dev/null 2>&1 || { log "caido self-heal: curl unavailable, skipping (evidence degrades to the render)"; return 0; }
 
   local arch caido_arch
   arch="$(uname -m 2>/dev/null || echo unknown)"
@@ -415,6 +446,27 @@ heal_caido() {
     aarch64|arm64)  caido_arch="aarch64" ;;
     *)              caido_arch="x86_64"; log "caido self-heal: unknown arch ${arch}, trying x86_64" ;;
   esac
+
+  # D3: cache the extracted binary on the PERSISTED state volume, keyed by
+  # version+arch, so a fresh container sharing the same ${STATE_DIR} volume restores
+  # caido-cli with a file copy instead of re-downloading ~tens of MB from
+  # caido.download on every `docker run`. $HOME (/root) is NOT persisted; the state
+  # volume is. A copy (not a symlink) so the engine's $HOME path resolves even if the
+  # volume is later detached mid-life.
+  local cache_dir="${STATE_DIR}/cache/caido/${CAIDO_VERSION}-${caido_arch}"
+  local cache_bin="${cache_dir}/caido-cli"
+  if [[ -x "$cache_bin" ]]; then
+    mkdir -p "$caido_dir" 2>/dev/null || true
+    if cp -f "$cache_bin" "$caido_bin" 2>/dev/null; then
+      chmod +x "$caido_bin" 2>/dev/null || true
+      log "caido self-heal: restored ${CAIDO_VERSION} (${caido_arch}) from volume cache (${cache_bin}); no download"
+      return 0
+    fi
+    log "caido self-heal: volume cache present but copy failed; falling through to download"
+  fi
+
+  command -v curl >/dev/null 2>&1 || { log "caido self-heal: curl unavailable, skipping (evidence degrades to the render)"; return 0; }
+
   local url="https://caido.download/releases/${CAIDO_VERSION}/caido-cli-${CAIDO_VERSION}-linux-${caido_arch}.tar.gz"
 
   local tmp
@@ -452,6 +504,11 @@ heal_caido() {
   if tar xzf "${tmp}/caido-cli.tar.gz" -C "$caido_dir" 2>/dev/null && [[ -e "$caido_bin" ]]; then
     chmod +x "$caido_bin" 2>/dev/null || true
     rm -rf "$tmp" 2>/dev/null || true
+    # D3: seed the persisted volume cache so the next fresh container skips the download.
+    if mkdir -p "$cache_dir" 2>/dev/null && cp -f "$caido_bin" "$cache_bin" 2>/dev/null; then
+      chmod +x "$cache_bin" 2>/dev/null || true
+      log "caido self-heal: cached ${CAIDO_VERSION} (${caido_arch}) on the state volume (${cache_bin})"
+    fi
     log "caido self-heal: ready (${caido_bin})"
     return 0
   fi
