@@ -43,7 +43,7 @@ jobs:
   lint-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: shellcheck + bash -n + em-dash sweep
@@ -64,7 +64,7 @@ jobs:
     outputs:
       filename: ${{ steps.deb.outputs.filename }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Install build + lint tooling
@@ -90,7 +90,7 @@ jobs:
         env:
           DOCKER_IMAGE: debian:trixie-slim
         run: sudo bash distro/appliance-skin/test/smoke.sh "${{ steps.deb.outputs.path }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vacti-appliance-skin-deb
           path: distro/appliance-skin/dist-skin/*.deb
@@ -100,7 +100,7 @@ jobs:
     needs: [build-and-smoke, guard]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: vacti-appliance-skin-deb
           path: dist-skin

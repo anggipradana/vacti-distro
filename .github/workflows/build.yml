@@ -132,7 +132,7 @@ jobs:
       legacy: ${{ steps.rel.outputs.legacy }}
       publish_latest: ${{ steps.rel.outputs.publish_latest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Resolve release + engine ref (refuses the 0.1.0 placeholder unless overridden)
         id: rel
         env:
@@ -214,7 +214,7 @@ jobs:
           sudo docker image prune --all --force || true
           sudo apt-get clean || true
           echo "[disk] after:"; df -h /
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install libguestfs + qemu toolchain (+ runner workarounds)
         uses: ./.github/actions/libguestfs-runner
         with:
@@ -256,7 +256,7 @@ jobs:
           rm -rf distro/.build || true
           echo "[disk] after cleanup:"; df -h /
       - name: Upload golden as a build artifact (passed to fan-out jobs)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: golden-qcow2-${{ matrix.flavor }}
           path: |
@@ -299,14 +299,14 @@ jobs:
           sudo docker image prune --all --force || true
           sudo apt-get clean || true
           echo "[disk] after:"; df -h /
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install toolchain (+ runner workarounds)
         uses: ./.github/actions/libguestfs-runner
         with:
           # fuse3 for guestmount; libxml2-utils (xmllint) for the OVF gate.
           extra-packages: fuse3 libxml2-utils
       - name: Fetch the golden disk (${{ matrix.flavor }})
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: golden-qcow2-${{ matrix.flavor }}
           path: out
@@ -346,7 +346,7 @@ jobs:
             ci/no-secret-scan.sh "$a"
           done
       - name: Upload ${{ matrix.form }} (${{ matrix.flavor }}) artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: form-${{ matrix.form }}-${{ matrix.flavor }}
           path: |
@@ -377,11 +377,11 @@ jobs:
           sudo docker image prune --all --force || true
           sudo apt-get clean || true
           echo "[disk] after:"; df -h /
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install qemu + tools
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils genisoimage ovmf
       - name: Collect all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: out
           pattern: "{form-*,golden-qcow2-*}"
@@ -428,7 +428,7 @@ jobs:
           sudo docker image prune --all --force || true
           sudo apt-get clean || true
           echo "[disk] after:"; df -h /
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install libguestfs toolchain (+ runner workarounds)
         # WHY: the "Final no-secret scan gate" step guestmounts every published
         # artifact. Without the composite action's readable-kernel / KVM / passt
@@ -444,7 +444,7 @@ jobs:
         with:
           extra-packages: bsdextrautils squashfs-tools xorriso fuse3
       - name: Collect all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           # Scope to the two OVA artifacts. The golden qcow2 is a build-only source
@@ -479,7 +479,7 @@ jobs:
         # graceful behavior as the arm64 publish.
         run: ci/cap-release-assets.sh release 2147483648
       - name: Publish PRIVATE GitHub Release (assets stay private to this repo)
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: images-v${{ env.VACTI_RELEASE }}
           name: vacti images ${{ env.VACTI_RELEASE }}
@@ -523,8 +523,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: connector/go.mod
       - name: Resolve connector version
@@ -533,7 +533,7 @@ jobs:
       - name: Cross-build vacti-tunnel (amd64) via the shared helper
         run: bash connector/scripts/build-tunnel.sh amd64 "out/vacti-tunnel-amd64"
       - name: Upload vacti-tunnel (amd64)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vacti-tunnel-amd64-${{ steps.ver.outputs.version }}
           path: out/vacti-tunnel-amd64

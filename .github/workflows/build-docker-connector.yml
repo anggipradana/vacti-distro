@@ -52,7 +52,7 @@ jobs:
       contents: read
       packages: write   # push to ghcr.io/anggipradana/vacti-connector
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve version + platforms + tags
         id: ver
@@ -87,9 +87,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "[connector] candidate ${IMAGE}:rc-${V} on ${PLATFORMS}; promotes to ${IMAGE}:${V}$([ "$LATEST" = "true" ] && echo ' + :latest') after the smoke"
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -97,7 +97,7 @@ jobs:
 
       - name: Build + push CANDIDATE multi-arch image -> :rc-<ver>
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./connector
           file: ./connector/deploy/Dockerfile.connector
@@ -181,8 +181,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Read the exact Go version from the connector module (keeps the toolchain pinned to go.mod).
           go-version-file: connector/go.mod
@@ -198,7 +198,7 @@ jobs:
           ( cd out && sha256sum vacti-tunnel-* > SHA256SUMS )
           cat out/SHA256SUMS
       - name: Upload vacti-tunnel binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vacti-tunnel-${{ steps.ver.outputs.version }}
           path: |
