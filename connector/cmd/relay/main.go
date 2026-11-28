@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -63,6 +64,14 @@ type relay struct {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
+	// -healthcheck probes the local /healthz and exits 0/1. The relay ships as a
+	// distroless image (no shell, wget or curl), so the container HEALTHCHECK must be
+	// the binary itself: `vacti-relay -healthcheck`.
+	hc := flag.Bool("healthcheck", false, "probe the local /healthz endpoint and exit 0 (ok) or 1 (fail)")
+	flag.Parse()
+	if *hc {
+		os.Exit(runHealthcheck())
+	}
 	cfg := config{
 		listen:        envOr("RELAY_LISTEN", ":8080"),
 		apiURL:        strings.TrimRight(os.Getenv("RELAY_API_URL"), "/"),
@@ -92,6 +101,36 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+// runHealthcheck does a GET on the local /healthz (derived from RELAY_LISTEN) and
+// returns a process exit code for the container HEALTHCHECK. It never touches the
+// relay's secrets or API callbacks - a liveness probe only.
+func runHealthcheck() int {
+	addr := envOr("RELAY_LISTEN", ":8080")
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		host, port = "", strings.TrimPrefix(addr, ":")
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		port = "8080"
+	}
+	url := "http://" + net.JoinHostPort(host, port) + "/healthz"
+	c := &http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get(url)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: status %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 func envOr(k, d string) string {
