@@ -164,6 +164,15 @@ jobs:
         env:
           VACTI_ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
         run: ci/lint.sh
+      # Pre-flight: assert the amd64 engine .deb is in the apt pool BEFORE the ~1h golden job starts.
+      # Race-tolerant (waits for a cascade that outran the publish); fails fast if the .deb was never
+      # published. Fail-soft on missing apt creds. FAT-OVA only (THIN needs no baked .deb).
+      - name: Pre-flight apt pool (amd64 engine .deb present before golden)
+        if: ${{ env.VACTI_FAT_OVA != '0' }}
+        env:
+          VACTI_ENGINE_REF: ${{ steps.rel.outputs.engine_ref }}
+          VACTI_PREFLIGHT_WAIT: '900'
+        run: ci/preflight-apt.sh amd64
 
   # --- the golden disk: built ONCE, shared by all VM/cloud forms --------------
   # PINNED ubuntu-24.04: GitHub promoted ubuntu-latest to 26.04 on 2026-11-13 and the
