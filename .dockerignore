@@ -1,0 +1,23 @@
+# .dockerignore for the build-docker.yml image build (context: the repo root).
+#
+# distro/Dockerfile only COPYs from distro/ (the vacti-engine-chromium .debs arrive
+# via the SEPARATE `engine_debs` named build-context, which this file does not touch),
+# so everything else in the repo is transfer-only bloat. Ignore all, then re-include
+# exactly what the build reads. This drops .git (~6.4 MB), the connector Go module, the
+# CI/HF/scripts trees and the staged engine-debs/ from the context the daemon receives.
+*
+
+# What distro/Dockerfile actually needs.
+!distro/
+
+# Belt-and-braces: never let VCS metadata, dependency trees, or large disk images ride
+# in even from a re-included path.
+**/.git
+**/.github
+**/node_modules
+engine-debs/
+**/*.deb
+**/*.ova
+**/*.qcow2
+**/*.vmdk
+**/*.iso
