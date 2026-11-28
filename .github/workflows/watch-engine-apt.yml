@@ -209,3 +209,38 @@ jobs:
           branch="${GITHUB_REF_NAME:-main}"
           git push origin "HEAD:${branch}" \
             || { git pull --rebase origin "${branch}" && git push origin "HEAD:${branch}"; }
+
+      - name: Alert if the published arm64 OVA has fallen behind amd64 (silent-regression guard)
+        # The 0.2.502->0.2.505 arm64 regression went SILENT for 4 releases: amd64 kept shipping to HF
+        # while arm64 builds failed, and nothing surfaced the divergence. This step runs every poll and
+        # compares the newest published amd64 OVA version vs the newest arm64 OVA version on the public
+        # HF dataset. If arm64 trails amd64, it emits a LOUD ::warning:: + a step-summary line so the
+        # divergence is visible in the Actions UI instead of going unnoticed. Fully fail-safe: any
+        # network/parse issue just skips (exit 0); it never fails the schedule.
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; echo "$*"; }
+          api="https://huggingface.co/api/datasets/anggipradana/vacti-distro-images/tree/main?recursive=true"
+          tree="$(curl -fsSL --max-time 30 "$api" 2>/dev/null || true)"
+          if [ -z "$tree" ]; then echo "::notice::arm64-alert: HF tree unreachable; skipping"; exit 0; fi
+          paths="$(printf '%s' "$tree" | grep -oE '"path":"[^"]*"' | sed -E 's/"path":"//; s/"$//' || true)"
+          newest() { # $1 = arch token (amd64|arm64)
+            printf '%s\n' "$paths" | grep -E "\-$1-.*\.ova$" \
+              | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sed 's/^v//' | sort -V | uniq | tail -1
+          }
+          amd="$(newest amd64)"; arm="$(newest arm64)"
+          echo "arm64-alert: newest HF OVA amd64=${amd:-none} arm64=${arm:-none}"
+          if [ -z "$amd" ]; then echo "::notice::arm64-alert: no amd64 OVA found on HF; skipping"; exit 0; fi
+          if [ -z "$arm" ]; then
+            echo "::warning::arm64-alert: NO arm64 OVA published to HF at all while amd64 is at v${amd} (arm64 build broken?)"
+            summary "watch-engine-apt: :rotating_light: arm64 OVA MISSING on HF (amd64 at v${amd}). arm64 build likely broken - see build-images-arm64."
+            exit 0
+          fi
+          newer="$(printf '%s\n%s\n' "$amd" "$arm" | sort -V | tail -1)"
+          if [ "$newer" = "$amd" ] && [ "$amd" != "$arm" ]; then
+            echo "::warning::arm64-alert: arm64 OVA (v${arm}) is BEHIND amd64 (v${amd}) on HF - arm64 build may be failing silently"
+            summary "watch-engine-apt: :rotating_light: arm64 OVA v${arm} is BEHIND amd64 v${amd} on HF. Check build-images-arm64 for failures."
+          else
+            summary "watch-engine-apt: arm64 OVA (v${arm}) is level with / ahead of amd64 (v${amd}) on HF; no regression."
+          fi
