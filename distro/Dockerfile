@@ -364,12 +364,20 @@ FROM debian:trixie-slim
 # Runtime environment (ENV is image metadata, not filesystem, so it is declared
 # here; it is identical to the builder's runtime env). None of these name a
 # private host.
+# HEALTHCHECK grace window is parameterizable (D4). The HEALTHCHECK directive's own
+# --start-period flag CANNOT take a build ARG (Docker does not variable-expand that
+# instruction), so the baked --start-period below is the fixed baseline and this value
+# extends the grace at BUILD (--build-arg VACTI_HEALTHCHECK_START_PERIOD=...) or at
+# RUNTIME (docker run -e / compose). Raise it for a THIN image whose first boot
+# provisions longer than 180s (engine install + browser/Caido self-heal).
+ARG VACTI_HEALTHCHECK_START_PERIOD=180
 ENV DEBIAN_FRONTEND=noninteractive \
     APP=/usr/lib/vacti-engine \
     ENGINE_STATE_DIR=/var/lib/vacti-engine \
     PLAYWRIGHT_BROWSERS_PATH=/usr/lib/vacti-engine/ms-playwright \
     DISPLAY=:0 \
-    VACTI_AUTO_UPDATE=0
+    VACTI_AUTO_UPDATE=0 \
+    VACTI_HEALTHCHECK_START_PERIOD=${VACTI_HEALTHCHECK_START_PERIOD}
 
 # Fail the transfer pipe if the producing tar errors (otherwise the extracting
 # tar's exit status would mask a partial stream).
@@ -405,8 +413,18 @@ WORKDIR /
 # so Docker HEALTHCHECK + --restart replace Type=notify/WatchdogSec.
 STOPSIGNAL SIGTERM
 # Shell-form CMD is required here for the `||` fallback (exec form cannot express it).
+# The baked --start-period (180s) is the baseline grace; the CMD extends it to
+# VACTI_HEALTHCHECK_START_PERIOD (D4) using the entrypoint's /run boot timestamp, so a
+# THIN image provisioning past 180s stays "starting" instead of flapping unhealthy. If
+# the engine is up -> healthy; else if still inside the (possibly raised) grace window
+# -> healthy (starting); else unhealthy. A missing/zero timestamp falls back to the
+# baked --start-period baseline.
 # hadolint ignore=DL3025
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=4 \
-  CMD pgrep -f "dist/runner/cli.js" >/dev/null || exit 1
+  CMD pgrep -f "dist/runner/cli.js" >/dev/null && exit 0; \
+      sp="${VACTI_HEALTHCHECK_START_PERIOD:-180}"; ts=0; \
+      [ -r /run/vacti-engine.boot-ts ] && ts="$(cat /run/vacti-engine.boot-ts 2>/dev/null || echo 0)"; \
+      now="$(date +%s 2>/dev/null || echo 0)"; \
+      { [ "$ts" -gt 0 ] && [ "$now" -gt 0 ] && [ "$((now - ts))" -lt "$sp" ]; } && exit 0 || exit 1
 
 ENTRYPOINT ["/usr/local/sbin/vacti-docker-entrypoint"]
