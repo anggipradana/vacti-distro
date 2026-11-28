@@ -7,7 +7,7 @@
 # the install-connector.sh one-liner, or a Windows host via install-connector.ps1
 # which registers it as an SCM service.
 #
-# This workflow builds that binary for the five supported os/arch pairs, packages
+# This workflow builds that binary for the six supported os/arch pairs, packages
 # each as a tarball (zip on Windows), writes a SHA256SUMS the install scripts
 # verify against, and publishes everything, plus the install scripts themselves,
 # as assets on the connector-v<version> GitHub release.
@@ -53,6 +53,7 @@ jobs:
           - { goos: darwin,  goarch: amd64, archive: tar.gz }
           - { goos: darwin,  goarch: arm64, archive: tar.gz }
           - { goos: windows, goarch: amd64, archive: zip }
+          - { goos: windows, goarch: arm64, archive: zip }
     steps:
       - uses: actions/checkout@v4
 
@@ -164,7 +165,7 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --title "connector ${TAG#connector-}" \
-              --notes "Native connector binaries for linux/darwin (amd64, arm64) and windows (amd64). Install with connector/scripts/install-connector.sh (Linux/macOS) or install-connector.ps1 (Windows). Verify downloads against SHA256SUMS." \
+              --notes "Native connector binaries for linux/darwin/windows (amd64, arm64). Install with connector/scripts/install-connector.sh (Linux/macOS) or install-connector.ps1 (Windows). Verify downloads against SHA256SUMS." \
               --verify-tag
           fi
           gh release upload "$TAG" release/* --clobber
@@ -230,5 +231,5 @@ jobs:
               echo '```'
             fi
             echo ""
-            echo "Assets: vacti-connector_${VERSION}_{linux,darwin}_{amd64,arm64}.tar.gz, vacti-connector_${VERSION}_windows_amd64.zip, SHA256SUMS, install-connector.sh, install-connector.ps1"
+            echo "Assets: vacti-connector_${VERSION}_{linux,darwin}_{amd64,arm64}.tar.gz, vacti-connector_${VERSION}_windows_{amd64,arm64}.zip, SHA256SUMS, install-connector.sh, install-connector.ps1"
           } >> "$GITHUB_STEP_SUMMARY"
