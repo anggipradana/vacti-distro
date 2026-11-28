@@ -65,8 +65,8 @@ mkdir -p "$OUTDIR"
 base="${VACTI_APT_URL:?VACTI_APT_URL must be set (apt pool base URL)}"
 base="${base%/}/apt"
 
-have_engine()   { compgen -G "${OUTDIR}/vacti-engine_"*.deb >/dev/null 2>&1; }
-have_chromium() { compgen -G "${OUTDIR}/vacti-engine-chromium_"*.deb >/dev/null 2>&1; }
+have_engine()   { compgen -G "${OUTDIR}/vacti-engine_"*_"${ARCH}".deb >/dev/null 2>&1; }
+have_chromium() { compgen -G "${OUTDIR}/vacti-engine-chromium_"*_"${ARCH}".deb >/dev/null 2>&1; }
 
 # --- 1. private apt pool (preferred) -----------------------------------------
 fetch_from_pool() {
