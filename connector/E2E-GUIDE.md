@@ -240,8 +240,16 @@ Troubleshooting:
   from the connector host with `curl` or `nc`.
 - Internal names do not resolve: the connector uses its host's resolver (`/etc/resolv.conf`, or the OS resolver on
   Windows and macOS). Set `VACTI_CONNECTOR_DNS=<ip>` in the connector's environment to override it.
-- ICMP shows `unavailable`: unprivileged ping is not permitted on the connector host (Linux
-  `net.ipv4.ping_group_range`, never on Windows). TCP and UDP still work.
+- ICMP shows `unavailable`: unprivileged ping is not permitted on the connector host. Per OS:
+  - **Linux**: the running uid must be inside `net.ipv4.ping_group_range` (unprivileged ICMP
+    datagram sockets). Widen it (`sysctl -w net.ipv4.ping_group_range="0 2147483647"`) or run the
+    unit with `CAP_NET_RAW`.
+  - **macOS**: unprivileged ICMP datagram sockets (`SOCK_DGRAM`/`IPPROTO_ICMP`) are allowed for
+    all users by default - no sysctl and no root needed - so ping normally works out of the box
+    under the `id.vacti.connector` launchd job. If it still reads `unavailable`, something
+    upstream (a host firewall or the network path) is dropping ICMP, not the connector.
+  - **Windows**: unprivileged ICMP is never available to the service; TCP and UDP still work.
+  TCP and UDP checks are unaffected on every OS.
 
 ## Step 7: engagement ends (complete, fail, stop or cancel)
 
