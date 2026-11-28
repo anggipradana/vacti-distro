@@ -20,8 +20,10 @@
 #      File/@ovf:size when present) == the actual VMDK byte size.
 #   6. The .mf SHA256 entries match the actual file hashes.
 #   7. The VMDK is a readable VMDK (qemu-img info).
-#   8. Default RAM is the shipped baseline (>= MIN_RAM_MB, default 10240) - guards
-#      the 10GB engine capacity floor from silently regressing.
+#   8. Default RAM is the shipped baseline (>= MIN_RAM_MB, default 8192) - guards
+#      the engine capacity floor from silently regressing. Lowered 10240 -> 8192 so
+#      the shipped OVAs import + boot on 8GB hosts (Raspberry Pi 5, base-model M-series
+#      Macs); the engine capacity model scales its subagent count to available RAM.
 #   9. Disk/@ovf:capacity (x capacityAllocationUnits) == the VMDK's VIRTUAL size
 #      (qemu-img, top-level node) and > populatedSize. Fail-closed: a missing,
 #      non-numeric or file-size-valued capacity (the 5.8GB-on-100GB bug VirtualBox
@@ -34,10 +36,10 @@
 #
 # Usage: validate-ovf.sh <artifact.ova> [<artifact.ova> ...]
 #   OVF_XSD=/path/to/dsp8023.xsd  -> also run xmllint --schema (optional)
-#   MIN_RAM_MB=10240              -> minimum advertised RAM (default 10240)
+#   MIN_RAM_MB=8192               -> minimum advertised RAM (default 8192)
 set -euo pipefail
 
-MIN_RAM_MB="${MIN_RAM_MB:-10240}"
+MIN_RAM_MB="${MIN_RAM_MB:-8192}"
 FAIL=0
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
