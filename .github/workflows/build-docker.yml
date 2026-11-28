@@ -43,9 +43,9 @@ on:
         required: false
         default: "1"
       ctf_arsenal:
-        description: "Also bake the CTF tool set (1) or not (0)"
+        description: "Also bake the CTF tool set (1, publishes a :-ctf variant tag) or lean (0, the default; :latest stays lean)"
         required: false
-        default: "1"
+        default: "0"
       allow_legacy_release:
         description: "Override the guard that refuses release=0.1.0 / < 0.2.400 (pushes only :<ver>, never :latest)"
         required: false
@@ -66,9 +66,13 @@ concurrency:
   group: build-docker-${{ github.event.inputs.release || github.event.client_payload.release || github.ref_name }}
   cancel-in-progress: false
 
+# D2: the DEFAULT published image is lean (full web+infra arsenal, NO CTF tool set), so
+# :latest / :<ver> are the smaller image most pulls want. Requesting ctf_arsenal=1
+# publishes the full image under a parallel :-ctf variant tag (:<ver>-ctf, :latest-ctf);
+# nothing is lost, and :latest never silently becomes the giant image again.
 env:
   VACTI_FULL_ARSENAL: ${{ github.event.inputs.full_arsenal || '1' }}
-  VACTI_CTF_ARSENAL: ${{ github.event.inputs.ctf_arsenal || '1' }}
+  VACTI_CTF_ARSENAL: ${{ github.event.inputs.ctf_arsenal || '0' }}
   VACTI_APT_URL: ${{ vars.VACTI_APT_URL }}
 
 jobs:
@@ -103,12 +107,18 @@ jobs:
           V="${ENGINE_REF:-$REL}"
           V="${V#v}"
           IMAGE="ghcr.io/anggipradana/vacti-distro"
+          # D2: a CTF bake publishes under a parallel :-ctf variant so the lean build
+          # keeps the plain :<ver> / :latest tags. The variant suffix threads through the
+          # candidate, the promoted version tag and the moving tag alike.
+          VARIANT=""
+          [ "${VACTI_CTF_ARSENAL:-0}" = "1" ] && VARIANT="-ctf"
           {
             echo "version=${V}"
             echo "image=${IMAGE}"
-            echo "candidate=${IMAGE}:rc-${V}"
+            echo "variant=${VARIANT}"
+            echo "candidate=${IMAGE}:rc-${V}${VARIANT}"
           } >> "$GITHUB_OUTPUT"
-          echo "[docker] candidate ${IMAGE}:rc-${V}; promotes to ${IMAGE}:${V} (+ :latest when not legacy) after the smoke"
+          echo "[docker] candidate ${IMAGE}:rc-${V}${VARIANT}; promotes to ${IMAGE}:${V}${VARIANT} (+ :latest${VARIANT} when not legacy) after the smoke"
 
       - name: Pre-build resolve (the pinned engine version must be in the apt pool for both arches)
         # HARD gate (was continue-on-error): with the engine pinned (P1-2) the Docker
@@ -249,11 +259,15 @@ jobs:
           IMAGE: ${{ steps.ver.outputs.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
           V: ${{ steps.ver.outputs.version }}
+          VARIANT: ${{ steps.ver.outputs.variant }}
           PUBLISH_LATEST: ${{ steps.rel.outputs.publish_latest }}
         run: |
           set -euo pipefail
-          tags=(-t "${IMAGE}:${V}")
-          [ "$PUBLISH_LATEST" = "true" ] && tags+=(-t "${IMAGE}:latest")
+          # D2: lean bake -> :<ver> (+ :latest); CTF bake -> :<ver>-ctf (+ :latest-ctf).
+          # The moving tag carries the same variant suffix, so a CTF run never clobbers
+          # the lean :latest and vice versa.
+          tags=(-t "${IMAGE}:${V}${VARIANT}")
+          [ "$PUBLISH_LATEST" = "true" ] && tags+=(-t "${IMAGE}:latest${VARIANT}")
           docker buildx imagetools create "${tags[@]}" "${IMAGE}@${DIGEST}"
-          docker buildx imagetools inspect "${IMAGE}:${V}"
-          echo "[docker] promoted ${IMAGE}@${DIGEST} -> ${IMAGE}:${V}$([ "$PUBLISH_LATEST" = "true" ] && echo ' + :latest')"
+          docker buildx imagetools inspect "${IMAGE}:${V}${VARIANT}"
+          echo "[docker] promoted ${IMAGE}@${DIGEST} -> ${IMAGE}:${V}${VARIANT}$([ "$PUBLISH_LATEST" = "true" ] && echo " + :latest${VARIANT}")"
