@@ -83,7 +83,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0   # full history so the forbidden-pattern guard can scan the commit range
 
@@ -100,7 +100,7 @@ jobs:
           .ci/check-forbidden.sh
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

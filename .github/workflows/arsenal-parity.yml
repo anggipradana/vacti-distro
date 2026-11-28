@@ -57,7 +57,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Simulate arsenal install on Debian trixie + pinned Kali (${{ matrix.arch }})
         run: |
@@ -89,7 +89,7 @@ jobs:
 
       - name: Upload per-arch parity report artifact
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: arsenal-parity-${{ matrix.arch }}
           path: |
@@ -104,16 +104,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download amd64 report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: arsenal-parity-amd64
           path: generated-reports
 
       - name: Download arm64 report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: arsenal-parity-arm64
           path: generated-reports
@@ -138,7 +138,7 @@ jobs:
 
       - name: Upload parity verdict artifact
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: arsenal-parity-diff
           path: generated-reports/arsenal-parity-diff.md
